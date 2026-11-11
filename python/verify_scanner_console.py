@@ -2,6 +2,7 @@
 
 --serve-ui PATH serves the built RingwinUi against deterministic canonical input
 and the real offline Zig authority probe. All state and login material are temporary.
+--development skips authentication only in this loopback offline fixture.
 """
 from dataclasses import fields, is_dataclass, replace
 from fractions import Fraction as F
@@ -91,8 +92,15 @@ def browser_inputs(observations, plan, scale):
     return observations, replace(scaled, policy=policy, estimator=estimator, calibration=artifact)
 
 
+class DevelopmentControlPlaneApp(control_plane_web.ControlPlaneApp):
+    """Authentication-free app used only by the explicitly selected offline fixture."""
+
+    def authorize(self, headers):
+        return 200, {"ok": True, "token_hash": "offline-development"}
+
+
 class Fixture:
-    def __init__(self, directory, ui_path=None):
+    def __init__(self, directory, ui_path=None, *, development=False):
         self.directory = Path(directory)
         self.now = T
         self.wall_offset_ms = 0
@@ -122,7 +130,8 @@ class Fixture:
         self.source = CanonicalSource(observations, assets=(dict(identity="1", code="USDT", atomic_scale=6),
                                                           dict(identity=str(0x425443), code="BTC", atomic_scale=8)))
         self.console = self.new_console()
-        self.app = control_plane_web.ControlPlaneApp(directory, self.channel, scanner_console=self.console, ui_path=ui_path,
+        app_type = DevelopmentControlPlaneApp if development else control_plane_web.ControlPlaneApp
+        self.app = app_type(directory, self.channel, scanner_console=self.console, ui_path=ui_path,
             clock=lambda: int(time.time())+self.owner_offset)
         self.app.setup(PASSPHRASE)
         self.server = control_plane_web.serve(self.app)
@@ -223,9 +232,12 @@ def verify(fixture):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--serve-ui")
+    parser.add_argument("--development", action="store_true", help="Skip authentication in the loopback offline development fixture only")
     args = parser.parse_args()
+    if args.development and not args.serve_ui:
+        parser.error("--development requires --serve-ui")
     with tempfile.TemporaryDirectory(prefix="ringwin-scanner-16-") as directory:
-        fixture = Fixture(directory, args.serve_ui)
+        fixture = Fixture(directory, args.serve_ui, development=args.development)
         try:
             if args.serve_ui:
                 print(json.dumps(dict(port=fixture.server.server_port, passphrase=PASSPHRASE,

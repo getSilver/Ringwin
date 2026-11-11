@@ -17,6 +17,32 @@ from test_arbitrage_evaluation import T
 
 
 class ConsoleTests(unittest.TestCase):
+    def test_offline_development_http_does_not_require_login(self):
+        from verify_scanner_console import Fixture
+        with tempfile.TemporaryDirectory() as directory:
+            node = Fixture(directory, development=True)
+            self.addCleanup(node.close)
+            client = http.client.HTTPConnection("127.0.0.1", node.server.server_port, timeout=5)
+            self.addCleanup(client.close)
+            client.request("GET", "/api/scanner")
+            response = client.getresponse()
+            self.assertEqual(response.status, 200)
+            view = json.loads(response.read())["result"]
+            self.assertEqual(view["desired"], "stopped")
+            scopes = [{"venue": row["venue"], "product": row["product"], "environment": row["environment"],
+                       "include_assets": [], "exclude_assets": [], "quote_asset": None,
+                       "min_depth_atoms": None, "max_depth_atoms": None, "new_instruments": False}
+                      for row in view["catalogue"]]
+            client.request("POST", "/api/scanner", json.dumps({"operation": "configure", "payload": {
+                "expected_version": view["config_version"], "scopes": scopes}}), {"Content-Type": "application/json"})
+            response = client.getresponse()
+            self.assertEqual(response.status, 200, response.read())
+            client.request("POST", "/api/scanner", json.dumps({"operation": "start"}),
+                           {"Content-Type": "application/json"})
+            response = client.getresponse()
+            self.assertEqual(response.status, 200)
+            self.assertEqual(json.loads(response.read())["result"]["desired"], "running")
+
     def make_console(self, directory, now=None):
         observations, plan = fixture()
         now = now if now is not None else [T]
