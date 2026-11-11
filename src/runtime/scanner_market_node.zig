@@ -1,5 +1,9 @@
 //! Read-only public feed worker. Bounded private pipes; no execution adapter.
 const std = @import("std");
+const builtin = @import("builtin");
+const durable = @import("../persistence/durable_store.zig");
+const raw_ingress = @import("../persistence/raw_ingress.zig");
+const capture = @import("../persistence/public_market_capture.zig");
 const c = @import("../model/canonical_event.zig");
 const market = @import("../market/market_feed_adapter.zig");
 const okx = @import("../adapters/okx/okx_market_feed.zig");
@@ -26,51 +30,37 @@ const Request = struct {
     schema: u16,
     session: u64,
     sequence: u64,
-    operation: enum { metadata, subscribe, book, disconnected, expired },
+    operation: enum { metadata, subscribe, book, disconnected, expired, audit },
     epoch: u64,
     monotonic_ns: u64,
     utc_ns: u64,
     payload: []const u8,
 };
 const Raw = struct {
-    io: std.Io,
-    file: std.Io.File,
-    sequence: u64 = 0,
-    failed: bool = false,
-    bytes_written: u64 = 0,
-    budget: u64,
-    environment: market.Environment,
-    session: u64,
+    sink: capture.Sink,
+    allocator: std.mem.Allocator,
     configuration: Configuration,
-    digest: [32]u8 = @splat(0),
     fn append(self: *Raw, header: anytype, bytes: []const u8) !u64 {
-        if (self.failed or self.bytes_written + bytes.len + 2048 > self.budget) return error.Unavailable;
-        var buffer: [4096]u8 = undefined;
-        var out = self.file.writerStreaming(self.io, &buffer);
-        try std.json.Stringify.value(.{ .environment = self.environment, .session = self.session, .sequence = self.sequence + 1, .configuration = self.configuration, .record = header }, .{}, &out.interface);
-        try out.interface.writeByte('\n');
-        try out.interface.writeAll(bytes);
-        try out.interface.writeByte('\n');
-        try out.interface.flush();
-        try self.file.sync(self.io);
-        self.bytes_written += bytes.len + 2048;
-        self.sequence += 1;
-        self.digest = header.sha256;
-        return self.sequence;
+        const metadata = try std.json.Stringify.valueAlloc(self.allocator, .{ .configuration = self.configuration, .record = header }, .{});
+        defer self.allocator.free(metadata);
+        return self.sink.append(self.allocator, metadata, .{
+            .source_session = self.configuration.session,
+            .receive_time_utc_ns = header.times.receive_time_utc_ns,
+            .monotonic_time_ns = header.times.monotonic_time_ns,
+            .wall_time_utc_ns = header.times.wall_time_utc_ns,
+            .byte_len = @intCast(bytes.len),
+            .sha256 = header.sha256,
+        }, bytes);
     }
     fn ok(ptr: *anyopaque, header: protocol.RawIngressRecord, bytes: []const u8) protocol.RawSinkError!u64 {
         const self: *Raw = @ptrCast(@alignCast(ptr));
-        return self.append(header, bytes) catch {
-            self.failed = true;
-            return error.Unavailable;
-        };
+        const metadata = std.json.Stringify.valueAlloc(self.allocator, .{ .configuration = self.configuration, .record = header }, .{}) catch return error.Unavailable;
+        defer self.allocator.free(metadata);
+        return self.sink.append(self.allocator, metadata, header, bytes);
     }
     fn hyper(ptr: *anyopaque, header: hl.RawRecord, bytes: []const u8) hl.RawError!u64 {
         const self: *Raw = @ptrCast(@alignCast(ptr));
-        return self.append(header, bytes) catch {
-            self.failed = true;
-            return error.Unavailable;
-        };
+        return self.append(header, bytes) catch return error.Unavailable;
     }
 };
 
@@ -94,8 +84,12 @@ pub fn main(init: std.process.Init) !void {
         (cfg.venue == 1 and cfg.environment != .production and cfg.environment != .demo) or
         (cfg.venue == 21 and cfg.environment != .production and cfg.environment != .testnet)) return error.InvalidConfiguration;
     if (cfg.raw_budget_bytes < 2048 or cfg.raw_budget_bytes > 4 * 1024 * 1024) return error.InvalidRawBudget;
-    var raw: Raw = .{ .io = init.io, .budget = cfg.raw_budget_bytes, .configuration = cfg, .environment = cfg.environment, .session = cfg.session, .file = try std.Io.Dir.cwd().createFile(init.io, raw_path, .{ .exclusive = true }) };
-    defer raw.file.close(init.io);
+    const store = try init.gpa.create(durable.LinuxFileAdapter);
+    defer init.gpa.destroy(store);
+    store.* = .{ .dir = undefined };
+    if (builtin.os.tag == .windows) try store.initWindowsVerification(init.io, raw_path) else try store.initLinux(init.io, raw_path);
+    defer store.close(init.io);
+    var raw: Raw = .{ .allocator = init.gpa, .configuration = cfg, .sink = .{ .durable_sink = try raw_ingress.DurableSink.init(store.interface(), init.io, .{ .domain = .raw_ingress, .id = cfg.session }), .budget = cfg.raw_budget_bytes } };
     var ofeed = okx.OkxMarketFeed.init(.{ .ptr = &raw, .append_fn = Raw.ok });
     ofeed.decoder.rest_book_instrument = cfg.okx_instrument;
     var hfeed: hl.HyperliquidMarketFeed = undefined;
@@ -120,6 +114,14 @@ pub fn main(init: std.process.Init) !void {
         if (r.schema != 1 or r.session != cfg.session or r.sequence != sequence + 1 or r.monotonic_ns < last_time) return error.InvalidInputIdentity;
         sequence = r.sequence;
         last_time = r.monotonic_ns;
+        if (r.operation == .audit) {
+            var audit: capture.Audit = .{ .allocator = init.gpa };
+            try audit.run(store.interface(), init.io, raw.sink.durable_sink.stream);
+            try std.json.Stringify.value(.{ .schema = 1, .session = cfg.session, .sequence = sequence, .captures = audit.captures, .records = audit.records, .digest = std.fmt.bytesToHex(audit.last_digest, .lower) }, .{}, &output.interface);
+            try output.interface.writeByte('\n');
+            try output.interface.flush();
+            continue;
+        }
         const times: hl.Times = .{ .receive_time_utc_ns = r.utc_ns, .wall_time_utc_ns = r.utc_ns, .monotonic_time_ns = r.monotonic_ns };
         var failure: ?[]const u8 = null;
         if (cfg.venue == 1) {
@@ -150,6 +152,7 @@ pub fn main(init: std.process.Init) !void {
             .book => .book,
             .disconnected => .disconnected,
             .expired => .expired,
+            .audit => unreachable,
         }, times, r.payload) catch |err| {
             failure = @errorName(err);
         };
@@ -183,8 +186,16 @@ pub fn main(init: std.process.Init) !void {
                 payload = &hex;
             }
         }
-        try std.json.Stringify.value(.{ .schema = 1, .session = cfg.session, .sequence = sequence, .healthy = healthy, .depth = payload, .failure = failure, .raw_sequence = raw.sequence, .raw_sha256 = std.fmt.bytesToHex(raw.digest, .lower) }, .{}, &output.interface);
+        try std.json.Stringify.value(.{ .schema = 1, .session = cfg.session, .sequence = sequence, .healthy = healthy, .depth = payload, .failure = failure, .raw_sequence = raw.sink.durable_sink.next_sequence - 1, .raw_sha256 = std.fmt.bytesToHex(raw.sink.digest, .lower) }, .{}, &output.interface);
         try output.interface.writeByte('\n');
         try output.interface.flush();
     }
+}
+
+test {
+    _ = okx;
+    _ = hl;
+    _ = projection;
+    _ = market;
+    _ = capture;
 }

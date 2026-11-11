@@ -68,6 +68,7 @@ class ScannerRuntime:
         self.directory.mkdir(parents=True, exist_ok=True)
         self.clock, self.utc_clock, self.transport = clock, utc_clock, transport or PublicTransport()
         self.lock = threading.RLock()
+        self.poll_lock = threading.Lock()
         self.bindings, entries = {}, []
         assets = {int(a["identity"]): a for a in configuration["assets"]}
         for row in bindings:
@@ -149,7 +150,7 @@ class ScannerRuntime:
     def _open(self, identity):
         row = self.bindings[identity]
         session = secrets.randbelow((1<<53)-1)+1
-        if sum(p.stat().st_size for p in self.directory.glob("market-*.raw")) >= 64 * 1024 * 1024:
+        if sum(p.stat().st_size for p in self.directory.glob("market-*.raw/**/*") if p.is_file()) >= 64 * 1024 * 1024:
             raise OSError("scanner RawIngress capacity exhausted; archive files before restarting")
         path = self.directory / ("market-" + secrets.token_hex(16) + ".raw")
         executable = ROOT/"zig-out/bin"/("ringwin-scanner-market.exe" if os.name == "nt" else "ringwin-scanner-market")
@@ -182,7 +183,17 @@ class ScannerRuntime:
             raise ValueError("native market response identity")
         return result
 
+    def audit(self):
+        """Read and validate committed RawIngress through the native replay interface."""
+        with self.poll_lock:
+            return {str(identity): self._input(worker, "audit", "")
+                    for identity, worker in tuple(self.workers.items()) if worker is not None}
+
     def step(self):
+        with self.poll_lock:
+            self._step()
+
+    def _step(self):
         """One bounded poll; deterministic transport/clock may drive this in acceptance."""
         with self.lock:
             selected = tuple(self.workers.items())
@@ -221,7 +232,7 @@ class ScannerRuntime:
                         entry = self.source.registered[identity]
                         self.observations[identity] = Observation(entry.venue, entry.account, entry.kind, entry.rules,
                             bytes.fromhex(payload), result["healthy"], entry.environment)
-                    self.evidence[identity] = dict(result, raw_path=worker[3], requested_environment=row["environment"],
+                    self.evidence[identity] = dict(result, venue=str(row["venue"]), instrument=row["instrument"], raw_path=worker[3], requested_environment=row["environment"],
                         actual_environment=ROUTES[row["venue"], row["environment"]][1], input_kind=getattr(self.transport, "input_kind", "venue_public"))
                     self.failures.pop(identity, None)
             except (OSError, ValueError, KeyError) as error:
