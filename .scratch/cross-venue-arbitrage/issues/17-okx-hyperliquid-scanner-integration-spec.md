@@ -155,4 +155,4 @@ Triage:
 
 ## Answer
 
-2026-11-12：五阶段内部整合完成，状态 resolved。正式控制面、只读公共行情 transport、两家实际适配器、规范投影、扫描计算及 UI 全链路通过；见[内部验收记录](../scanner-integration-evidence.md)和[启动说明](../../../docs/scanner-runtime.md)。HTTP 最终 17/17、浏览器 6/6、受影响 Zig Debug／ReleaseSafe 各 18/18，Python 全量 391 项（3 跳过）、Zig ReleaseSafe 全量 889/889。全量 Debug 长运行未完成，未计通过。双轴审查 P2 均修复，补审无剩余硬性问题。在线行情仍独立未验收，交易及 12–15 资格不变；没有部署、下单或 GitHub 同步。
+2026-11-12：五阶段内部整合完成，状态 resolved。正式控制面、只读公共行情 transport、两家实际适配器、规范投影、扫描计算及 UI 全链路通过；见[内部验收记录](../scanner-integration-evidence.md)和[启动说明](../../../docs/scanner-runtime.md)。HTTP 最终 17/17、浏览器 6/6、受影响 Zig Debug／ReleaseSafe 各 18/18，Python 全量 391 项（3 跳过）、Zig Debug／ReleaseSafe 全量均 889/889。Debug 补验退出码 0，bounded Host I/O 也通过；长墙钟耗时包含用户已确认的系统休眠，详细时序与原始日志见验收记录。双轴审查 P2 均修复，补审无剩余硬性问题。在线行情仍独立未验收，交易及 12–15 资格不变；没有部署、下单或 GitHub 同步。
