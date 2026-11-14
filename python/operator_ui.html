@@ -55,7 +55,7 @@ let SHARDS = [];
 const HIGH_RISK = ["enable_trading","de_risk","stop_keep_positions","resolve_latch","kill_switch"];
 const LIFECYCLE_HIGH_RISK = ["deploy_release","forward_rollback","credential_activate",
   "credential_revoke","failover"];
-const PAGES = ["总览","持仓挂单","风险与保证金","盈亏","操作台","命令历史"];
+const PAGES = ["总览","持仓挂单","风险与保证金","盈亏","操作台","命令历史","交易所凭证"];
 let currentPage = 0;
 
 async function api(method, path, body) {
@@ -68,10 +68,10 @@ async function api(method, path, body) {
 
 // ---------- 认证 ----------
 async function tryBoot() {
-  const [status] = await api("GET", "/api/projection");
+  const [status] = await api("GET", "/api/credentials");
   if (status === 200) { document.getElementById("login").style.display="none";
                         document.getElementById("shell").style.display="block";
-                        poll(); return true; }
+                        render(); poll(); return true; }
   document.getElementById("login").style.display="block"; return false;
 }
 async function doLogin() {
@@ -200,7 +200,47 @@ function pageOps(){
 function pageRecords(){
   return `<h2>命令历史</h2><div class="panel"><div id="records">加载中…</div></div>`;
 }
-const RENDERERS = [pageOverview,pageOrders,pageMargin,pagePnl,pageOps,pageRecords];
+function pageCredentials(){
+  return `<h2>交易所凭证</h2><section class="panel">
+    <p>在本机原生程序中录入并加密，随后选择生成的 .credential 文件。导入后等待目标节点解锁验证；激活沿用操作台的凭证生命周期流程。</p>
+    <label for="credential-upload">加密凭证包</label>
+    <input id="credential-upload" type="file" accept=".credential">
+    <button id="credential-import" onclick="importCredentialPackage()">导入加密包</button>
+    <p id="credential-result" role="status"></p>
+    <table><thead><tr><th>交易所</th><th>账户</th><th>环境</th><th>用途</th><th>凭证标识</th><th>版本</th><th>状态</th><th>包 SHA-256</th></tr></thead>
+    <tbody id="credential-packages"></tbody></table>
+    <p class="dim">包内信息在节点验证前仅供核对；导入不会授予交易权限。</p>
+  </section>`;
+}
+async function loadCredentialPackages(){
+  try {
+    const [status, body] = await api("GET", "/api/credentials");
+    const table = document.getElementById("credential-packages"); if (!table) return;
+    if (status !== 200) { table.textContent = "凭证包暂不可读取"; return; }
+    table.innerHTML = body.packages.map(p => `<tr>${[p.venue,p.account,p.environment,p.kind,p.credential_id,p.version,"待节点解锁验证",p.package_sha256].map(v => `<td>${escaped(v)}</td>`).join("")}</tr>`).join("");
+  } catch (_) {
+    const table = document.getElementById("credential-packages");
+    if (table) table.textContent = "凭证包查询失败";
+  }
+}
+async function importCredentialPackage(){
+  const input = document.getElementById("credential-upload");
+  const result = document.getElementById("credential-result");
+  const button = document.getElementById("credential-import");
+  const file = input.files[0];
+  if (!file || file.size < 268 || file.size > 780) { result.textContent = "请选择有效大小的加密凭证包"; return; }
+  button.disabled = true;
+  try {
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    if (String.fromCharCode(...bytes.slice(0,4)) !== "CRD4" || bytes[4] !== 2 || bytes[5] !== 0) { result.textContent = "需要绑定交易所的 CRD4 v2 加密包"; return; }
+    const [status] = await api("POST", "/api/credentials", {encrypted_package: btoa(String.fromCharCode(...bytes))});
+    result.textContent = status === 200 || status === 201 ? "已导入，等待目标节点解锁验证" : "导入失败，请检查会话及加密包";
+    input.value = "";
+    await loadCredentialPackages();
+  } catch (_) { result.textContent = "导入请求失败"; }
+  finally { button.disabled = false; }
+}
+const RENDERERS = [pageOverview,pageOrders,pageMargin,pagePnl,pageOps,pageRecords,pageCredentials];
 function drawNav(){
   document.getElementById("nav").innerHTML = PAGES.map((n,i)=>
     `<div onclick="go(${i})" style="padding:9px 10px;border-radius:6px;cursor:pointer;margin-bottom:4px;
@@ -210,16 +250,18 @@ function go(i){ currentPage=i; render(); }
 let feedLines = [];
 function render(){
   drawNav();
+  if (currentPage === 6 && document.getElementById("credential-upload")) { loadCredentialPackages(); return; }
   document.getElementById("main").innerHTML = RENDERERS[currentPage]();
   if (currentPage === 4) { renderFeed(); loadPackages(); loadInstances(); }
   if (currentPage === 5) loadRecords();
+  if (currentPage === 6) loadCredentialPackages();
 }
 async function loadRecords(){
   const [status, body] = await api("GET","/operator-records");
   const el = document.getElementById("records"); if(!el) return;
   el.innerHTML = "<table><tr><th>时间</th><th>命令</th><th>目标</th><th>警示</th></tr>" +
     body.records.map(r=>`<tr><td>${new Date(r.recorded_at*1000).toTimeString().slice(0,8)}</td>
-      <td>${r.kind}</td><td>@${r.target_identity}</td><td>${r.risk_warning_identity??"—"}</td></tr>`).join("") + "</table>";
+      <td>${escaped(r.kind)}</td><td>@${escaped(r.target_identity ?? r.package_sha256 ?? "—")}</td><td>${escaped(r.risk_warning_identity ?? "—")}</td></tr>`).join("") + "</table>";
 }
 function escaped(value){
   const el = document.createElement("span");

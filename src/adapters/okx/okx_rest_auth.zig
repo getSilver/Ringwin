@@ -164,6 +164,27 @@ pub fn headers(credentials: *const Credentials, timestamp: []const u8, method: [
     try putHeader(&result, 4, "x-simulated-trading: ", "1");
     return result;
 }
+
+/// Temporary auth owners and the returned headers both use protected memory.
+pub fn storedHeaders(session: *@import("../../security/credential_store.zig").ApiSession, io: std.Io, guard: ?*@import("../../runtime/failover.zig").GatewayLeaseGuard, increases_risk: bool, timestamp: []const u8, method: []const u8, path: []const u8, body: []const u8) !Headers {
+    if (session.venue() != .okx) return error.CredentialVenueMismatch;
+    const Context = struct {
+        timestamp: []const u8,
+        method: []const u8,
+        path: []const u8,
+        body: []const u8,
+        output: ?Headers = null,
+        pub fn use(self: *@This(), api: *const @import("../../security/credential_store.zig").ApiCredentials) !void {
+            var owner = try Credentials.init(api.api_key[0..api.api_key_len], api.secret_key[0..api.secret_key_len], api.passphrase[0..api.passphrase_len]);
+            defer owner.deinit();
+            self.output = try headers(&owner, self.timestamp, self.method, self.path, self.body);
+        }
+    };
+    var context: Context = .{ .timestamp = timestamp, .method = method, .path = path, .body = body };
+    errdefer if (context.output) |*output| output.clear();
+    try session.useNow(io, guard, increases_risk, &context);
+    return context.output.?;
+}
 fn putHeader(result: *Headers, index: usize, prefix: []const u8, value: []const u8) !void {
     for (value) |byte| if (byte == 0 or byte == '\r' or byte == '\n') return error.InvalidHeaderValue;
     const length = prefix.len + value.len;

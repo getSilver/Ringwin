@@ -3,6 +3,9 @@
 本手册用于新增 Venue、扩展现有 Adapter 能力及审查接入边界。目标是让协议变化集中在
 `src/adapters/<venue>/`，核心继续依赖 Venue 中立合同。它落实既有架构，不授予真实交易权限。
 
+长期凭证使用 [CredentialStore 录入与控制面合同](../credential-enrollment.md)，复用加密包、
+原生解锁和 Gateway 会话；不新增 `.env`、明文配置或独立秘密加载器。
+
 ## 1. 开始前：确认范围与依据
 
 1. 阅读 [GLOSSARY](../../GLOSSARY.md)、[ADR 0001](../adr/0001-separate-venue-execution-and-market-feed-seams.md)

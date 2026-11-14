@@ -55,6 +55,9 @@ pub fn main(init: std.process.Init) !void {
     defer args.deinit();
     const executable = args.next() orelse return error.MissingExecutable;
     if (args.next()) |argument| {
+        if (std.mem.eql(u8, argument, "--credential")) {
+            return @import("runtime/credential_enrollment.zig").run(init, &args);
+        }
         if (std.mem.eql(u8, argument, "--hyperliquid-offline")) {
             if (args.next() != null) return error.UnknownArgument;
             try @import("testing/acceptance/venues/hyperliquid_execution_acceptance.zig").runOffline(init.gpa);

@@ -394,18 +394,18 @@ _Avoid_: ProductionRole, Windows service, public API server
 _Avoid_: ProductionQualified, production_qualification, ProductionProcessChain
 
 **CredentialStore**:
-按 CredentialKind 分离保存 observation 与 execution 加密凭证的 Linux 人工解锁 seam；它认证固定
-metadata、执行 Argon2id/XChaCha20-Poly1305、持久化单向生命周期，并在失败时关闭准入。
+保存绑定唯一 Venue、ExchangeAccount、环境和用途的加密 TradingCredential，隔离观察与执行用途，
+保留各版本的单向生命周期，并由 SystemOwner 使用独立口令解锁的静态存储。
 _Avoid_: Environment secret, argv password, Vault auto-unseal
 
 **ObservationCredential**:
-只允许账户读取和对账、绑定 production environment/account/node/egress IP 且不得形成订单发送能力的
+只允许账户读取和对账、绑定唯一环境、账户、节点与固定出口且不得形成订单发送能力的
 凭证；它可以使节点进入 Ready，但不能调用 EnableTrading。
 _Avoid_: Read-only API key by convention, execution credential, Demo credential
 
 **ExecutionCredential**:
-与 ObservationCredential 使用独立文件、metadata、生命周期和授权的凭证类型；本首版只冻结其
-`can_withdraw=false`、固定出口 IP 和独立存储边界，不授予本票的发送能力。
+与 ObservationCredential 使用独立身份、生命周期和授权，仅允许执行网关读取账户事实与交易、
+不得提现或管理账户且必须绑定授权节点与执行安全栅栏的凭证；持有凭证本身不授予交易权限。
 _Avoid_: Shared API key, reusable testnet key, unrestricted secret
 
 **ProtectedSecretMemory**:
@@ -415,7 +415,7 @@ _Avoid_: Heap secret, log copy, process environment
 
 **SecurityAdmission**:
 在 CredentialStore metadata、当前节点上下文、有效期、保护内存自检和能力 allowlist 全部通过后
-形成的有界准入结果；票 04 的结果只能是 Ready/read-only，不等同于 EnableTrading。
+形成的有界准入结果；它只允许凭证用途内的能力，不等同于 EnableTrading。
 _Avoid_: Health check, owner boolean, trading authorization
 
 **DurableStore**:

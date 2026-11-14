@@ -53,6 +53,20 @@ pub fn build(b: *std.Build) void {
     exe.stack_size = 64 * 1024 * 1024;
     b.installArtifact(exe);
 
+    const credential_enrollment = b.addExecutable(.{
+        .name = "ringwin-credential",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/entry.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    const credential_options = b.addOptions();
+    credential_options.addOption(usize, "index", 151);
+    credential_enrollment.root_module.addOptions("entry_options", credential_options);
+    credential_enrollment.stack_size = 64 * 1024 * 1024;
+    b.installArtifact(credential_enrollment);
+
     const candidate = b.addExecutable(.{
         .name = "ringwin-strategy-candidate",
         .root_module = b.createModule(.{
