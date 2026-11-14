@@ -249,7 +249,8 @@ class ControlPlaneApp:
 
     def authorize(self, headers: dict) -> tuple[int, dict]:
         clock = self.clock
-        raw_cookie = headers.get("Cookie", "")
+        headers = {key.lower(): value for key, value in headers.items()}
+        raw_cookie = headers.get("cookie", "")
         token = ""
         try:
             jar = http_cookies.SimpleCookie(raw_cookie)
@@ -261,7 +262,7 @@ class ControlPlaneApp:
             return 401, {"ok": False, "error": "unauthenticated"}
         token_hash = hashlib.sha256(token.encode()).hexdigest()
         expected_csrf = self.csrf_by_token_hash.get(token_hash)
-        provided_csrf = headers.get(CSRF_HEADER, "")
+        provided_csrf = headers.get(CSRF_HEADER.lower(), "")
         if not expected_csrf or not hmac.compare_digest(expected_csrf, provided_csrf):
             return 403, {"ok": False, "error": "csrf check failed"}
         if not self.sessions.renew(token, clock):
@@ -308,7 +309,11 @@ class ControlPlaneApp:
             command["command_identity"] = secrets.randbits(62) | 1
             command_identity = command["command_identity"]
         if "expires_at" not in command:
-            command["expires_at"] = self.clock() + 300
+            if command_identity in self._command_results:
+                previous, _ = self._command_results[command_identity]
+                command["expires_at"] = json.loads(previous)["expires_at"]
+            else:
+                command["expires_at"] = self.clock() + 300
         fingerprint = json.dumps(command, sort_keys=True, separators=(",", ":"))
         if command_identity is not None and command_identity in self._command_results:
             previous, response = self._command_results[command_identity]
