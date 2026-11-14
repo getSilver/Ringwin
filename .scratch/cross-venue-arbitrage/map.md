@@ -17,6 +17,8 @@ Status: open
 - 交易范围、资金与数量、费用、资产身份、执行失败、库存和恢复均有明确规则。
 - 每项规则有正常及异常场景的可检查结果。
 - 03–11通过Python公开接口、数学验证及离线合同回放后，可标记策略开发完成。
+- 16 的扫描运行、历史和 Web 展示真实实施与集成另行验收；独立 UI Demo 不代表功能已接通。
+- [17 OKX／Hyperliquid 内部整合](issues/17-okx-hyperliquid-scanner-integration-spec.md)以正式内部链路和确定性协议夹具独立验收；交易所在线行情数据验收另立计划，不阻塞17关闭，也不因17通过而获得资格。
 - 12/13经济资格、14/15运行资格及[独立集成验收](integration-acceptance.md)分别记录，不阻塞策略开发完成；整个地图须全部范围完成才关闭。
 
 ## Rules
@@ -33,6 +35,7 @@ Status: open
 - 用户已确认的约束与建议、待决问题分开记录。
 - 按 Blocked by 领取 Frontier，每次只认领一张；ready-for-agent 不取消依赖。三项核心接口能力由其他会话处理，复用当前实现及验收证据；原规格票不因拆票自动关闭。
 - 交易所选择属于部署配置，不作为策略访谈问题。具体账户、币种名单和资金数值由运行配置提供；策略规格定义输入语义、约束及校验，不要求先选择部署实例。
+- 2026-11-11 用户调用 to-spec 授权发布[17内部整合规格](issues/17-okx-hyperliquid-scanner-integration-spec.md)，本轮选定 OKX／Hyperliquid；本次仅规格发布，不修改实现、不连接交易所，在线行情数据验收另立计划。
 
 ## Route
 
@@ -51,8 +54,13 @@ Status: open
 13. [Maker–Taker 独立校准与资格判定](issues/13-maker-calibration.md)
 14. [双 IOC 只读影子验收](issues/14-taker-shadow.md)
 15. [Maker–Taker 只读影子验收](issues/15-maker-shadow.md)
+16. [机会扫描运行、历史与 Web 展示规格](issues/16-scanner-console-spec.md)
+17. [OKX／Hyperliquid 扫描器项目内部整合规格](issues/17-okx-hyperliquid-scanner-integration-spec.md)
 
 ## Frontier
+
+- [17 OKX／Hyperliquid 内部整合](issues/17-okx-hyperliquid-scanner-integration-spec.md)：open、ready-for-agent，无未完成的实施前置 blocker；按控制面整合 → 环境目录 → 两家内部数据链 → Web 展示 → 故障与启动交付推进。主验收使用正式链路和协议夹具，在线行情另验。
+- [16 扫描控制台规格](issues/16-scanner-console-spec.md)：保留 open 和原历史交付边界；当前 OKX／Hyperliquid 内部整合由17承接，16其余核心白名单、长期存储及在线联调条件不因17发布或完成而关闭，不重复认领相同实施范围。
 
 - [12 双 IOC 样本外校准与资格判定](issues/12-taker-calibration.md)：依赖05/10已完成，离线研究工具已开发，真实研究输入不足，in_progress，经济资格pending；见[12证据](taker-calibration-evidence.md)。
 - [13 Maker–Taker 独立校准与资格判定](issues/13-maker-calibration.md)：依赖05/11已完成，独立Maker离线研究工具已开发，in_progress，真实经济资格pending；见[13证据](maker-calibration-evidence.md)。
@@ -60,6 +68,12 @@ Status: open
 - 原01/02为来源规格，保持原状态；其他会话施工及资格见核心接口地图。其余新票按各自 Blocked by 推进。
 
 ## Decisions so far
+
+- 2026-11-11：用户选定 OKX／Hyperliquid 并确认项目内部整合优先、在线行情数据验收另立计划；已通过 to-spec 发布[17规格](issues/17-okx-hyperliquid-scanner-integration-spec.md)。沿用 Web 到实际适配器、规范投影、扫描与展示的完整链路，确定性输入仅替换外部 transport；五阶段依次实施。复用现有滚动历史，本轮不新增历史数据库；16保留原未完成范围，12–15资格不变。在线行情计划尚未成文，本次未实施代码或执行验收。
+
+- 2026-11-06追加：16规格补充Venue／产品多选、资产纳入／排除均可空及用户确认的盘口可用深度最低／最高金额。按用户最新要求仅更新文档，本轮代码尝试已撤回，原Demo保留；对应实现、Web/核心及行情接线均待后续处理。
+
+- 2026-11-06：按用户要求将扫描启停、人工范围、候选证据、历史统计和核心确认流程整理为[16规格](issues/16-scanner-console-spec.md)，交付独立 RingwinUi Demo。不同步 GitHub、不连接交易所、不交易；07/08边界不变，真实实施仍未完成。
 
 - 2026-10-28：本轮12→13→14→15可开发离线工具范围均已交付；真实经济/运行资格分别pending，12–15仍in_progress，跨模块集成仍pending；模块保持open，不将合成回归或工具交付视为真实资格。
 
@@ -166,6 +180,7 @@ Status: open
 ## Not yet specified
 
 
+- OKX／Hyperliquid 在线行情数据验收计划：实际端点、环境可用性、盘口正确性、新鲜度、限流、网络恢复与持续运行门槛须另行规定；不作为17内部整合关闭前置条件。
 - [S4参数结构、单位、范围及缺失处理](parameter-contract.md)已定义；仍缺实际运行值、校准证据及校验器，不要求本会话选择部署名单或本金。
 - Maker 报价/队列、预测/保守折减、数量网格及模型监测已有[研究算法候选](algorithm-validation.md)，仍缺数据校准、适用范围与运行证据，不能作为已启用默认值。
 - 共享账户权威占用/减仓冲突的核心实现由H2/H3设计；策略关联和版本切换语义见S6，实际兼容性未验证。
@@ -176,5 +191,5 @@ Status: open
 
 ## Out of scope
 
-- 具体交易所、账户、币种名单和部署资金数值的选择。
+- 除17已明确选定的 OKX／Hyperliquid 外，其他交易所、具体账户、币种名单和部署资金数值的选择。
 - 部署、真实或 Demo 交易、GitHub同步；12–15本轮仅完成可开发离线工具，真实经济/运行资格仍须实际证据。

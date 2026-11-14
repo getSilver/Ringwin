@@ -57,6 +57,34 @@ pub const Authenticator = struct {
         return self.sign_fn(self.ptr, timestamp, body);
     }
 };
+
+/// The Gateway owns both the session and fence for this adapter's lifetime.
+pub const StoredAuthenticator = struct {
+    session: *@import("../../security/credential_store.zig").ApiSession,
+    io: std.Io,
+    guard: *@import("../../runtime/failover.zig").GatewayLeaseGuard,
+
+    pub fn interface(self: *StoredAuthenticator) !Authenticator {
+        if (self.session.venue() != .binance) return error.CredentialVenueMismatch;
+        return .{ .ptr = self, .sign_fn = sign };
+    }
+
+    fn sign(ptr: *anyopaque, _: u64, body: []const u8) ![32]u8 {
+        const self: *StoredAuthenticator = @ptrCast(@alignCast(ptr));
+        if (self.session.venue() != .binance) return error.CredentialVenueMismatch;
+        const Context = struct {
+            body: []const u8,
+            output: [32]u8 = @splat(0),
+            pub fn use(context: *@This(), api: *const @import("../../security/credential_store.zig").ApiCredentials) !void {
+                try api.hmac(&.{context.body}, &context.output);
+            }
+        };
+        var context: Context = .{ .body = body };
+        defer std.crypto.secureZero(u8, &context.output);
+        try self.session.useNow(self.io, self.guard, true, &context);
+        return context.output;
+    }
+};
 pub const TransportOutcome = enum { proven_before_send, response, write_or_response_uncertain };
 pub const HttpMethod = enum { post, delete, put };
 pub const SignedRequest = struct { method: HttpMethod, path: []const u8, body: []const u8, timestamp_ns: u64, signature: [32]u8 };

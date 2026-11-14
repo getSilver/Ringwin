@@ -1,5 +1,8 @@
 # OKX Demo credential input
 
+Long-lived venue-bound enrollment is documented in [credential enrollment](credential-enrollment.md).
+The one-shot Demo paths below remain explicit; they do not automatically discover or unlock stored credentials.
+
 Current Zig Demo entry points accept a one-shot binary frame on an inherited anonymous pipe or socket. TTY, ordinary files, argv credentials and the legacy `RINGWIN_OKX_KEY`, `RINGWIN_OKX_SECRET`, `RINGWIN_OKX_PASSPHRASE` environment variables are rejected before transport initialization. `-EnvFile` is retired and reports an error. Do not use PowerShell text pipelines or decode real credentials into managed strings to construct this input.
 
 | Offset | Bytes | Meaning |

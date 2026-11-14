@@ -49,6 +49,39 @@ pub const Authenticator = struct {
         return self.sign_fn(self.ptr, timestamp, body);
     }
 };
+
+/// receive_window_ms must match the transport's X-BAPI-RECV-WINDOW header.
+pub const StoredAuthenticator = struct {
+    session: *@import("../../security/credential_store.zig").ApiSession,
+    io: std.Io,
+    guard: *@import("../../runtime/failover.zig").GatewayLeaseGuard,
+    receive_window_ms: u32 = 5000,
+
+    pub fn interface(self: *StoredAuthenticator) !Authenticator {
+        if (self.session.venue() != .bybit) return error.CredentialVenueMismatch;
+        return .{ .ptr = self, .sign_fn = sign };
+    }
+
+    fn sign(ptr: *anyopaque, timestamp: u64, body: []const u8) ![32]u8 {
+        const self: *StoredAuthenticator = @ptrCast(@alignCast(ptr));
+        if (self.session.venue() != .bybit) return error.CredentialVenueMismatch;
+        var timestamp_buffer: [20]u8 = undefined;
+        var window_buffer: [10]u8 = undefined;
+        const Context = struct {
+            timestamp: []const u8,
+            window: []const u8,
+            body: []const u8,
+            output: [32]u8 = @splat(0),
+            pub fn use(context: *@This(), api: *const @import("../../security/credential_store.zig").ApiCredentials) !void {
+                try api.hmac(&.{ context.timestamp, api.api_key[0..api.api_key_len], context.window, context.body }, &context.output);
+            }
+        };
+        var context: Context = .{ .timestamp = try std.fmt.bufPrint(&timestamp_buffer, "{d}", .{timestamp}), .window = try std.fmt.bufPrint(&window_buffer, "{d}", .{self.receive_window_ms}), .body = body };
+        defer std.crypto.secureZero(u8, &context.output);
+        try self.session.useNow(self.io, self.guard, true, &context);
+        return context.output;
+    }
+};
 pub const TransportOutcome = enum { proven_before_send, response, write_or_response_uncertain };
 pub const SignedRequest = struct { path: []const u8, body: []const u8, timestamp_ns: u64, signature: [32]u8 };
 pub const TransportResult = struct { outcome: TransportOutcome, response: ?[]const u8 = null, source_session: u64, times: private.Times };

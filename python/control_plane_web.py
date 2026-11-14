@@ -25,9 +25,11 @@ import control_plane
 import owner_session
 import release_lifecycle
 import strategy_instance
+import credential_packages
 
 SESSION_COOKIE = "owner_session"
 CSRF_HEADER = "X-Owner-CSRF"
+_NO_CREDENTIAL_REQUEST = object()
 
 # Commands that revoke or grant authority require a prior RiskWarning ack;
 # mirrors CONTEXT.md's high-risk operator list within the first-version set.
@@ -203,6 +205,8 @@ class ControlPlaneApp:
         self.instance_manager = (strategy_instance.InstanceManager(directory, release_manager, instance_source)
                                  if release_manager is not None and instance_source is not None else None)
         self.lifecycle_outbox = lifecycle_outbox
+        self.credential_packages = credential_packages.CredentialPackages(
+            os.path.join(directory, "credential-packages"))
         self._command_results: dict[int, tuple[str, dict]] = {}
         self._lifecycle_results: dict[int, tuple[str, dict]] = {}
         for record in self.records.read_all():
@@ -277,6 +281,27 @@ class ControlPlaneApp:
         return 200, {"ok": True}
 
     # -- operations -------------------------------------------------------
+
+    def credentials(self, headers: dict, request=_NO_CREDENTIAL_REQUEST) -> tuple[int, dict]:
+        status, body = self.authorize(headers)
+        if status != 200:
+            return status, body
+        try:
+            with self.credential_packages.lock:
+                if request is _NO_CREDENTIAL_REQUEST:
+                    return 200, {"ok": True, "packages": self.credential_packages.list_packages()}
+                metadata, created = self.credential_packages.import_package(request, self.clock())
+                if not any(record.get("kind") == "credential_package_import"
+                           and record.get("package_sha256") == metadata["package_sha256"]
+                           for record in self.records.read_all()):
+                    self.records.append({"recorded_at": self.clock(), "kind": "credential_package_import",
+                                         "package_sha256": metadata["package_sha256"],
+                                         "operator": "SystemOwner", "result": "pending_unlock"})
+                return (201 if created else 200), {"ok": True, "package": metadata}
+        except ValueError:
+            return 400, {"ok": False, "error": "invalid encrypted credential package"}
+        except OSError:
+            return 503, {"ok": False, "error": "credential package storage unavailable"}
 
     def risk_warning(self, headers: dict, command: dict) -> tuple[int, dict]:
         status, body = self.authorize(headers)
@@ -585,6 +610,26 @@ def make_handler(app: ControlPlaneApp):
             self._json(status, response)
 
         def do_POST(self):
+            if self.path == "/api/credentials":
+                # Authenticate and bound this upload before reading its body.
+                status, response = app.authorize(dict(self.headers))
+                if status != 200:
+                    self.close_connection = True
+                    self._json(status, response)
+                    return
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                except ValueError:
+                    length = 0
+                if (not 0 < length <= credential_packages.MAX_REQUEST_BYTES
+                        or len(self.headers.get_all("Content-Length", [])) != 1
+                        or self.headers.get("Transfer-Encoding")
+                        or self.headers.get_content_type() != "application/json"):
+                    self.close_connection = True
+                    self._json(400, {"ok": False, "error": "invalid credential upload"})
+                    return
+                self._post(lambda body: app.credentials(dict(self.headers), body))
+                return
             routes = {
                 "/setup": lambda: self._post(lambda body: app.setup(body.get("passphrase", ""))),
                 "/login": lambda: self._post(self._handle_login),
@@ -615,6 +660,7 @@ def make_handler(app: ControlPlaneApp):
                 return
             routes = {
                 "/operator-records": lambda: self._get(app.operator_records),
+                "/api/credentials": lambda: self._get(app.credentials),
                 "/api/projection": lambda: self._get(app.projection),
                 "/api/releases": lambda: self._get(app.releases),
                 "/api/strategy-instances": lambda: self._get(app.strategy_instances),
