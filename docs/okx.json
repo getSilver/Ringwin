@@ -1,0 +1,11 @@
+{
+  "venue": "okx",
+  "kind": "observation",
+  "account": 7,
+  "environment": "demo",
+  "expires_at_unix": 8000000000,
+  "credential_id": "okx-v1",
+  "node_id": "gateway-node-1",
+  "egress_ip": "0.0.0.0",
+  "version": 1
+}
