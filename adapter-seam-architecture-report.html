@@ -1,0 +1,350 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RingWin · VenueAdapter / MarketFeedAdapter 接缝巡检</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #080b12;
+      --panel: #101622;
+      --line: #293348;
+      --text: #eef4ff;
+      --muted: #8491a8;
+      --data: #20d5d2;
+      --strategy: #a98bff;
+      --risk: #ffbd5c;
+      --order: #59e391;
+      --fact: #ff769a;
+      --ok: #59e391;
+      --warn: #ffbd5c;
+      --leak: #ff769a;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 12% -10%, #1a2744 0, transparent 36%),
+        radial-gradient(circle at 92% 18%, #142828 0, transparent 28%),
+        var(--bg);
+      font-family: Inter, ui-sans-serif, system-ui, "Segoe UI", sans-serif;
+    }
+    main { width: min(1280px, 100%); margin: 0 auto; padding: 40px 22px 64px; }
+    .eyebrow {
+      margin: 0 0 10px;
+      color: var(--data);
+      font: 700 11px/1.2 ui-monospace, SFMono-Regular, Consolas, monospace;
+      letter-spacing: .18em;
+      text-transform: uppercase;
+    }
+    h1 { margin: 0; font-size: clamp(28px, 4vw, 46px); font-weight: 590; letter-spacing: -.04em; }
+    .subtitle { margin: 12px 0 0; color: var(--muted); max-width: 820px; line-height: 1.55; }
+    h2 { margin: 36px 0 12px; font-size: 20px; letter-spacing: -.02em; }
+    h3 { margin: 0 0 8px; font-size: 15px; }
+    p, li { line-height: 1.55; }
+    code, .mono { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .92em; }
+    .grid { display: grid; gap: 14px; }
+    .two { grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+    .three { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+    .panel {
+      background: color-mix(in srgb, var(--panel) 88%, black);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 16px 16px 14px;
+    }
+    .kicker { color: var(--muted); font: 650 11px/1.2 ui-monospace, Consolas, monospace; letter-spacing: .12em; text-transform: uppercase; margin-bottom: 8px; }
+    .tag {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      font: 650 11px/1.6 ui-monospace, Consolas, monospace;
+      margin: 0 6px 6px 0;
+    }
+    .tag.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, var(--line)); }
+    .tag.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, var(--line)); }
+    .tag.leak { color: var(--leak); border-color: color-mix(in srgb, var(--leak) 45%, var(--line)); }
+    .tag.deep { color: var(--data); border-color: color-mix(in srgb, var(--data) 40%, var(--line)); }
+    .tag.shallow { color: var(--strategy); border-color: color-mix(in srgb, var(--strategy) 40%, var(--line)); }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { text-align: left; vertical-align: top; padding: 8px 8px; border-bottom: 1px solid var(--line); }
+    th { color: var(--muted); font-weight: 650; }
+    .flow {
+      display: grid;
+      grid-template-columns: 1fr auto 1fr auto 1fr;
+      gap: 8px;
+      align-items: stretch;
+    }
+    .flow .box { padding: 12px; border-radius: 12px; border: 1px dashed var(--line); }
+    .arrow { display: flex; align-items: center; color: var(--muted); font: 700 18px/1 ui-monospace, Consolas, monospace; }
+    .cite { color: var(--data); }
+    .muted { color: var(--muted); }
+    .opp { border-left: 3px solid var(--data); }
+    .opp.high { border-left-color: var(--fact); }
+    .opp.med { border-left-color: var(--risk); }
+    details { margin-top: 8px; color: var(--muted); }
+    summary { cursor: pointer; color: var(--text); }
+    .diagram {
+      display: grid;
+      gap: 10px;
+      font-size: 13px;
+    }
+    .lane { display: grid; grid-template-columns: 140px 1fr; gap: 10px; align-items: center; }
+    .lane .label { color: var(--muted); font: 650 11px/1.2 ui-monospace, Consolas, monospace; }
+    .pills { display: flex; flex-wrap: wrap; gap: 8px; }
+    .pill {
+      flex: 1 1 160px;
+      padding: 10px 12px;
+      border-radius: 10px;
+      background: #0c121c;
+      border: 1px solid var(--line);
+    }
+  </style>
+</head>
+<body>
+<main>
+  <p class="eyebrow">Architecture scout · ADR 0001 · 深模块巡检</p>
+  <h1>VenueAdapter 与 MarketFeedAdapter 的接缝还没形成</h1>
+  <p class="subtitle">
+    ADR 0001 要求两个独立 adapter：绑定账户的执行接缝，以及可跨账户共享的公共行情接缝。
+    跨接缝只允许核心 <code>CanonicalEvent</code>。现状是：vtable 只服务 SimulatedVenue；
+    OKX 走平行直连链；三份同名 <code>CanonicalEvent</code>；私有 implementation 从公共行情 module 借类型。
+    JSON 字段名大多仍停在 OKX decoder 内，真正的泄漏是命名、编译图、以及 Demo 稳定日志里的 <code>okx_spot_*</code> 记录。
+  </p>
+
+  <div class="grid two" style="margin-top:22px">
+    <section class="panel">
+      <div class="kicker">ADR 0001 承诺</div>
+      <p>两个 seam：<code>VenueAdapter</code>（订单 / 私有账户事实 / 对账）与 <code>MarketFeedAdapter</code>（公共行情）。两者只输出核心 CanonicalEvent。Execution Gateway 按 ExchangeAccountIdentity 路由；行情按 Venue/订阅隔离。</p>
+      <span class="tag">窄接口</span><span class="tag">深模块</span><span class="tag">接缝</span>
+    </section>
+    <section class="panel">
+      <div class="kicker">代码现状</div>
+      <p><code>src/venue_adapter.zig</code> 是 47 行 generic vtable。<code>MarketFeedAdapter</code> 类型与文件均不存在。OKX 公共与私有各有自己的 <code>CanonicalEvent</code>，且从未翻译进 <code>TradingShard.apply</code>。</p>
+      <span class="tag leak">三份 CanonicalEvent</span><span class="tag warn">无 MarketFeedAdapter</span><span class="tag shallow">浅 vtable</span>
+    </section>
+  </div>
+
+  <h2>1. 结构：承诺的接缝 vs 实际 module</h2>
+  <div class="panel diagram">
+    <div class="lane">
+      <div class="label">ADR 路径</div>
+      <div class="pills">
+        <div class="pill">MarketFeedAdapter → Canonical MarketEvent</div>
+        <div class="pill">TradingShard.apply</div>
+        <div class="pill">OMS → OrderCommand → VenueAdapter.trySend / tryDrain</div>
+      </div>
+    </div>
+    <div class="lane">
+      <div class="label">核心仿真路径</div>
+      <div class="pills">
+        <div class="pill">fixture CanonicalEvent 直接 apply</div>
+        <div class="pill">SimulatedVenue 实现 vtable</div>
+        <div class="pill">输出已是核心 InputEvent（1 dispatch + 5 ingress）</div>
+      </div>
+    </div>
+    <div class="lane">
+      <div class="label">OKX 直连路径</div>
+      <div class="pills">
+        <div class="pill">okx_public_market.Decoder.ingest</div>
+        <div class="pill">okx_live_chain.Chain.dispatch</div>
+        <div class="pill">okx_private_reconciliation.Reconciler.ingest / drainReconciled</div>
+        <div class="pill">okx_spot_projection → journal type 1001–1003</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="grid two" style="margin-top:14px">
+    <section class="panel">
+      <h3>VenueAdapter</h3>
+      <p>Interface 形状正确：<code>start / trySend / tryDrain / stop</code>（<span class="cite">src/venue_adapter.zig:19-46</span>）。Request/Output 由调用方注入，因此契约知识不在 adapter module 内。</p>
+      <p>唯一 implementation 是 <code>trading_shard.zig</code> 私有的 <code>SimulatedVenue</code>（<span class="cite">2660-2720</span>）。<code>AdapterRequest</code> 只有 <code>order_command</code>，没有账户/订单对账请求（<span class="cite">2651-2658</span>）。<code>AdapterOutputBatch</code> 固定「1 + 5」核心事件，不是有界 CanonicalEvent 数组。</p>
+    </section>
+    <section class="panel">
+      <h3>MarketFeedAdapter</h3>
+      <p>计划中的独立 interface（<span class="cite">docs/多交易所适配方案.md:274-285</span>）没有对应 module。公共路径的真实入口是 <code>Decoder.ingest</code>（<span class="cite">okx_public_market.zig:316-356</span>）：先 RawSink，再 JSON，再内部 <code>CanonicalEvent</code>。</p>
+      <p>该 Decoder 是深的（簿序列、健康、规则观察），但它不是可替换的行情接缝。核心消费的是两档 <code>price_micros</code> 的 <code>L2Snapshot</code>（<span class="cite">trading_shard.zig:283-298, 2270-2318</span>），与 400 档 <code>Decimal</code> 簿没有翻译层。</p>
+    </section>
+  </div>
+
+  <h2>2. OKX 类型有没有跨接缝？</h2>
+  <div class="panel">
+    <table>
+      <thead>
+        <tr><th>目标</th><th>JSON 字段名 (instId/clOrdId/…)</th><th>OKX 类型 / 命名</th><th>结论</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>TradingShard 运行时 apply</td>
+          <td>无</td>
+          <td>仅测试图 <code>@import("okx_*")</code> + <code>_ = okx_*</code>（<span class="cite">14-19, 4588-4593, 5623</span>）</td>
+          <td><span class="tag warn">编译图泄漏</span> 无字段泄漏</td>
+        </tr>
+        <tr>
+          <td>OMS / risk / economics / account_coordinator</td>
+          <td>无</td>
+          <td>无 okx import。OMS 自有 <code>Instrument = btc_usdt_spot|swap</code></td>
+          <td><span class="tag ok">隔离</span></td>
+        </tr>
+        <tr>
+          <td>journal.zig</td>
+          <td>无</td>
+          <td>通用 Record。泄漏发生在调用方 type_id</td>
+          <td><span class="tag ok">module 干净</span></td>
+        </tr>
+        <tr>
+          <td>Demo 稳定重放</td>
+          <td>无字面 JSON 键</td>
+          <td><code>okx_spot_execution_report=1001</code> 等编码 <code>private.CanonicalEvent</code>（<span class="cite">okx_spot_projection.zig:15-18, 224-265</span>），含 venue_order_id、fee_asset、Decimal</td>
+          <td><span class="tag leak">接缝被绕过</span></td>
+        </tr>
+        <tr>
+          <td>StrategyHost / Python</td>
+          <td>无</td>
+          <td>gateway EventType 只有 mark/l2/timer/account/fill；OrderIntent 用 instrument_identity + micros</td>
+          <td><span class="tag ok">隔离</span></td>
+        </tr>
+        <tr>
+          <td>核心 CanonicalEvent</td>
+          <td>无</td>
+          <td>同名但更瘦：Fill 仅 fill_id/qty/price_micros（<span class="cite">trading_shard.zig:270-281, 492-501</span>）</td>
+          <td><span class="tag warn">未翻译、未对齐</span></td>
+        </tr>
+      </tbody>
+    </table>
+    <p class="muted" style="margin:12px 0 0">OKX 协议字面量（<code>instId</code>、<code>tdMode</code>、<code>pxAmendType</code>）停在 <span class="cite">okx_order_entry.zig:545-581</span> 与两个 decoder 的 <code>stringField(..., "instId")</code>。这是正确的 locality。问题是 adapter 输出仍自称 CanonicalEvent，Demo 日志直接持久化该 union。</p>
+  </div>
+
+  <h2>3. 深度：谁是深模块，谁是浅传递</h2>
+  <div class="grid three">
+    <section class="panel">
+      <span class="tag shallow">浅</span>
+      <h3>venue_adapter.zig</h3>
+      <p>只转发四操作。没有 OrderCommand、CapabilityProfile、对账请求、输出事件形状。implementation 必须自带全部契约，因此几乎没有 leverage。</p>
+    </section>
+    <section class="panel">
+      <span class="tag deep">深</span>
+      <h3>okx_public_market.Decoder</h3>
+      <p>隐藏 JSON、400 档簿、seq 衔接、gap/resubscribe 健康、RawIngress。接口却是 ingest(raw bytes)，不是 MarketFeedAdapter，也无法被 SimulatedVenue 复用。</p>
+    </section>
+    <section class="panel">
+      <span class="tag deep">深</span>
+      <h3>okx_private_reconciliation.Reconciler</h3>
+      <p>隐藏 REST bootstrap 双轮稳定、WS 缓冲、seen-fact 去重、Unknown、drain 顺序。输出却是私有 CanonicalEvent，且依赖 public market 的 Envelope/Decimal/Instrument。</p>
+    </section>
+    <section class="panel">
+      <span class="tag deep">深</span>
+      <h3>okx_order_entry</h3>
+      <p>Capability 校验、限流队列、place/amend/cancel JSON codec、TargetRemaining→newSz。CapabilityProfile 被困在 OKX module（<span class="cite">63-85</span>），不能成为执行接缝上的窄契约。</p>
+    </section>
+    <section class="panel">
+      <span class="tag deep">深</span>
+      <h3>okx_live_chain</h3>
+      <p>replay/dry-run 碰不到 transport；Demo 资格失败关闭；响应先 RawIngress。这是副作用接缝，但不是 VenueAdapter vtable。</p>
+    </section>
+    <section class="panel">
+      <span class="tag leak">错位的深</span>
+      <h3>okx_spot_projection</h3>
+      <p>第二套订单/账本投影，直接吃 private.CanonicalEvent 并写入 journal。深度很高，但接缝错误：权威状态本应只经 TradingShard.apply。</p>
+    </section>
+    <section class="panel">
+      <span class="tag shallow">浅 realization</span>
+      <h3>SimulatedVenue</h3>
+      <p>硬编码 happy-path 五条 ingress。它证明了 vtable 形状，没有隐藏任何 Venue 协议，也不能跑 OKX 契约测试。</p>
+    </section>
+    <section class="panel">
+      <span class="tag warn">过宽</span>
+      <h3>trading_shard.zig</h3>
+      <p>拥有核心 CanonicalEvent、codec、SimulatedVenue、快照、夹具，并编译绑定全部 okx_*。状态迁移本身深，接缝所有权浅且分散。</p>
+    </section>
+  </div>
+
+  <h2>4. 重复知识</h2>
+  <div class="panel">
+    <table>
+      <thead><tr><th>知识</th><th>出现位置</th><th>代价</th></tr></thead>
+      <tbody>
+        <tr><td><code>CanonicalEvent</code> 这个名字</td><td>trading_shard、okx_public_market:241、okx_private_reconciliation:176</td><td>接缝无法靠类型系统强制翻译</td></tr>
+        <tr><td><code>Instrument = btc_usdt_spot|swap</code></td><td>oms、economics、okx_public_market（private/order_entry 再 export）</td><td>核心与 adapter 共享 OKX 首波产品枚举，而不是 InstrumentIdentity</td></tr>
+        <tr><td><code>parseInstrument("BTC-USDT")</code></td><td>public:753 与 private:1170 逐字重复</td><td>同一 Venue 映射两份 locality</td></tr>
+        <tr><td>ExecutionReport / Fill / DispatchState</td><td>trading_shard 瘦结构；OMS 另一套；OKX Decimal 富结构</td><td>字段覆盖文档当成「缺口」，其实是未完成翻译</td></tr>
+        <tr><td>数值模型</td><td>核心 <code>*_micros</code>；adapter <code>Decimal {i128,scale}</code></td><td>跨接缝没有单一整数规则版本</td></tr>
+        <tr><td>L2 形状</td><td>核心 2 ask + 1 bid；OKX 400 level BookSide</td><td>行情接缝没有投影职责</td></tr>
+        <tr><td>drain 形状</td><td>VenueAdapter.tryDrain；Reconciler.drainReconciled；Decoder 返回 IngressBatch</td><td>三个 implementation 三种输出节奏</td></tr>
+        <tr><td>EventEnvelope</td><td>策略 Host 有自己的 envelope；OKX public 定义另一份并被 private 借用</td><td>「envelope」不是共享 seam 类型</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2>5. 加深机会（按 leverage）</h2>
+  <p class="muted">不引入新 Venue、SOR、或通用 REST/WS/auth 框架。只加深已承诺的两个 adapter 接缝。</p>
+
+  <div class="grid" style="margin-top:8px">
+    <section class="panel opp high">
+      <span class="tag leak">P1</span>
+      <h3>单一 CanonicalEvent module，禁止 adapter 盗用该名字</h3>
+      <p>今天接缝是浅的，因为三个 module 都导出同名事件。ADR 已写明 adapter 内部应叫 <code>OkxPrivateEvent</code> / 行情等价名。加深手段：抽出核心 CanonicalEvent 作为窄接口；OKX decoder 只产私有事件；只有翻译后的事实可进入 <code>TradingShard.apply</code>、journal codec、replay。</p>
+      <details><summary>证据</summary><p>核心 <span class="cite">trading_shard.zig:492</span>；行情 <span class="cite">okx_public_market.zig:241</span>；私有 <span class="cite">okx_private_reconciliation.zig:176</span>；方案 <span class="cite">docs/多交易所适配方案.md:155-156</span>。</p></details>
+    </section>
+    <section class="panel opp high">
+      <span class="tag leak">P1</span>
+      <h3>把 AdapterRequest / OutputBatch 放进 venue_adapter module，让 OKX 成为真正的 implementation</h3>
+      <p>当前 interface 几乎无 depth：类型住在 TradingShard，OKX 从不实现 vtable。加深后，执行 adapter 隐藏 codec、对账、RawIngress 与未知态；核心只 trySend 规范 OrderCommand（及对账请求）并 tryDrain 核心事件。SimulatedVenue 与 OKX 走同一契约，而不是平行链。</p>
+      <details><summary>证据</summary><p>vtable <span class="cite">venue_adapter.zig:19-29</span>；私有类型 <span class="cite">trading_shard.zig:2651-2660</span>；OKX 发送 <span class="cite">okx_live_chain.zig:61-105</span>；方案 7.1 要求对账请求与可变长输出 <span class="cite">docs/多交易所适配方案.md:248-261</span>。</p></details>
+    </section>
+    <section class="panel opp med">
+      <span class="tag warn">P2</span>
+      <h3>补上 MarketFeedAdapter 窄接口，让 Decoder 做 implementation 而不是接缝本身</h3>
+      <p>Decoder 已经深。缺的是独立于 ExchangeAccount 的 start/tryDrain/stop，以及把 400 档 Decimal 簿投影成核心 MarketEvent 的翻译。不要把账户 session 绑到行情生命周期，也不要把核心 L2 扩成 OKX 簿的并集。</p>
+      <details><summary>证据</summary><p>ingest <span class="cite">okx_public_market.zig:316</span>；核心 L2 <span class="cite">trading_shard.zig:283-298</span>；ADR 后果「公共行情按 Venue/订阅隔离」<span class="cite">docs/adr/0001-...:22</span>。</p></details>
+    </section>
+    <section class="panel opp med">
+      <span class="tag warn">P2</span>
+      <h3>切断私有 implementation 对公共行情 module 的类型借用</h3>
+      <p>private / order_entry / live_chain / curl 都 <code>@import("okx_public_market.zig")</code> 以取得 Decimal、Instrument、EventEnvelope、RawSink。这把两个 adapter implementation 焊在同一个 module 上，破坏接缝 locality。允许一个更小的 OKX 内部 primitives module；不允许行情 Decoder 成为私有事件的类型所有者。</p>
+      <details><summary>证据</summary><p>private <span class="cite">okx_private_reconciliation.zig:7-17</span>；order_entry <span class="cite">7-8</span>；live_chain <span class="cite">7-8</span>；curl <span class="cite">okx_curl_transport.zig:8</span>。</p></details>
+    </section>
+    <section class="panel opp med">
+      <span class="tag warn">P2</span>
+      <h3>Demo 稳定日志停止持久化 okx_spot_* 私有 union</h3>
+      <p><code>appendStable</code> 把 adapter ExecutionReport/Fill/Balance 写进同一 Journal 抽象，type_id 还带 OKX 产品名。journal module 仍深且中立；被破坏的是「只有核心 CanonicalEvent 可重放」这条接缝不变量。投影应消费翻译后的核心事件，或明确标为 Venue 私有审计流，而不是权威 SemanticReplay 输入。</p>
+      <details><summary>证据</summary><p><span class="cite">okx_spot_projection.zig:15-18, 63-70, 224-265</span>；acceptance 写入 <span class="cite">okx_demo_live_acceptance.zig:269</span>。</p></details>
+    </section>
+    <section class="panel opp">
+      <span class="tag">P3</span>
+      <h3>CapabilityProfile 上移到执行 adapter 契约，而不是留在 OKX codec</h3>
+      <p>这是把已存在的深知识挪到窄接口上，增加核心 leverage，而不是新框架。TradingShard 不应再为了跑测试而 <code>@import</code> 全部 okx_*。</p>
+    </section>
+  </div>
+
+  <h2>6. 已经隔离、不值得立项的区域</h2>
+  <div class="grid two">
+    <section class="panel">
+      <span class="tag ok">保持</span>
+      <ul>
+        <li>JSON 协议字段名没有进入 OMS、TradingShard payload、StrategyHost、Python。</li>
+        <li><code>journal.zig</code> Record 不认识 Venue。</li>
+        <li>Host IPC 事件集与 OrderIntent 使用 identity + micros，无 instId。</li>
+        <li>两边 decoder 都先 RawIngress 再解析。</li>
+        <li><code>okx_live_chain</code> 在 replay/dry-run 拒绝真实 transport。</li>
+        <li>SimulatedVenue 与 OKX 传输路径尚未混用同一连接对象。</li>
+        <li>venue_adapter 四操作形状与 ADR/方案一致，应保留而不是另起一套。</li>
+      </ul>
+    </section>
+    <section class="panel">
+      <span class="tag ok">明确不做</span>
+      <ul>
+        <li>不新增 Venue implementation。</li>
+        <li>不做 SOR / 跨 Venue 拆单。</li>
+        <li>不把 curl/auth/JSON 抽成通用 plugin 框架（ADR 已否决）。</li>
+        <li>不把核心 CanonicalEvent 做成 OKX 字段并集来「补覆盖率」——那会把泄漏合法化。</li>
+      </ul>
+    </section>
+  </div>
+
+  <p class="muted" style="margin-top:28px">巡检结论：ADR 0001 的接缝决定仍然正确。缺口不是缺框架，而是 adapter 虽深、接缝仍浅——核心从未只通过一个 CanonicalEvent 接口面对 Venue。</p>
+</main>
+</body>
+</html>
