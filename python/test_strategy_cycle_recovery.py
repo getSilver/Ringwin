@@ -10,25 +10,25 @@ from dataclasses import replace
 from fractions import Fraction as F
 
 import strategy_host as host
-import arbitrage_checkpoint as recovery
+from strategies.cross_venue import arbitrage_checkpoint as recovery
 import test_arbitrage_host as fixture
-import arbitrage_cycle as cycle
+from strategies.cross_venue import arbitrage_cycle as cycle
 from test_arbitrage_cycle import plan as cycle_plan, facts, done, T, entry, market, estimator_for, path, LIMITS
 from test_arbitrage_evaluation import wire, MODEL, EXACT
 from test_arbitrage_probability import calibration
-import arbitrage_baseline as baseline
-import arbitrage_economics as economics
+from strategies.cross_venue import arbitrage_baseline as baseline
+from strategies.cross_venue import arbitrage_economics as economics
 import math
 import base64
 import json
 from pathlib import Path
-import arbitrage_admission as admission
-import arbitrage_signals as signals
-import arbitrage_scanner as scanner
-import arbitrage_maker as maker
+from strategies.cross_venue import arbitrage_admission as admission
+from strategies.cross_venue import arbitrage_signals as signals
+from opportunity_scanner import arbitrage_scanner as scanner
+from strategies.cross_venue import arbitrage_maker as maker
 from test_arbitrage_admission import config as admission_config, signal_policy
-import arbitrage_evaluation as valuation
-import arbitrage_state_space as ss
+from strategies.cross_venue import arbitrage_evaluation as valuation
+from strategies.cross_venue import arbitrage_state_space as ss
 from test_arbitrage_state_space import parameters
 
 

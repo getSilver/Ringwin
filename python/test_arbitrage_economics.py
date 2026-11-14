@@ -5,7 +5,7 @@ import math
 import struct
 import unittest
 
-import arbitrage_economics as e
+from strategies.cross_venue import arbitrage_economics as e
 import strategy_host as host
 
 

@@ -11,7 +11,7 @@ import threading
 import control_plane
 import control_plane_web
 
-import scanner_console as c
+from opportunity_scanner import scanner_console as c
 from test_arbitrage_scanner import fixture
 from test_arbitrage_evaluation import T
 
@@ -263,7 +263,7 @@ class ConsoleTests(unittest.TestCase):
             saved = target.read_text(encoding="utf-8")
             console.history.request("1", {"selection": {}}, {"status": "unknown"})
             change = {**config, "expected_version": "1", "scopes": [{**row, "min_depth_atoms": "0"} for row in config["scopes"]]}
-            with patch("scanner_config.os.replace", side_effect=OSError("injected config rename failure")):
+            with patch("opportunity_scanner.scanner_config.os.replace", side_effect=OSError("injected config rename failure")):
                 with self.assertRaisesRegex(OSError, "rename failure"):
                     console.configure(change)
             self.assertEqual(console.view()["config"]["version"], "1")

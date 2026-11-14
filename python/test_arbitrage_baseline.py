@@ -7,8 +7,8 @@ import struct
 import random
 import unittest
 
-import arbitrage_baseline as b
-from arbitrage_economics import InstrumentRules
+from strategies.cross_venue import arbitrage_baseline as b
+from strategies.cross_venue.arbitrage_economics import InstrumentRules
 
 
 def rules(instrument, tick=F(1)):

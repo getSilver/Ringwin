@@ -9,9 +9,9 @@ import hashlib
 import math
 from typing import Optional, Tuple
 
-import arbitrage_baseline as b
-import arbitrage_economics as e
-import arbitrage_probability as p
+from strategies.cross_venue import arbitrage_baseline as b
+from strategies.cross_venue import arbitrage_economics as e
+from strategies.cross_venue import arbitrage_probability as p
 from strategy_host import decode_depth_snapshot, encode_depth_snapshot, RecoveryNeeded
 
 

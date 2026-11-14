@@ -5,8 +5,8 @@ import math
 import random
 import unittest
 
-import arbitrage_baseline as b
-import arbitrage_state_space as s
+from strategies.cross_venue import arbitrage_baseline as b
+from strategies.cross_venue import arbitrage_state_space as s
 
 
 def parameters(**changes):

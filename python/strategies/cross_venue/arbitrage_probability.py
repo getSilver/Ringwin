@@ -8,8 +8,8 @@ from decimal import Decimal, localcontext, ROUND_CEILING
 from fractions import Fraction
 from typing import Optional, Tuple
 
-import arbitrage_baseline as b
-import arbitrage_economics as e
+from strategies.cross_venue import arbitrage_baseline as b
+from strategies.cross_venue import arbitrage_economics as e
 
 PPM = 1_000_000
 MAX_BLOCKS = 10_000

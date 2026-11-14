@@ -8,11 +8,11 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 import struct
 
-import arbitrage_baseline as b
-import arbitrage_admission as admission
-import arbitrage_economics as e
-import arbitrage_evaluation as v
-import arbitrage_probability as p
+from strategies.cross_venue import arbitrage_baseline as b
+from strategies.cross_venue import arbitrage_admission as admission
+from strategies.cross_venue import arbitrage_economics as e
+from strategies.cross_venue import arbitrage_evaluation as v
+from strategies.cross_venue import arbitrage_probability as p
 import strategy_host as host
 
 
@@ -358,7 +358,7 @@ class Cycle:
         if facts.cursor < self.cursor:
             return Action(self.plan, self.cursor, "stale_cursor")
         if facts.cursor == self.cursor:
-            from arbitrage_checkpoint import content
+            from strategies.cross_venue.arbitrage_checkpoint import content
             if self.last_facts_digest != content(facts):
                 raise b.Rejected("cursor_content_conflict")
             return Action(self.plan, self.cursor, "duplicate_cursor")
@@ -400,7 +400,7 @@ class Cycle:
                 raise b.Rejected("residual_closure_evidence")
         adjusted = e.exact(facts.nav_atoms-facts.external_allocation_atoms)
         self.cursor, self.last_at_ns = facts.cursor, facts.at_ns
-        from arbitrage_checkpoint import content
+        from strategies.cross_venue.arbitrage_checkpoint import content
         self.last_facts_digest = content(facts)
         self.cycle_ref, self.reservation_ref = facts.cycle_ref, facts.reservation_ref
         self.last_economic_ref = facts.economic_ref

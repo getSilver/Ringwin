@@ -2,7 +2,7 @@
 import hashlib
 import unittest
 
-from scanner_history import History
+from opportunity_scanner.scanner_history import History
 
 DAY = 86_400_000
 THRESHOLD = dict(version="1", min_profit_atoms="0", min_probability_ppm=0)

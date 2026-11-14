@@ -2,15 +2,15 @@
 from dataclasses import replace
 import unittest
 
-import arbitrage_baseline as b
-import arbitrage_cycle as c
-import arbitrage_evaluation as v
+from strategies.cross_venue import arbitrage_baseline as b
+from strategies.cross_venue import arbitrage_cycle as c
+from strategies.cross_venue import arbitrage_evaluation as v
 from test_arbitrage_cycle import plan, facts, done
 from test_arbitrage_evaluation import T, policy
 from test_arbitrage_maker import maker_plan, quote
 from test_arbitrage_evaluation import entry, market
-import arbitrage_checkpoint as recovery
-import arbitrage_maker as m
+from strategies.cross_venue import arbitrage_checkpoint as recovery
+from strategies.cross_venue import arbitrage_maker as m
 
 
 class PairingTests(unittest.TestCase):

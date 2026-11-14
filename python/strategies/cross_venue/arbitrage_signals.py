@@ -5,9 +5,9 @@ order or safety permission is owned here. Persistence is ticket 10's concern.
 """
 from dataclasses import dataclass
 
-import arbitrage_baseline as b
-import arbitrage_economics as e
-import arbitrage_probability as p
+from strategies.cross_venue import arbitrage_baseline as b
+from strategies.cross_venue import arbitrage_economics as e
+from strategies.cross_venue import arbitrage_probability as p
 
 
 @dataclass(frozen=True)

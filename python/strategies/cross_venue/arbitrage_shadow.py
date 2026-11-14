@@ -9,13 +9,13 @@ from dataclasses import dataclass, asdict
 import json
 from time import perf_counter_ns
 
-import arbitrage_admission as admission
-import arbitrage_baseline as b
-import arbitrage_checkpoint as checkpoint
-import arbitrage_economics as economics
-import arbitrage_probability as probability
-import arbitrage_scanner as scanner
-import arbitrage_signals as signals
+from strategies.cross_venue import arbitrage_admission as admission
+from strategies.cross_venue import arbitrage_baseline as b
+from strategies.cross_venue import arbitrage_checkpoint as checkpoint
+from strategies.cross_venue import arbitrage_economics as economics
+from strategies.cross_venue import arbitrage_probability as probability
+from opportunity_scanner import arbitrage_scanner as scanner
+from strategies.cross_venue import arbitrage_signals as signals
 from strategy_host import decode_depth_snapshot
 
 SCHEMA = "arbitrage_read_only_capture_v1"

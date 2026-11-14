@@ -13,13 +13,13 @@ import threading
 import time
 import urllib.request
 
-import arbitrage_economics as economics
-from arbitrage_scanner import Observation, decode_depth_snapshot
-from scanner_console import CanonicalSource, CatalogueEntry, ScannerConsole
-from scanner_history import History
+from strategies.cross_venue import arbitrage_economics as economics
+from opportunity_scanner.arbitrage_scanner import Observation, decode_depth_snapshot
+from opportunity_scanner.scanner_console import CanonicalSource, CatalogueEntry, ScannerConsole
+from opportunity_scanner.scanner_history import History
 from strategy_instance import NativeAuthority
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 MAX_FRAME = 120 * 1024
 ROUTES = {
     (1, "production"): ("https://www.okx.com", "production"),

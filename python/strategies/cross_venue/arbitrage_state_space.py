@@ -8,7 +8,7 @@ from fractions import Fraction
 import math
 from typing import Optional, Tuple
 
-import arbitrage_baseline as b
+from strategies.cross_venue import arbitrage_baseline as b
 from strategy_state import encode_number
 
 IDENTITY = (1., 0., 0., 1.)

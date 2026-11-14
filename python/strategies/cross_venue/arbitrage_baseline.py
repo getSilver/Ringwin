@@ -12,7 +12,7 @@ import json
 import math
 from typing import Optional, Tuple
 
-from arbitrage_economics import InstrumentRules, exact
+from strategies.cross_venue.arbitrage_economics import InstrumentRules, exact
 from strategy_host import decode_depth_snapshot, RecoveryNeeded
 from strategy_state import encode_number
 

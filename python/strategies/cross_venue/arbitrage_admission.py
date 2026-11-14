@@ -3,11 +3,11 @@ from dataclasses import dataclass, fields
 from fractions import Fraction
 import json
 
-import arbitrage_baseline as b
-import arbitrage_economics as e
-import arbitrage_probability as p
-import arbitrage_scanner as scanner
-from arbitrage_signals import Signal, SignalPolicy
+from strategies.cross_venue import arbitrage_baseline as b
+from strategies.cross_venue import arbitrage_economics as e
+from strategies.cross_venue import arbitrage_probability as p
+from opportunity_scanner import arbitrage_scanner as scanner
+from strategies.cross_venue.arbitrage_signals import Signal, SignalPolicy
 
 REQUIRED_REFS = ("strategy_definition", "state_schema", "portfolio", "activation", "rules",
                  "assets", "capabilities", "execution_model", "safety", "occupancy_model",

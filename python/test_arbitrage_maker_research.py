@@ -5,9 +5,9 @@ import tempfile
 from pathlib import Path
 import unittest
 
-import arbitrage_research as r
-import arbitrage_maker_research as mr
-import arbitrage_maker as m
+from strategies.cross_venue import arbitrage_research as r
+from strategies.cross_venue import arbitrage_maker_research as mr
+from strategies.cross_venue import arbitrage_maker as m
 from test_arbitrage_maker import maker_plan, quote
 from test_arbitrage_cycle import facts, done, market, entry, LIMITS, T
 from test_arbitrage_research import protocol

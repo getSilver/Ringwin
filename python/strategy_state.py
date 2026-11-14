@@ -297,7 +297,7 @@ def validate(state, cursor, strategy=None, next_intent=None):
 
 def encode(state, cursor, strategy=None, next_intent=None, *, version=1):
     if version == 2:
-        from arbitrage_checkpoint import validate as validate_components
+        from strategies.cross_venue.arbitrage_checkpoint import validate as validate_components
         validate_components(state, cursor, strategy, next_intent)
     elif version == 1:
         validate(state, cursor, strategy, next_intent)

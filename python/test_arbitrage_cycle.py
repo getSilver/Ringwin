@@ -4,9 +4,9 @@ from fractions import Fraction as F
 import struct
 import unittest
 
-import arbitrage_cycle as c
-import arbitrage_admission as a
-import arbitrage_evaluation as v
+from strategies.cross_venue import arbitrage_cycle as c
+from strategies.cross_venue import arbitrage_admission as a
+from strategies.cross_venue import arbitrage_evaluation as v
 import strategy_host as host
 from test_arbitrage_evaluation import entry, leg, market, policy, path, estimator_for, LIMITS, T
 

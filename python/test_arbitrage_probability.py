@@ -3,8 +3,8 @@ from dataclasses import replace
 from fractions import Fraction as F
 import unittest
 
-import arbitrage_probability as p
-import arbitrage_baseline as b
+from strategies.cross_venue import arbitrage_probability as p
+from strategies.cross_venue import arbitrage_baseline as b
 
 
 def calibration(stage="entry", calibrated=F(3, 4), margin=F(6, 100), blocks=500, scope="fixture", model_hash="11"*32, simulation_hash="22"*32):

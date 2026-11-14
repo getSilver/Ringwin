@@ -4,13 +4,13 @@ from fractions import Fraction as F
 import json
 import unittest
 
-import arbitrage_admission as a
-import arbitrage_signals as s
+from strategies.cross_venue import arbitrage_admission as a
+from strategies.cross_venue import arbitrage_signals as s
 from test_arbitrage_scanner import fixture, T
 from test_arbitrage_evaluation import estimator_for
-import arbitrage_economics as e
-import arbitrage_evaluation as v
-import arbitrage_scanner as scanner
+from strategies.cross_venue import arbitrage_economics as e
+from strategies.cross_venue import arbitrage_evaluation as v
+from opportunity_scanner import arbitrage_scanner as scanner
 
 
 def signal_policy(**changes):

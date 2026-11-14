@@ -12,11 +12,11 @@ from threading import Thread, Event
 from queue import Queue, Empty, Full
 import time
 
-import arbitrage_checkpoint as checkpoint
-import arbitrage_scanner as scanner
-from scanner_archive import freeze, load, MAX_BYTES
-from scanner_history import History, encoded
-from scanner_config import ConfigStore, uint_text
+from strategies.cross_venue import arbitrage_checkpoint as checkpoint
+from opportunity_scanner import arbitrage_scanner as scanner
+from opportunity_scanner.scanner_archive import freeze, load, MAX_BYTES
+from opportunity_scanner.scanner_history import History, encoded
+from opportunity_scanner.scanner_config import ConfigStore, uint_text
 
 
 @dataclass(frozen=True)

@@ -4,8 +4,8 @@ from fractions import Fraction as F
 import json
 import unittest
 
-import arbitrage_scanner as s
-import arbitrage_evaluation as v
+from opportunity_scanner import arbitrage_scanner as s
+from strategies.cross_venue import arbitrage_evaluation as v
 from strategy_host import decode_depth_snapshot, encode_depth_snapshot
 from test_arbitrage_evaluation import (T, EXACT, LIMITS, path, policy, estimator_for, wire)
 from test_arbitrage_probability import calibration

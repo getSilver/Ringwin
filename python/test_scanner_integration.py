@@ -12,7 +12,7 @@ import unittest
 import control_plane
 import control_plane_web
 import owner_session
-from scanner_runtime import ScannerRuntime
+from opportunity_scanner.scanner_runtime import ScannerRuntime
 
 
 def configuration(environment="production"):

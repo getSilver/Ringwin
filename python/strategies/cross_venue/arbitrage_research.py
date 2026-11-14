@@ -12,9 +12,9 @@ import os
 from pathlib import Path
 from typing import Optional
 
-import arbitrage_baseline as b
-import arbitrage_probability as p
-import arbitrage_economics as e
+from strategies.cross_venue import arbitrage_baseline as b
+from strategies.cross_venue import arbitrage_probability as p
+from strategies.cross_venue import arbitrage_economics as e
 
 STAGES = ("train", "calibration", "validation", "holdout")
 
@@ -44,7 +44,7 @@ class Protocol:
         if self.mode not in ("taker_taker", "maker_taker"):
             raise b.Rejected("research_mode")
         if self.mode == "maker_taker":
-            from arbitrage_maker_research import validate_scopes
+            from strategies.cross_venue.arbitrage_maker_research import validate_scopes
             validate_scopes(self.maker_scopes)
         elif self.maker_scopes != ():
             raise b.Rejected("research_mode_scope")
@@ -195,7 +195,7 @@ def summarize(protocol, stage, candidate, *, equity, cycles, source_kind="synthe
     equity = tuple(b.materialized(equity, b.MAX_POINTS))
     cycles = tuple(b.materialized(cycles, b.MAX_POINTS))
     if protocol.mode == "maker_taker":
-        from arbitrage_maker_research import summarize_maker
+        from strategies.cross_venue.arbitrage_maker_research import summarize_maker
         maker = summarize_maker(protocol, stage, cycles, maker_samples)
     else:
         if maker_samples != ():

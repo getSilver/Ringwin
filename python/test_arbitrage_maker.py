@@ -4,10 +4,10 @@ from fractions import Fraction as F
 import struct
 import unittest
 
-import arbitrage_maker as m
-import arbitrage_cycle as c
-import arbitrage_evaluation as v
-import arbitrage_checkpoint as recovery
+from strategies.cross_venue import arbitrage_maker as m
+from strategies.cross_venue import arbitrage_cycle as c
+from strategies.cross_venue import arbitrage_evaluation as v
+from strategies.cross_venue import arbitrage_checkpoint as recovery
 from test_arbitrage_checkpoint import meta
 from test_arbitrage_cycle import plan, facts, done, T, entry, market, path, estimator_for, LIMITS
 from test_arbitrage_evaluation import calibration, EXACT

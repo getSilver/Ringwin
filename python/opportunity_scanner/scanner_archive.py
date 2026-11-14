@@ -4,22 +4,22 @@ from fractions import Fraction
 import json
 import math
 
-import arbitrage_baseline
-import arbitrage_economics
-import arbitrage_evaluation
-import arbitrage_probability
-import arbitrage_scanner
+from strategies.cross_venue import arbitrage_baseline
+from strategies.cross_venue import arbitrage_economics
+from strategies.cross_venue import arbitrage_evaluation
+from strategies.cross_venue import arbitrage_probability
+from opportunity_scanner import arbitrage_scanner
 
 MODULES = (arbitrage_baseline, arbitrage_economics, arbitrage_evaluation,
            arbitrage_probability, arbitrage_scanner)
-TYPES = {module.__name__ + "." + name: cls for module in MODULES for name, cls in vars(module).items()
+TYPES = {module.__name__.rsplit(".", 1)[-1] + "." + name: cls for module in MODULES for name, cls in vars(module).items()
          if isinstance(cls, type) and is_dataclass(cls) and cls.__module__ == module.__name__}
 MAX_BYTES = 16 * 1024 * 1024
 
 
 def freeze(value):
     if is_dataclass(value):
-        name = type(value).__module__ + "." + type(value).__name__
+        name = type(value).__module__.rsplit(".", 1)[-1] + "." + type(value).__name__
         if name not in TYPES:
             raise ValueError("unregistered scanner archive type")
         return {"type": name, "fields": {f.name: freeze(getattr(value, f.name)) for f in fields(value)}}

@@ -10,12 +10,12 @@ import sys
 import unittest
 from fractions import Fraction as F
 
-import arbitrage_checkpoint as recovery
-import arbitrage_baseline as b
-import arbitrage_cycle as cycle
-import arbitrage_signals as signals
-import arbitrage_state_space as ss
-import arbitrage_evaluation as evaluation
+from strategies.cross_venue import arbitrage_checkpoint as recovery
+from strategies.cross_venue import arbitrage_baseline as b
+from strategies.cross_venue import arbitrage_cycle as cycle
+from strategies.cross_venue import arbitrage_signals as signals
+from strategies.cross_venue import arbitrage_state_space as ss
+from strategies.cross_venue import arbitrage_evaluation as evaluation
 import strategy_host as host
 from test_arbitrage_checkpoint import meta
 from test_arbitrage_state_space import parameters

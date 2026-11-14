@@ -11,14 +11,14 @@ import copy
 import hashlib
 import json
 
-import arbitrage_baseline as b
-import arbitrage_state_space as ss
-import arbitrage_signals as signals
-import arbitrage_admission as admission
-import arbitrage_cycle as cycle
-import arbitrage_maker as maker
-import arbitrage_evaluation as evaluation
-import arbitrage_probability as probability
+from strategies.cross_venue import arbitrage_baseline as b
+from strategies.cross_venue import arbitrage_state_space as ss
+from strategies.cross_venue import arbitrage_signals as signals
+from strategies.cross_venue import arbitrage_admission as admission
+from strategies.cross_venue import arbitrage_cycle as cycle
+from strategies.cross_venue import arbitrage_maker as maker
+from strategies.cross_venue import arbitrage_evaluation as evaluation
+from strategies.cross_venue import arbitrage_probability as probability
 import strategy_state as s
 
 
@@ -505,7 +505,7 @@ def validate_configured(obj, tag, values, metadata):
         if values["last_at_ns"] < p.policy.at_ns:
             raise ValueError("cycle time")
         if values["target_atoms"] is not None:
-            from arbitrage_economics import holding_target
+            from strategies.cross_venue.arbitrage_economics import holding_target
             matched = values["matched_base"]
             if not 0 < matched <= p.policy.original_base or values["target_atoms"] != holding_target(
                     p.target_atoms, matched/p.policy.original_base, p.policy.absolute_minimum_atoms):

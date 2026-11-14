@@ -8,11 +8,11 @@ from collections import Counter
 from dataclasses import dataclass
 from fractions import Fraction
 
-import arbitrage_baseline as b
-import arbitrage_cycle as c
-import arbitrage_economics as e
-import arbitrage_maker as m
-import arbitrage_probability as p
+from strategies.cross_venue import arbitrage_baseline as b
+from strategies.cross_venue import arbitrage_cycle as c
+from strategies.cross_venue import arbitrage_economics as e
+from strategies.cross_venue import arbitrage_maker as m
+from strategies.cross_venue import arbitrage_probability as p
 
 
 def validate_scopes(scopes):
@@ -144,7 +144,7 @@ class Diagnostics:
 
 
 def summarize_maker(protocol, stage, cycles, samples):
-    from arbitrage_research import STAGES, Outcome
+    from strategies.cross_venue.arbitrage_research import STAGES, Outcome
     samples = tuple(b.materialized(samples, b.MAX_POINTS))
     if any(not isinstance(x, Outcome) for x in cycles):
         raise b.Rejected("research_cycles")

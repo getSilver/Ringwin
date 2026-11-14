@@ -9,10 +9,10 @@ from itertools import combinations
 import hashlib
 import json
 
-import arbitrage_baseline as b
-import arbitrage_economics as e
-import arbitrage_evaluation as v
-import arbitrage_probability as p
+from strategies.cross_venue import arbitrage_baseline as b
+from strategies.cross_venue import arbitrage_economics as e
+from strategies.cross_venue import arbitrage_evaluation as v
+from strategies.cross_venue import arbitrage_probability as p
 from strategy_host import decode_depth_snapshot, RecoveryNeeded
 
 SCHEMA = "arbitrage_candidates_v1"

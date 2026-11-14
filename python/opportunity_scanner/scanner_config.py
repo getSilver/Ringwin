@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 import tempfile
 
-from arbitrage_scanner import Scope
+from opportunity_scanner.arbitrage_scanner import Scope
 
 MAX_CONFIG_BYTES = 2*1024*1024
 

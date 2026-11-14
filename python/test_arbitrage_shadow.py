@@ -6,8 +6,8 @@ import json
 import unittest
 from unittest.mock import patch
 
-import arbitrage_shadow as shadow
-import arbitrage_signals as signals
+from strategies.cross_venue import arbitrage_shadow as shadow
+from strategies.cross_venue import arbitrage_signals as signals
 from test_arbitrage_admission import inputs, ready
 from test_arbitrage_checkpoint import meta
 

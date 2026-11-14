@@ -6,10 +6,10 @@ import struct
 import math
 import unittest
 
-import arbitrage_baseline as b
-import arbitrage_economics as e
-import arbitrage_probability as p
-import arbitrage_evaluation as v
+from strategies.cross_venue import arbitrage_baseline as b
+from strategies.cross_venue import arbitrage_economics as e
+from strategies.cross_venue import arbitrage_probability as p
+from strategies.cross_venue import arbitrage_evaluation as v
 from test_arbitrage_probability import calibration
 
 T = 10_000

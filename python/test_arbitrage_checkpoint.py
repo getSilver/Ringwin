@@ -9,13 +9,13 @@ import struct
 import subprocess
 import sys
 
-import arbitrage_baseline as b
-import arbitrage_checkpoint as recovery
-import arbitrage_state_space as ss
-import arbitrage_signals as signals
-import arbitrage_admission as admission
-import arbitrage_cycle as cycle
-import arbitrage_evaluation as evaluation
+from strategies.cross_venue import arbitrage_baseline as b
+from strategies.cross_venue import arbitrage_checkpoint as recovery
+from strategies.cross_venue import arbitrage_state_space as ss
+from strategies.cross_venue import arbitrage_signals as signals
+from strategies.cross_venue import arbitrage_admission as admission
+from strategies.cross_venue import arbitrage_cycle as cycle
+from strategies.cross_venue import arbitrage_evaluation as evaluation
 import strategy_host as host
 from test_strategy_checkpoint import metadata
 from test_arbitrage_state_space import parameters
@@ -36,7 +36,7 @@ def roundtrip(components, cursor=0, next_intent=1):
 
 class RecoveryTests(unittest.TestCase):
     def test_rolling_continues_with_exact_state_and_statistics(self):
-        import arbitrage_checkpoint as recovery
+        from strategies.cross_venue import arbitrage_checkpoint as recovery
         window = b.RollingWindow(b.WindowSpec(1, 3, 2, .001, 0.))
         for i, value in enumerate((.1, .2, .4), 1):
             window.push(b.Point(i*b.SECOND, i, value))

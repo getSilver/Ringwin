@@ -16,13 +16,13 @@ import tempfile
 import threading
 import time
 
-import arbitrage_evaluation as v
-import arbitrage_scanner as s
+from strategies.cross_venue import arbitrage_evaluation as v
+from opportunity_scanner import arbitrage_scanner as s
 import control_plane
 import control_plane_web
 import owner_session
-from scanner_console import ScannerConsole, CanonicalSource
-from scanner_history import History
+from opportunity_scanner.scanner_console import ScannerConsole, CanonicalSource
+from opportunity_scanner.scanner_history import History
 import strategy_instance
 from test_arbitrage_scanner import fixture
 from test_arbitrage_evaluation import T, estimator_for

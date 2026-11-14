@@ -7,12 +7,12 @@ core's existing cancellation authority. The Host order codec has no cancel API.
 """
 from dataclasses import dataclass, replace
 
-import arbitrage_baseline as b
-import arbitrage_cycle as c
-import arbitrage_economics as e
-import arbitrage_evaluation as v
+from strategies.cross_venue import arbitrage_baseline as b
+from strategies.cross_venue import arbitrage_cycle as c
+from strategies.cross_venue import arbitrage_economics as e
+from strategies.cross_venue import arbitrage_evaluation as v
 import strategy_host as host
-import arbitrage_probability as p
+from strategies.cross_venue import arbitrage_probability as p
 
 
 def _possible(intent, orders):

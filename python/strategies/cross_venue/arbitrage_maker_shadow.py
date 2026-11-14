@@ -6,11 +6,11 @@ module. Capture JSON requires the original Frame archive and dependencies.
 import copy
 from dataclasses import dataclass, replace, asdict
 
-import arbitrage_baseline as b
-import arbitrage_cycle as cycle
-import arbitrage_maker as maker
-import arbitrage_checkpoint as checkpoint
-import arbitrage_shadow as shadow
+from strategies.cross_venue import arbitrage_baseline as b
+from strategies.cross_venue import arbitrage_cycle as cycle
+from strategies.cross_venue import arbitrage_maker as maker
+from strategies.cross_venue import arbitrage_checkpoint as checkpoint
+from strategies.cross_venue import arbitrage_shadow as shadow
 
 
 @dataclass(frozen=True)

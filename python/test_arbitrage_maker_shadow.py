@@ -5,10 +5,10 @@ from fractions import Fraction as F
 import json
 import unittest
 
-import arbitrage_maker as maker
-import arbitrage_maker_shadow as shadow
-import arbitrage_shadow as taker
-import arbitrage_signals as signals
+from strategies.cross_venue import arbitrage_maker as maker
+from strategies.cross_venue import arbitrage_maker_shadow as shadow
+from strategies.cross_venue import arbitrage_shadow as taker
+from strategies.cross_venue import arbitrage_signals as signals
 from test_arbitrage_admission import inputs, ready
 from test_arbitrage_scanner import fixture as scan_fixture
 from test_arbitrage_maker import maker_plan, quote
@@ -61,8 +61,8 @@ class MakerShadowTests(unittest.TestCase):
         json.dumps(row)
 
     def test_admitted_idle_cycle_selects_quote_and_denied_whitelist_never_starts(self):
-        import arbitrage_admission as admission
-        import arbitrage_scanner as scanner
+        from strategies.cross_venue import arbitrage_admission as admission
+        from opportunity_scanner import arbitrage_scanner as scanner
         factory, frame, _, state = fixture()
         _, _, cfg, approval, core = inputs()
         p = maker_plan(config_hash=cfg.content_hash,

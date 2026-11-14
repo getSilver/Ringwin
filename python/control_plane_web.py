@@ -208,7 +208,7 @@ class ControlPlaneApp:
         self.scanner_runtime = None
         market_config = Path(directory)/"scanner-market.json"
         if scanner_console is None and market_config.is_file():
-            from scanner_runtime import ScannerRuntime
+            from opportunity_scanner.scanner_runtime import ScannerRuntime
             if market_config.stat().st_size > 65536:
                 raise ValueError("scanner market configuration capacity")
             self.scanner_runtime = ScannerRuntime(directory, json.loads(market_config.read_text(encoding="utf-8")))

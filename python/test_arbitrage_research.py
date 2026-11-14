@@ -6,8 +6,8 @@ import unittest
 from fractions import Fraction as F
 import json
 
-import arbitrage_baseline as b
-import arbitrage_research as r
+from strategies.cross_venue import arbitrage_baseline as b
+from strategies.cross_venue import arbitrage_research as r
 
 
 def protocol(**changes):
