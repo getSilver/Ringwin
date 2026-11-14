@@ -322,7 +322,11 @@ class ControlPlaneApp:
             command["command_identity"] = secrets.randbits(62) | 1
             command_identity = command["command_identity"]
         if "expires_at" not in command:
-            command["expires_at"] = self.clock() + 300
+            if command_identity in self._command_results:
+                previous, _ = self._command_results[command_identity]
+                command["expires_at"] = json.loads(previous)["expires_at"]
+            else:
+                command["expires_at"] = self.clock() + 300
         fingerprint = json.dumps(command, sort_keys=True, separators=(",", ":"))
         if command_identity is not None and command_identity in self._command_results:
             previous, response = self._command_results[command_identity]

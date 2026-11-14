@@ -68,11 +68,26 @@ def main() -> None:
 
         shard_command = {"kind": "cancel_open_orders", "command_identity": "2001",
                          "target_identity": "1", "expected_version": 0}
-        status, _ = app.submit_command(headers, shard_command)
+        status, _ = app.submit_command(headers, dict(shard_command))
         expect(status == 200, "shard command")
-        status, _ = app.submit_command(headers, shard_command)
+        clock.now += 2
+        status, _ = app.submit_command(headers, dict(shard_command))
         expect(status == 200 and len(server._pending) == 1,
                "shard command replay must not enqueue twice")
+        restarted_app = control_plane_web.ControlPlaneApp(root, server, clock=clock)
+        clock.now += 30
+        status, login = restarted_app.login(
+            "correct horse battery staple",
+            owner_session.totp_at(setup["totp_secret"], clock.now), "127.0.0.1")
+        expect(status == 200, "Web login after restart")
+        headers = {"Cookie": f"owner_session={login['session_token']}",
+                   "X-Owner-CSRF": login["csrf_token"]}
+        status, _ = restarted_app.submit_command(headers, dict(shard_command))
+        expect(status == 200 and len(server._pending) == 1,
+               "shard command replay after Web restart must not enqueue twice")
+        status, _ = restarted_app.submit_command(
+            headers, dict(shard_command, expires_at=clock.now + 300))
+        expect(status == 409, "explicit command expiry change must conflict")
         records = app.records.read_all()
         expect(all("secret" not in str(record).lower() for record in records),
                "operator records contain no secret material")
