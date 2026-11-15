@@ -35,7 +35,7 @@ OKX = {"BTC-USDC": (0x4f4b5800000003, "btc_usdc_spot", "spot"),
 class PublicTransport:
     def request(self, url, body=None):
         data = None if body is None else json.dumps(body, separators=(",", ":")).encode()
-        request = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json", "User-Agent": "Mozilla/5.0"})
+        request = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(request, timeout=3) as response:
             payload = response.read(MAX_FRAME + 1)
         if len(payload) > MAX_FRAME:

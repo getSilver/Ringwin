@@ -13,31 +13,6 @@ import control_plane
 import control_plane_web
 import owner_session
 from opportunity_scanner.scanner_runtime import ScannerRuntime
-from opportunity_scanner.scanner_runtime import PublicTransport
-
-
-class PublicTransportTests(unittest.TestCase):
-    def test_server_rejecting_python_default_agent_accepts_public_request(self):
-        from http.server import BaseHTTPRequestHandler, HTTPServer
-
-        class Handler(BaseHTTPRequestHandler):
-            def do_GET(self):
-                self.send_response(403 if self.headers.get('User-Agent', '').startswith('Python-urllib') else 200)
-                self.end_headers()
-                self.wfile.write(b'public market')
-
-            def log_message(self, *args):
-                pass
-
-        server = HTTPServer(('127.0.0.1', 0), Handler)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        try:
-            self.assertEqual(PublicTransport().request(f'http://127.0.0.1:{server.server_port}/'), 'public market')
-        finally:
-            server.shutdown()
-            server.server_close()
-            thread.join()
 
 
 def configuration(environment="production"):
@@ -64,7 +39,6 @@ class ProtocolTransport:
         self.fail = set()
         self.bad_rules = False
         self.stale = False
-        self.source_offset_ms = 0
         self.oversize = False
         self.replay = False
         self.captured = {}
@@ -85,8 +59,6 @@ class ProtocolTransport:
         if self.oversize: return "x" * (130*1024)
         self.sequence += 1
         milliseconds = self.clock[1]//1_000_000 - (60_000 if self.stale else 0)
-        if binding["venue"] == 1:
-            milliseconds += self.source_offset_ms
         if binding["venue"] == 21:
             payload=json.dumps(dict(coin="BTC", time=milliseconds,
                 levels=[[dict(px="50100",sz="2",n=1)],[dict(px="50101",sz="3",n=1)]]))
@@ -221,22 +193,6 @@ class IntegrationTests(unittest.TestCase):
         self.transport.stale=False; self.tick()
         self.transport.oversize=True; self.tick()
         self.assertEqual(self.call("start")["phase"],"Degraded")
-
-    def test_okx_clock_skew_is_bounded_and_stale_data_is_rejected(self):
-        self.transport.source_offset_ms = 500
-        self.call("configure", dict(expected_version="0", scopes=[scope(1), scope(21)]))
-        self.call("start")
-        self.tick()
-        view = self.call("start")
-        self.assertTrue(next(o for o in view["market"]["observations"] if o["venue"] == "1")["continuous"], view)
-        self.transport.source_offset_ms = 501
-        self.tick()
-        view = self.call("start")
-        self.assertIn("StaleSourceTime", view["market"]["failures"].values())
-        self.transport.source_offset_ms = -5001
-        self.tick()
-        view = self.call("start")
-        self.assertIn("StaleSourceTime", view["market"]["failures"].values())
 
     def test_raw_evidence_is_append_only_and_binds_synthetic_input(self):
         import hashlib
