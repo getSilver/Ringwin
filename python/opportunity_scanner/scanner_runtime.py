@@ -311,27 +311,36 @@ class ScannerRuntime:
                                  count=len(entries), complete=True, refresh_ns=str(CATALOGUE_REFRESH_NS), ttl_ns=str(CATALOGUE_TTL_NS))
                     sources = {k:v for k,v in self.discovery_status.items() if v["state"] == "ready"}
                     sources[key] = state
-                    atomic_json(self.directory/"scanner-discovery.json", dict(schema=1, assets=assets,
-                        bindings=[r for r in updated.values() if "okx_binding" in r or "hl_discovered" in r], sources=sources), MAX_DISCOVERY_BYTES)
                     missing = source_identities - incoming
                     changed = missing | {i for i in affected if i not in updated or self.bindings[i] != updated[i]}
-                    self.source.registered = {i:e for i,e in self.source.registered.items() if i not in affected}
-                    self.source.register(entries)
-                    self.bindings, self.source.assets = updated, assets
                     # A switched scope admits its first complete directory, then resumes
                     # the saved new-instrument policy for subsequent refreshes.
                     console = self.console
+                    candidate = None
                     if key in console.config.get("pending_catalogues", []):
                         codes = {a["identity"]:a["code"] for a in assets}
                         base_ids = {codes[r["base_asset"]]:r["base_asset"] for r in rows}
                         quote_ids = {codes[r["quote_asset"]]:r["quote_asset"] for r in rows}
+                        def rebind(identity, identities, role):
+                            code = codes.get(identity)
+                            if code is None:
+                                return identity
+                            if code not in identities:
+                                # A missing instrument must still retain its filter in the target namespace.
+                                if setting["type"] == "hyperliquid":
+                                    identities[code] = self._hyperliquid_asset(setting, role, code, assets_by_id)
+                                else:
+                                    asset = okx_assets.get(code) or dict(identity=str(self._stable_id("scanner-asset-v1", code)), code=code, atomic_scale=18)
+                                    assets_by_id[asset["identity"]] = asset
+                                    identities[code] = asset["identity"]
+                            return identities[code]
                         scopes = []
                         for scope in console.config["scopes"]:
                             if (scope["venue"], scope["environment"]) == (setting["venue"], setting["environment"]):
                                 scope = dict(scope,
-                                    include_assets=[base_ids.get(codes.get(i), i) for i in scope["include_assets"]],
-                                    exclude_assets=[base_ids.get(codes.get(i), i) for i in scope["exclude_assets"]],
-                                    quote_asset=quote_ids.get(codes.get(scope["quote_asset"]), scope["quote_asset"]))
+                                    include_assets=[rebind(i, base_ids, "perp") for i in scope["include_assets"]],
+                                    exclude_assets=[rebind(i, base_ids, "perp") for i in scope["exclude_assets"]],
+                                    quote_asset=rebind(scope["quote_asset"], quote_ids, "price-denomination"))
                             scopes.append(scope)
                         candidate = dict(console.config, version=str(int(console.config["version"])+1),
                             scopes=scopes,
@@ -339,9 +348,16 @@ class ScannerRuntime:
                         candidate["pending_catalogues"] = [k for k in console.config["pending_catalogues"] if k != key]
                         if not candidate["pending_catalogues"]:
                             candidate.pop("pending_catalogues")
+                        assets = list(assets_by_id.values())
+                    atomic_json(self.directory/"scanner-discovery.json", dict(schema=1, assets=assets,
+                        bindings=[r for r in updated.values() if "okx_binding" in r or "hl_discovered" in r], sources=sources), MAX_DISCOVERY_BYTES)
+                    if candidate is not None:
                         if console.config_store is not None:
                             console.config_store.save(candidate)
                         console.config = candidate
+                    self.source.registered = {i:e for i,e in self.source.registered.items() if i not in affected}
+                    self.source.register(entries)
+                    self.bindings, self.source.assets = updated, assets
                     for owner in self.source.owners:
                         self.source.owners[owner].intersection_update(updated)
                     self.source.unavailable.difference_update(source_identities)
@@ -402,15 +418,19 @@ class ScannerRuntime:
             if self.clock() >= self.next_discovery.get(key, 0):
                 self.request_discovery(setting, refresh=True)
 
+    def _hyperliquid_asset(self, setting, role, code, assets):
+        key = "21:" + setting["environment"]
+        identity = str(self._stable_id("hyperliquid-observation-asset-v1", key+":"+role+":"+code))
+        assets[identity] = dict(identity=identity, code=code, atomic_scale=18)
+        return identity
+
     def _hyperliquid_row(self, setting, item, assets):
         key = "21:" + setting["environment"]
         coin = item["coin"]
         # Protocol coin identity is scoped to the standard perp namespace and environment.
-        def asset(role, code):
-            identity = str(self._stable_id("hyperliquid-observation-asset-v1", key+":"+role+":"+code))
-            assets[identity] = dict(identity=identity, code=code, atomic_scale=18)
-            return identity
-        base, quote, settlement = asset("perp", coin), asset("price-denomination", "USDT"), asset("collateral-0", "USDC")
+        base = self._hyperliquid_asset(setting, "perp", coin, assets)
+        quote = self._hyperliquid_asset(setting, "price-denomination", "USDT", assets)
+        settlement = self._hyperliquid_asset(setting, "collateral-0", "USDC", assets)
         instrument = self._stable_id("hyperliquid-standard-perp-v1", key+":"+coin)
         version = self._stable_id("hyperliquid-rules-v1", json.dumps(item, sort_keys=True, separators=(",", ":"))) & ((1<<53)-1) or 1
         size = item["size_decimals"]

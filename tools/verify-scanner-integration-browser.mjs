@@ -128,6 +128,37 @@ try {
   await click('停止扫描');await page.getByText('已停止 · 配置 v1',{exact:true}).waitFor();
   await page.getByRole('heading',{name:'当前跨所机会 · 0',exact:true}).waitFor();
  });
+ if(args.includes('--draft-conflict')) {
+  await page.setViewportSize({width:1600,height:1100});
+  await check('rename preserves stale draft conflict and cannot restore removed scopes',async()=>{
+   await tab('扫描范围');
+   const authenticated=await page.waitForResponse(r=>r.url().endsWith('/api/scanner')&&r.request().method()==='GET');
+   const headers={'Content-Type':'application/json','X-Owner-CSRF':authenticated.request().headers()['x-owner-csrf']};
+   const before=await page.evaluate(async headers=>{
+    const current=await(await fetch('/api/scanner',{headers})).json();
+    const scopes=current.result.config.scopes.filter(row=>row.venue==='21');
+    const response=await fetch('/api/scanner',{method:'POST',headers,body:JSON.stringify({operation:'configure',
+      payload:{expected_version:current.result.config.version,scopes}})});
+    return {status:response.status,body:await response.json()};
+   },headers);
+   assert.equal(before.status,200);assert.equal(before.body.result.config.scopes.length,1);
+   await page.getByText(/草稿基于 v1 · 当前生效 v2/).waitFor();
+   await click('Settings');await click('交易所');await click('编辑 我的现货');
+   await page.getByRole('textbox',{name:'交易所名称',exact:true}).fill('仅改显示名称');await click('保存交易所');
+   await page.getByRole('table',{name:'已保存交易所'}).getByText('仅改显示名称',{exact:true}).waitFor();
+   await page.keyboard.press('Escape');
+   await page.getByRole('table',{name:'范围草稿'}).getByText('仅改显示名称',{exact:true}).waitFor();
+   const response=page.waitForResponse(r=>r.url().endsWith('/api/scanner')&&r.request().postData()?.includes('"configure"'));
+   await click('应用扫描范围');assert.equal((await response).status(),409);
+   await page.getByText(/scanner config version conflict/).waitFor();
+   const current=await page.evaluate(async headers=>(await(await fetch('/api/scanner',{headers})).json()).result,headers);
+   assert.deepEqual(current.config.scopes.map(row=>row.venue),['21']);
+   await click('放弃草稿');await tab('当前机会');await tab('扫描范围');
+   await page.getByText(/草稿基于 v2 · 当前生效 v2/).waitFor();
+   await click('应用扫描范围');
+   await page.getByRole('table',{name:'实际生效范围'}).getByText('我的永续',{exact:true}).waitFor();
+  });
+ }
  if(args.includes('--settings-lifecycle')) {
   await page.setViewportSize({width:1600,height:1100});
   await check('rename updates names, search, draft, history and preserves candidate identity',async()=>{

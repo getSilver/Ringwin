@@ -103,8 +103,10 @@ Hyperliquid 动态发现复用同一浏览器 runner：`node tools/verify-okx-di
 
 删除撤销该设置的已保存范围及扫描器订阅；环境或类型切换保留设置身份，按新来源重建适用产品范围并预热。
 新环境首次目录接纳通过 `scanner-config.json` 中可选的 `pending_catalogues` 持久化，按资产代码重绑观察筛选，完成后恢复原 `new_instruments` 策略。
+暂未出现在目标目录的资产也按目标环境的稳定观察身份重绑并持久化，后续重新出现时继续遵守原纳入／排除条件。
 公共网络轮询及目录发现的旧结果经配置版本、worker 实例和来源 generation 校验后丢弃；其他消费者持有的旧来源订阅不释放。
 
 设置文件先原子保存，再协调扫描范围和运行。协调失败返回 HTTP 503、`saved:true`、`pending:true`，立即停止扫描并清空候选；设置保存本身失败则保持原状态。
 重启默认停止，按设置文件修复已保存范围；显式重新保存设置可重试未完成目录加载，不因普通读取或停止状态自动联网。
 定向页面验收：`node tools/verify-scanner-integration-browser.mjs --dev --settings-lifecycle`。
+改名只更新草稿名称，不提升草稿基线版本；配置已变化时应用旧草稿返回版本冲突，需要重新加载范围后再应用。定向冲突回归追加 `--draft-conflict`（单独运行该模式）。

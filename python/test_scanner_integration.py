@@ -446,6 +446,53 @@ class HyperliquidCatalogueTests(unittest.TestCase):
         self.addCleanup(self.runtime.close)
         self.setting = dict(identity="b"*32, venue="21", type="hyperliquid", name="永续", environment="production")
 
+    def test_environment_switch_preserves_filters_for_temporarily_missing_assets_after_restart(self):
+        from opportunity_scanner.exchange_settings import ExchangeSettings
+        store = ExchangeSettings(Path(self.temp.name)/"exchange-settings.json")
+        setting = store.save(dict(expected_version="0", type="hyperliquid", name="市场", environment="production"))["exchanges"][0]
+        self.runtime.console.exchange_settings = store
+        eth = dict(self.transport.metadata_document["universe"][0])
+        sol = dict(eth, name="SOL")
+        self.transport.metadata_document["universe"] = [eth, sol]
+        self.runtime.discover(setting)
+        old_sol = next(r["base_asset"] for r in self.runtime.bindings.values() if r["symbol"] == "SOL")
+        rows = [dict(scope(21), quote_asset=None, exclude_assets=[old_sol], new_instruments=True)]
+        self.runtime.console.configure(dict(expected_version="0", scopes=rows))
+        setting = store.save(dict(expected_version="1", identity=setting["identity"], type="hyperliquid",
+            name=setting["name"], environment="testnet"))["exchanges"][0]
+        self.runtime.console.reconcile_settings()
+        self.transport.metadata_document["universe"] = [eth]
+        self.runtime.discover(setting)
+        excluded = self.runtime.console.config["scopes"][0]["exclude_assets"][0]
+        self.runtime.close()
+        self.runtime = ScannerRuntime(self.temp.name, dict(schema=1, assets=[], bindings=[]), transport=self.transport,
+            clock=lambda:self.now[0], utc_clock=lambda:self.now[1], automatic=False)
+        self.addCleanup(self.runtime.close)
+        self.runtime.console.exchange_settings = store
+        self.assertEqual(next(a["code"] for a in self.runtime.source.assets if a["identity"] == excluded), "SOL")
+        self.transport.metadata_document["universe"] = [eth, sol]
+        self.runtime.discover(setting)
+        self.runtime.console.start()
+        selected = self.runtime.source.owners[self.runtime.console.session]
+        self.assertEqual({self.runtime.bindings[i]["symbol"] for i in selected}, {"ETH"})
+        target_sol = next(r["base_asset"] for r in self.runtime.bindings.values()
+                          if r["symbol"] == "SOL" and r["environment"] == "testnet")
+        self.assertEqual(self.runtime.console.config["scopes"][0]["exclude_assets"], [target_sol])
+        # The same identity must also retain an explicit include while SOL is absent.
+        self.runtime.console.stop()
+        self.runtime.console.configure(dict(expected_version=self.runtime.console.config["version"],
+            scopes=[dict(scope(21, "testnet"), quote_asset=None, include_assets=[target_sol], new_instruments=True)]))
+        setting = store.save(dict(expected_version="2", identity=setting["identity"], type="hyperliquid",
+            name=setting["name"], environment="production"))["exchanges"][0]
+        self.runtime.console.reconcile_settings()
+        self.transport.metadata_document["universe"] = [eth]
+        self.runtime.discover(setting)
+        self.transport.metadata_document["universe"] = [eth, sol]
+        self.runtime.discover(setting)
+        self.runtime.console.start()
+        selected = self.runtime.source.owners[self.runtime.console.session]
+        self.assertEqual({self.runtime.bindings[i]["symbol"] for i in selected}, {"SOL"})
+
     def test_rejected_metadata_is_visible_and_never_registers_or_subscribes(self):
         original = json.loads(json.dumps(self.transport.metadata_document))
         for mode, reason in (("collateral", "UnsupportedCollateral"), ("precision", "UnsupportedDecimalUnits"),
