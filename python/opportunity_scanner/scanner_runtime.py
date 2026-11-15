@@ -148,6 +148,9 @@ class ScannerRuntime:
             if entry.identity in self.bindings:
                 raise ValueError("duplicate scanner binding")
             self.bindings[entry.identity] = dict(row)
+            if "okx_binding" in row or row.get("hl_discovered"):
+                key = str(row["venue"]) + ":" + row["environment"]
+                self.discovery_status.setdefault(key, dict(state="unloaded", error=""))
             entries.append(entry)
         self.source = CanonicalSource(entries, subscribe=self.acquire, unsubscribe=self.release, assets=configuration["assets"])
         self.source.runtime_status = self.status
@@ -326,12 +329,13 @@ class ScannerRuntime:
                 continue
             if self.clock() - self.discovery_success.get(key, 0) >= CATALOGUE_TTL_NS:
                 with self.poll_lock, self.console.lock, self.source.lock, self.lock:
-                    affected = {i for i,r in self.bindings.items() if (r["venue"], r["environment"]) ==
-                                (int(setting["venue"]), setting["environment"])}
-                    if not affected <= self.source.unavailable:
-                        self.source.unavailable.update(affected)
-                        self._catalogue_changed(affected)
-                    self.discovery_status[key].update(state="failed", error="catalogue TTL expired", complete=False)
+                    if self.clock() - self.discovery_success.get(key, 0) >= CATALOGUE_TTL_NS:
+                        affected = {i for i,r in self.bindings.items() if (r["venue"], r["environment"]) ==
+                                    (int(setting["venue"]), setting["environment"])}
+                        if not affected <= self.source.unavailable:
+                            self.source.unavailable.update(affected)
+                            self._catalogue_changed(affected)
+                        self.discovery_status[key].update(state="failed", error="catalogue TTL expired", complete=False)
             if self.clock() >= self.next_discovery.get(key, 0):
                 self.request_discovery(setting, refresh=True)
 

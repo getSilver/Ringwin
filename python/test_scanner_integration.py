@@ -244,6 +244,51 @@ class DynamicCatalogueTests(unittest.TestCase):
         self.runtime.source.release("other-consumer")
         self.assertEqual(self.runtime.workers, {})
 
+    def test_subscription_capacity_never_leaves_partial_healthy_coverage(self):
+        self.runtime.discover(self.setting)
+        console = self.runtime.console
+        console.configure(dict(expected_version="0", scopes=[dict(scope(1, "demo"), quote_asset=None, new_instruments=True)]))
+        console.start(); self.runtime.step()
+        original = self.transport.request
+        def large(url, *args, **kwargs):
+            value = json.loads(original(url, *args, **kwargs))
+            if "/instruments?" in url and "&instId=" not in url:
+                row = value["data"][0]
+                value["data"] = [dict(row, instId=row["instId"].replace("ETH", "TOKEN"+str(i)),
+                    **{"ctValCcy" if row["instType"] == "SWAP" else "baseCcy": "TOKEN"+str(i)}) for i in range(17)]
+            return json.dumps(value)
+        self.transport.request = large
+        self.runtime.discover(self.setting)
+        state = self.runtime.status()["discovery"]["1:demo"]
+        self.assertEqual(state["state"], "failed")
+        self.assertIn("subscription capacity", state["error"])
+        self.assertFalse(state["complete"])
+        self.assertEqual(self.runtime.observations, {})
+        self.assertEqual(self.runtime.workers, {})
+        self.assertEqual(self.runtime.source.owners[console.session], set())
+
+    def test_restart_refreshes_cached_bindings_even_without_saved_ready_state(self):
+        self.runtime.discover(self.setting)
+        cache = Path(self.temp.name, "scanner-discovery.json")
+        value = json.loads(cache.read_bytes())
+        value["sources"] = {}  # Another source committed while this source was loading/failed.
+        cache.write_bytes(json.dumps(value).encode())
+        self.runtime.close()
+        self.runtime = ScannerRuntime(self.temp.name, dict(schema=1, assets=[], bindings=[]), transport=self.transport,
+            clock=lambda:self.now[0], utc_clock=lambda:self.now[1], automatic=False)
+        self.assertEqual(self.runtime.status()["discovery"]["1:demo"]["state"], "unloaded")
+        self.assertEqual(self.runtime.workers, {})
+        self.runtime.console.configure(dict(expected_version="0", scopes=[dict(scope(1, "demo"), quote_asset=None)]))
+        from opportunity_scanner.exchange_settings import ExchangeSettings
+        settings = ExchangeSettings(Path(self.temp.name)/"exchange-settings.json")
+        settings.save(dict(expected_version="0", type="okx", name="我的 OKX", environment="demo"))
+        self.runtime.console.exchange_settings = settings
+        self.runtime.step()
+        for thread in self.runtime.discovery_threads:
+            thread.join(timeout=20)
+            self.assertFalse(thread.is_alive())
+        self.assertEqual(self.runtime.status()["discovery"]["1:demo"]["state"], "ready")
+
     def test_legacy_assembly_does_not_skip_settings_driven_discovery(self):
         self.runtime.close()
         self.runtime = ScannerRuntime(self.temp.name, configuration(), transport=self.transport, automatic=False)
@@ -594,6 +639,21 @@ class IntegrationTests(unittest.TestCase):
         self.assertIs(self.runtime.workers[identity], worker)
         self.runtime.source.release("other-consumer")
         self.assertEqual(self.runtime.workers, {})
+
+    def test_failed_catalogue_immediately_revokes_existing_candidates(self):
+        self.start()
+        before = self.call("start")
+        self.assertEqual(len(before["snapshot"]["candidates"]), 3)
+        identity = next(i for i in self.runtime.workers if i[0] == 21)
+        worker = self.runtime.workers[identity]
+        def disconnected(*args):
+            raise OSError("synthetic catalogue disconnected")
+        self.transport.catalogue = disconnected
+        self.runtime.discover(self.app.exchange_settings_store.view()["exchanges"][0])
+        view = self.http("/api/scanner", headers=self.headers)[1]["result"]
+        self.assertEqual(view["snapshot"]["candidates"], [])
+        self.assertEqual([o["venue"] for o in view["market"]["observations"]], ["21"])
+        self.assertIs(self.runtime.workers[identity], worker)
 
     def test_dynamic_hyperliquid_settings_scope_native_scan_and_restart(self):
         self.runtime.close()
