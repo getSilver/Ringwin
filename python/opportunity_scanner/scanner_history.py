@@ -41,6 +41,34 @@ class History:
         self.request_bytes = 0
         self.config, self.gaps = None, []
         self.healthy, self.error, self.closed = True, "", False
+        self.names = OrderedDict()
+
+    def remember_names(self, settings):
+        with self.lock:
+            now = self._now()
+            for setting in settings:
+                self.names.pop(setting["identity"], None)
+                self.names[setting["identity"]] = (setting["name"], now)
+            for identity, (_, stamp) in list(self.names.items()):
+                if stamp < now-WINDOW_MS:
+                    self.names.pop(identity)
+            while len(self.names) > self.max_records:
+                self.names.popitem(last=False)
+
+    def display_names(self, rows, settings):
+        self.remember_names(settings)
+        with self.lock:
+            def update(value):
+                if isinstance(value, dict):
+                    if "setting_id" in value and "name" in value and value["setting_id"] in self.names:
+                        value["name"] = self.names[value["setting_id"]][0]
+                    for child in value.values():
+                        update(child)
+                elif isinstance(value, list):
+                    for child in value:
+                        update(child)
+            update(rows)
+        return rows
 
     def _now(self):
         if self.closed:
@@ -113,7 +141,7 @@ class History:
         content, _ = self.artifacts.pop(digest)
         self.evidence_bytes -= len(content.encode())
 
-    def record(self, kind, identity, payload, *, session="", sequence=0, wall_ms=None):
+    def record(self, kind, identity, payload, *, session="", sequence=0, wall_ms=None, sources=None):
         payload = detached(payload)
         with self.lock:
             now = self._now()
@@ -126,6 +154,8 @@ class History:
                 return False
             row = dict(kind=kind, identity=identity, session=session, sequence=sequence,
                        wall_ms=now if wall_ms is None else wall_ms, payload=payload)
+            if sources is not None:
+                row["sources"] = detached(sources)
             self._put(self.records, "records", key, row)
             if kind == "config":
                 self.config = payload
@@ -189,7 +219,7 @@ class History:
                 event = dict(identity=event_id, session=session, candidate=key,
                     started_ns=envelope["snapshot"]["at_ns"], last_ns=envelope["snapshot"]["at_ns"],
                     ended_ns=None, wall_ms=wall_ms, last_wall_ms=wall_ms, end_reason=None,
-                    payload=dict(candidate=row, threshold=threshold, representative="first_evaluation",
+                    payload=dict(candidate=row, sources=envelope.get("sources", {}), threshold=threshold, representative="first_evaluation",
                                  config_version=envelope["config_version"], evidence=list(evidence)))
                 self._put(self.events, "events", event_id, event)
                 self.open_events[session, key] = event_id

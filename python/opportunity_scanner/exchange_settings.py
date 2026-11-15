@@ -65,6 +65,15 @@ class ExchangeSettings:
 
     def save(self, request):
         with self.lock:
+            if type(request) is dict and request.get("operation") == "delete":
+                if set(request) != {"operation", "identity", "expected_version"}:
+                    raise ValueError("exchange settings delete fields")
+                if request["expected_version"] != self.document["version"]:
+                    raise ValueError("exchange settings version conflict")
+                rows = [r for r in self.document["exchanges"] if r["identity"] != request["identity"]]
+                if len(rows) == len(self.document["exchanges"]):
+                    raise ValueError("unknown exchange setting")
+                return self._commit(rows)
             fields = {"expected_version", "type", "name", "environment"}
             if type(request) is not dict or set(request) - {"identity"} != fields:
                 raise ValueError("exchange settings request fields")
@@ -81,17 +90,17 @@ class ExchangeSettings:
                        type=request["type"], name=request["name"].strip() if type(request["name"]) is str else request["name"],
                        environment=request["environment"])
             validate_row(row)
-            # Source switches and deletion require subscription coordination (ticket 05).
-            if previous and (previous["venue"], previous["environment"]) != (row["venue"], row["environment"]):
-                raise ValueError("exchange source switch requires lifecycle coordination")
             rows = [r for r in self.document["exchanges"] if r["identity"] != row["identity"]]
             if any((r["venue"], r["environment"]) == (row["venue"], row["environment"]) for r in rows):
                 raise ValueError("duplicate exchange source")
             rows.append(row)
             if len(rows) > 32:
                 raise ValueError("exchange settings capacity")
-            candidate = dict(schema="exchange_settings_v1", version=str(uint_text(self.document["version"])+1), exchanges=rows)
-            uint_text(candidate["version"])
-            atomic_json(self.path, candidate, MAX_BYTES)
-            self.document = candidate
-            return self.view()
+            return self._commit(rows)
+
+    def _commit(self, rows):
+        candidate = dict(schema="exchange_settings_v1", version=str(uint_text(self.document["version"])+1), exchanges=rows)
+        uint_text(candidate["version"])
+        atomic_json(self.path, candidate, MAX_BYTES)
+        self.document = candidate
+        return self.view()

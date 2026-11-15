@@ -18,7 +18,7 @@ const click=name=>page.getByRole('button',{name,exact:true}).click();
 const tab=name=>page.getByRole('tab',{name,exact:true}).click();
 const choose=async(name,value)=>{await page.getByRole('combobox',{name,exact:true}).click();await page.getByRole('option',{name:value,exact:true}).click();};
 try {
- fixture=spawn('python',['-u','python/verify_scanner_integration.py','--ui',join(ui,'dist/index.html')],{cwd:root,stdio:['pipe','pipe','pipe']});
+ fixture=spawn('python',['-u','python/verify_scanner_integration.py','--ui',join(ui,'dist/index.html'),...(args.includes('--settings-lifecycle')?['--settings-lifecycle']:[])],{cwd:root,stdio:['pipe','pipe','pipe']});
  fixture.stderr.on('data',data=>{diagnostics+=data;});
  const ready=await new Promise((resolve,reject)=>{
   let buffer='';const timeout=setTimeout(()=>reject(new Error('fixture startup timeout '+diagnostics)),45000);
@@ -128,6 +128,48 @@ try {
   await click('停止扫描');await page.getByText('已停止 · 配置 v1',{exact:true}).waitFor();
   await page.getByRole('heading',{name:'当前跨所机会 · 0',exact:true}).waitFor();
  });
+ if(args.includes('--settings-lifecycle')) {
+  await page.setViewportSize({width:1600,height:1100});
+  await check('rename updates names, search, draft, history and preserves candidate identity',async()=>{
+   await click('启动扫描');await page.getByRole('heading',{name:'当前跨所机会 · 3',exact:true}).waitFor();
+   const before=await page.getByRole('button',{name:/^查看证据 /}).allTextContents();
+   await tab('扫描范围');
+   await click('Settings');await click('交易所');await click('编辑 我的现货');
+   await page.getByRole('textbox',{name:'交易所名称',exact:true}).fill('改名后的市场');await click('保存交易所');
+   await page.getByRole('table',{name:'已保存交易所'}).getByText('改名后的市场',{exact:true}).waitFor();
+   await page.keyboard.press('Escape');
+   await page.getByRole('table',{name:'范围草稿'}).getByText('改名后的市场',{exact:true}).waitFor();
+   await page.getByRole('table',{name:'实际生效范围'}).getByText('改名后的市场',{exact:true}).waitFor();
+   await tab('当前机会');await page.getByRole('textbox',{name:'搜索资产或交易所',exact:true}).fill('改名后的市场');
+   await page.getByRole('heading',{name:'当前跨所机会 · 3',exact:true}).waitFor();
+   assert.deepEqual(await page.getByRole('button',{name:/^查看证据 /}).allTextContents(),before);
+   await page.getByRole('textbox',{name:'搜索资产或交易所',exact:true}).fill('我的现货');
+   await page.getByRole('heading',{name:'当前跨所机会 · 0',exact:true}).waitFor();
+   await page.getByRole('textbox',{name:'搜索资产或交易所',exact:true}).fill('');
+   await tab('历史统计');await choose('历史类别','batches');await click('查询历史');
+   await page.getByRole('table',{name:'扫描历史'}).getByText(/改名后的市场/).first().waitFor();
+  });
+  await check('setting environment switch rewarms only its new source and reports actual environment',async()=>{
+   await tab('扫描范围');await click('Settings');await click('交易所');await click('编辑 改名后的市场');
+   await choose('交易所环境','demo');await click('保存交易所');
+   await page.getByRole('table',{name:'已保存交易所'}).getByText('demo',{exact:true}).waitFor();
+   await page.keyboard.press('Escape');
+   await page.getByText(/改名后的市场 · 请求 demo → 来源 production/).waitFor();
+   await tab('当前机会');await page.getByRole('heading',{name:'当前跨所机会 · 0',exact:true}).waitFor();
+   await page.getByRole('table',{name:'规范行情观察'}).getByText(/demo · 规则/).waitFor();
+  });
+  await check('delete removes draft and saved scopes while keeping readable historical names',async()=>{
+   await tab('扫描范围');await click('Settings');await click('交易所');await click('删除 改名后的市场');
+   await page.getByRole('status').getByText(/已删除 改名后的市场/).waitFor();
+   await page.keyboard.press('Escape');
+   await page.getByRole('checkbox',{name:'我的永续',exact:true}).waitFor();
+   await page.getByRole('checkbox',{name:'改名后的市场',exact:true}).waitFor({state:'detached'});
+   assert.equal(await page.getByRole('table',{name:'实际生效范围'}).getByText('改名后的市场',{exact:true}).count(),0);
+   await tab('历史统计');await choose('历史类别','batches');await click('查询历史');
+   await page.getByRole('table',{name:'扫描历史'}).getByText(/改名后的市场/).first().waitFor();
+   await page.screenshot({path:join(output,'lifecycle.png'),fullPage:true});
+  });
+ }
  assert.deepEqual(errors,[]);assert.deepEqual(external,[]);
  await writeFile(join(output,'report.json'),JSON.stringify({status:'passed',browser:browser.version(),input:'synthetic_protocol_fixture',results,errors,external,trading_qualified:false,online_market:'not_run'},null,2));
  console.log('scanner_internal_browser=passed; checks='+results.length+'; external_requests=0; trading=false');

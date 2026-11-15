@@ -96,3 +96,15 @@ Hyperliquid 动态发现复用同一浏览器 runner：`node tools/verify-okx-di
 当前声明范围为 [OKX instruments](https://www.okx.com/docs-v5/en/#public-data-rest-api-get-instruments) 的完整 SPOT／SWAP 响应，以及 [Hyperliquid 标准永续 meta](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint/perpetuals) 的完整 universe；这两个目录请求没有分页游标。Hyperliquid 时间区间查询的分页规则不适用于 meta；不把历史查询或 HIP-3 分页纳入目录范围。完整数组由实际 Zig 协议实现解码；消息、行数、驻留目录或捕获容量超限均失败，不截断后标记完整。
 
 刷新定向浏览器验收为 `node tools/verify-okx-discovery-browser.mjs --dev --refresh`，Hyperliquid 追加 `--hyperliquid`。确定性序列覆盖新增、规则变更、断连、容量、消失和恢复，仍仅替换公共 transport 字节。
+
+设置支持按稳定 `identity` 编辑和删除；删除请求为 `{operation:"delete", identity, expected_version}`。
+改名不修改扫描配置、候选身份或 worker，会同步到当前来源、搜索和保留期内历史展示。
+历史保留来源的设置身份、环境和名称快照；删除设置后仍显示删除前最近的名称。原始规范候选及复算材料不因显示名称变更而改写。
+
+删除撤销该设置的已保存范围及扫描器订阅；环境或类型切换保留设置身份，按新来源重建适用产品范围并预热。
+新环境首次目录接纳通过 `scanner-config.json` 中可选的 `pending_catalogues` 持久化，按资产代码重绑观察筛选，完成后恢复原 `new_instruments` 策略。
+公共网络轮询及目录发现的旧结果经配置版本、worker 实例和来源 generation 校验后丢弃；其他消费者持有的旧来源订阅不释放。
+
+设置文件先原子保存，再协调扫描范围和运行。协调失败返回 HTTP 503、`saved:true`、`pending:true`，立即停止扫描并清空候选；设置保存本身失败则保持原状态。
+重启默认停止，按设置文件修复已保存范围；显式重新保存设置可重试未完成目录加载，不因普通读取或停止状态自动联网。
+定向页面验收：`node tools/verify-scanner-integration-browser.mjs --dev --settings-lifecycle`。

@@ -221,6 +221,7 @@ class ControlPlaneApp:
         if scanner_console is not None and scanner_console.config_store is None:
             scanner_console.bind_config(Path(directory)/"scanner-config.json")
         scanner_console.exchange_settings = self.exchange_settings_store
+        scanner_console.reconcile_settings()
         self.credential_packages = credential_packages.CredentialPackages(
             os.path.join(directory, "credential-packages"))
         self._command_results: dict[int, tuple[str, dict]] = {}
@@ -527,12 +528,26 @@ class ControlPlaneApp:
         if status != 200:
             return status, body
         try:
-            result = self.exchange_settings_store.view() if request is None else self.exchange_settings_store.save(request)
-            if request is not None:
-                runtime = self.scanner_runtime
-                if runtime is not None:
-                    for setting in result["exchanges"]:
-                        runtime.request_discovery(setting)
+            console, runtime = self.scanner_console, self.scanner_runtime
+            if request is None:
+                return 200, {"ok": True, "result": self.exchange_settings_store.view()}
+            # Fence console publication without waiting for public network IO.
+            with console.lock:
+                before = self.exchange_settings_store.view()["exchanges"]
+                console.history.remember_names(before)
+                result = self.exchange_settings_store.save(request)
+                try:
+                    console.history.remember_names(result["exchanges"])
+                    console.reconcile_settings()
+                    if runtime is not None:
+                        runtime.settings_changed(before, result["exchanges"])
+                except Exception as error:
+                    console.settings_pending = True
+                    console.desired, console.phase = "stopped", "Faulted"
+                    console.snapshot = console._empty()
+                    console.source.release(console.session)
+                    return 503, {"ok": False, "saved": True, "pending": True,
+                        "error": "设置已保存，扫描协调待恢复："+str(error), "result": result}
             return 200, {"ok": True, "result": result}
         except (ValueError, KeyError, TypeError) as error:
             return 409 if "conflict" in str(error) else 400, {"ok": False, "error": str(error)}
@@ -565,7 +580,7 @@ class ControlPlaneApp:
                 elif operation == "configure":
                     result = console.configure(request["payload"])
                 elif operation == "history":
-                    result = {"rows": console.history.query(**request["payload"])}
+                    result = {"rows": console.history_rows(**request["payload"])}
                 elif operation == "summary":
                     result = console.history.summarize()
                 elif operation == "approve":

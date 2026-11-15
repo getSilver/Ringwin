@@ -19,7 +19,7 @@ def uint_text(value, *, minimum=0):
 
 
 def _validate(config):
-    if type(config) is not dict or set(config) != {"version", "scopes", "registered", "statistics"}:
+    if type(config) is not dict or set(config) - {"pending_catalogues"} != {"version", "scopes", "registered", "statistics"}:
         raise ValueError("saved scanner config fields")
     version = uint_text(config["version"])
     if type(config["scopes"]) is not list or len(config["scopes"]) > 64:
@@ -45,6 +45,11 @@ def _validate(config):
             uint_text(row["quote_asset"], minimum=1) if row["quote_asset"] is not None else None,
             uint_text(row["min_depth_atoms"]) if row["min_depth_atoms"] is not None else None,
             uint_text(row["max_depth_atoms"]) if row["max_depth_atoms"] is not None else None, environment=row["environment"])
+    pending = config.get("pending_catalogues", [])
+    if type(pending) is not list or len(pending) > 64 or any(type(k) is not str for k in pending) or len(set(pending)) != len(pending):
+        raise ValueError("saved scanner pending catalogue capacity")
+    if not set(pending) <= {row["venue"]+":"+row["environment"] for row in config["scopes"]}:
+        raise ValueError("saved scanner pending catalogue source")
     if type(config["registered"]) is not list or len(config["registered"]) > 8192:
         raise ValueError("saved scanner catalogue capacity")
     identities = set()

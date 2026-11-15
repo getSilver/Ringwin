@@ -10,6 +10,18 @@ from opportunity_scanner.exchange_settings import ExchangeSettings
 
 
 class SettingsTests(unittest.TestCase):
+    def test_edit_source_and_delete_keep_versioned_identity(self):
+        with tempfile.TemporaryDirectory() as directory:
+            settings = ExchangeSettings(Path(directory)/"exchange-settings.json")
+            row = settings.save(dict(expected_version="0", type="okx", name="行情", environment="production"))["exchanges"][0]
+            changed = settings.save(dict(expected_version="1", identity=row["identity"], type="okx", name="测试行情", environment="demo"))
+            self.assertEqual(changed["exchanges"][0]["identity"], row["identity"])
+            deleted = settings.save(dict(expected_version="2", identity=row["identity"], operation="delete"))
+            self.assertEqual(deleted["exchanges"], [])
+            self.assertEqual(ExchangeSettings(settings.path).view(), deleted)
+            with self.assertRaisesRegex(ValueError, "unknown"):
+                settings.save(dict(expected_version="3", identity=row["identity"], operation="delete"))
+
     def test_save_reload_and_failed_writes_preserve_previous_version(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory)/"exchange-settings.json"

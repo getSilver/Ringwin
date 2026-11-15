@@ -132,6 +132,7 @@ class ScannerConsole:
             statistics=dict(version="1", min_profit_atoms="0", min_probability_ppm=0))
         self.config_store = None
         self.exchange_settings = None
+        self.settings_pending = False
         if config_path is not None:
             self.bind_config(config_path)
         self.sequence = self.committed = self.cursor = 0
@@ -206,7 +207,7 @@ class ScannerConsole:
 
     def _record(self, kind, identity, payload):
         try:
-            self.history.record(kind, identity, payload, session=self.session,
+            self.history.record(kind, identity, dict(payload, sources=self.sources()), session=self.session,
                                 sequence=self.sequence, wall_ms=self.wall_clock())
         except (OSError, ValueError) as error:
             self._gap(str(error))
@@ -231,6 +232,8 @@ class ScannerConsole:
         return scanner.Scope(max(1, int(config["version"])), members=tuple(members))
 
     def _selected(self):
+        if self.settings_pending:
+            raise ValueError("exchange settings reconciliation pending")
         scope = self._scope()
         if not self.config["scopes"]:
             return set()
@@ -255,6 +258,67 @@ class ScannerConsole:
                             ) and observed.rules.exposure_asset not in member.exclude_assets:
                         result.add(identity)
         return result
+
+    def reconcile_settings(self):
+        """Saved settings own source selection, including recovery after a partial write."""
+        with self.lock:
+            settings = self.exchange_settings.view()
+            by_id = {s["identity"]: s for s in settings["exchanges"]}
+            rows = []
+            pending = set(self.config.get("pending_catalogues", []))
+            for row in self.config["scopes"]:
+                setting = by_id.get(row.get("setting_id")) if row.get("setting_id") else next((s for s in by_id.values()
+                    if (s["venue"], s["environment"]) == (row["venue"], row["environment"])), None)
+                if setting is None:
+                    continue
+                adapter = next(a for a in settings["types"] if a["type"] == setting["type"])
+                if row["product"] in adapter["products"]:
+                    rows.append(dict(row, setting_id=setting["identity"], venue=setting["venue"], environment=setting["environment"]))
+                    if (row["venue"], row["environment"]) != (setting["venue"], setting["environment"]):
+                        pending.add(setting["venue"]+":"+setting["environment"])
+            if rows == self.config["scopes"] and not self.settings_pending:
+                self.settings_pending = False
+                return
+            candidate = dict(self.config, version=str(int(self.config["version"])+1), scopes=rows)
+            pending.intersection_update(r["venue"]+":"+r["environment"] for r in rows)
+            if pending:
+                candidate["pending_catalogues"] = sorted(pending)
+            else:
+                candidate.pop("pending_catalogues", None)
+            # Fence queued publications before touching persistence or subscriptions.
+            self.snapshot = self._empty()
+            self.sequence += 1
+            self.settings_pending = True
+            try:
+                self.config = candidate
+                self.config_store.save(candidate)
+                self.settings_pending = False
+                if self.desired == "running":
+                    before = set(self.source.owners.get(self.session, ()))
+                    selected = self._selected()
+                    self.source.acquire(self.session, selected)
+                    self.warming.intersection_update(selected)
+                    self.warming.update(selected - before)
+                    self.phase = "Warming" if self.warming or not selected else "Running"
+                self.history.interrupt(self.session, "settings_changed")
+                self._record("operations", secrets.token_hex(16), dict(action="settings_changed"))
+            except Exception:
+                self.settings_pending = True
+                self.desired, self.phase = "stopped", "Faulted"
+                self.snapshot = self._empty()
+                self.source.release(self.session)
+                raise
+
+    def sources(self):
+        if self.exchange_settings is None:
+            return {}
+        settings = self.exchange_settings.view()["exchanges"]
+        return {str(o.venue)+":"+str(o.account): dict(setting_id=s["identity"], name=s["name"], environment=s["environment"])
+                for o in self.source.registered.values() for s in settings
+                if (str(o.venue), o.environment) == (s["venue"], s["environment"])}
+
+    def history_rows(self, **request):
+        return self.history.display_names(self.history.query(**request), self.exchange_settings.view()["exchanges"] if self.exchange_settings else [])
 
     def configure(self, request):
         with self.lock:
@@ -306,6 +370,9 @@ class ScannerConsole:
                 raise ValueError("statistics policy version conflict")
             candidate = dict(version=str(int(self.config["version"]) + 1), scopes=normalized,
                              statistics=statistics, registered=[[str(n) for n in x] for x in sorted(self.source.registered)])
+            pending = set(self.config.get("pending_catalogues", [])).intersection(r["venue"]+":"+r["environment"] for r in normalized)
+            if pending:
+                candidate["pending_catalogues"] = sorted(pending)
             previous = self.config
             before = set(self.source.owners.get(self.session, ()))
             self.config = candidate
@@ -317,7 +384,7 @@ class ScannerConsole:
                 if self.config_store is not None:
                     self.config_store.save(candidate)
                 self.history.record("config", candidate["version"], candidate,
-                                    sequence=int(candidate["version"]), wall_ms=self.wall_clock())
+                                    sequence=int(candidate["version"]), wall_ms=self.wall_clock(), sources=self.sources())
             except Exception:
                 self.config = previous
                 if self.desired == "running":
@@ -579,7 +646,7 @@ class ScannerConsole:
 
     def _envelope(self):
         return dict(schema="scanner_console_v1", session=self.session, config_version=self.config["version"],
-                    sequence=str(self.sequence), snapshot=json.loads(encoded(self.snapshot)))
+                    sequence=str(self.sequence), snapshot=json.loads(encoded(self.snapshot)), sources=self.sources())
 
     def view(self):
         with self.lock:
@@ -628,6 +695,11 @@ class ScannerConsole:
                 if market:
                     market = dict(market, routes=[route for route in market.get("routes", []) if any(
                         (s["venue"], s["environment"]) == (route["venue"], route["requested_environment"]) for s in exchanges)])
+                    active = {(s["venue"], s["environment"]) for s in exchanges}
+                    market["observations"] = [r for r in market.get("observations", []) if (r["venue"], r["environment"]) in active]
+                    market["evidence"] = [r for r in market.get("evidence", []) if (r["venue"], r["requested_environment"]) in active]
+                    visible = {str(tuple(map(int, (r["venue"], r["account"], r["instrument"])))) for r in catalogue}
+                    market["failures"] = {i:r for i,r in market.get("failures", {}).items() if i in visible}
             history_window = self.history.status()
             cutoff = int(history_window["window_start_wall_ms"])
             self.coverage_gaps = [gap for gap in self.coverage_gaps if gap["wall_ms"] >= cutoff][-64:]

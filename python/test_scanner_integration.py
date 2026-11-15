@@ -167,6 +167,33 @@ class DynamicCatalogueTests(unittest.TestCase):
         self.addCleanup(self.runtime.close)
         self.setting = dict(identity="a"*32, venue="1", type="okx", name="我的 OKX", environment="demo")
 
+    def test_removed_setting_discards_inflight_catalogue_before_cache_commit(self):
+        from opportunity_scanner.exchange_settings import ExchangeSettings
+        store = ExchangeSettings(Path(self.temp.name)/"exchange-settings.json")
+        setting = store.save(dict(expected_version="0", type="okx", name="目录来源", environment="demo"))["exchanges"][0]
+        self.runtime.console.exchange_settings = store
+        entered, released = threading.Event(), threading.Event()
+        original = self.transport.request
+        def delayed(*args, **kwargs):
+            entered.set()
+            if not released.wait(10):
+                raise OSError("test catalogue release missing")
+            return original(*args, **kwargs)
+        self.transport.request = delayed
+        self.runtime.request_discovery(setting)
+        try:
+            self.assertTrue(entered.wait(5))
+            store.save(dict(expected_version="1", identity=setting["identity"], operation="delete"))
+            self.runtime.settings_changed([setting], [])
+        finally:
+            released.set()
+            for thread in self.runtime.discovery_threads:
+                thread.join(timeout=10)
+                self.assertFalse(thread.is_alive())
+        self.assertEqual(self.runtime.source.registered, {})
+        self.assertNotIn("1:demo", self.runtime.discovery_status)
+        self.assertFalse((Path(self.temp.name)/"scanner-discovery.json").exists())
+
     def test_refresh_retires_disappeared_inputs_and_rewarms_changed_rules(self):
         self.runtime.discover(self.setting)
         console = self.runtime.console
@@ -590,6 +617,7 @@ class IntegrationTests(unittest.TestCase):
         self.runtime.close(); self.temp.cleanup()
 
     def start(self):
+        self.runtime.console.exchange_settings = self.app.exchange_settings_store
         self.save_settings()
         self.call("configure",dict(expected_version="0",scopes=[scope(1),scope(21)]))
         self.assertEqual(self.call("start")["phase"],"Warming")
@@ -605,6 +633,149 @@ class IntegrationTests(unittest.TestCase):
                 type=kind, name=name, environment=environment), self.headers)
             self.assertEqual(status, 200, body)
         return body["result"]
+
+    def test_settings_rename_delete_and_retained_history_through_http(self):
+        self.start()
+        console = self.runtime.console
+        saved = self.save_settings()
+        okx = next(r for r in saved["exchanges"] if r["type"] == "okx")
+        workers = dict(self.runtime.workers)
+        ids = [r["id"] for r in console.view()["snapshot"]["candidates"]]
+        status, body = self.http("/api/exchange-settings", dict(expected_version=saved["version"],
+            identity=okx["identity"], type="okx", name="改名后的来源", environment="production"), self.headers)
+        self.assertEqual(status, 200, body)
+        self.assertEqual(dict(self.runtime.workers), workers)
+        self.assertEqual([r["id"] for r in console.view()["snapshot"]["candidates"]], ids)
+        history = self.call("history", dict(kind="batches", limit=50))
+        self.assertIn("改名后的来源", json.dumps(history, ensure_ascii=False))
+        shared = next(i for i in workers if i[0] == 1)
+        self.runtime.source.acquire("other-consumer", {shared})
+        self.addCleanup(self.runtime.source.release, "other-consumer")
+        status, body = self.http("/api/exchange-settings", dict(expected_version=body["result"]["version"],
+            identity=okx["identity"], operation="delete"), self.headers)
+        self.assertEqual(status, 200, body)
+        view = console.view()
+        self.assertEqual([r["venue"] for r in view["config"]["scopes"]], ["21"])
+        self.assertEqual(view["snapshot"]["candidates"], [])
+        self.assertIs(self.runtime.workers[shared], workers[shared])
+        self.tick()
+        self.assertEqual(console.view()["snapshot"]["candidates"], [])
+        history = self.call("history", dict(kind="batches", limit=50))
+        self.assertIn("改名后的来源", json.dumps(history, ensure_ascii=False))
+
+    def test_settings_reconciliation_failure_stops_and_restart_repairs_saved_scope(self):
+        self.start()
+        saved = self.save_settings()
+        row = saved["exchanges"][0]
+        with patch.object(self.runtime.console.config_store, "save", side_effect=OSError("scope disk unavailable")):
+            status, body = self.http("/api/exchange-settings", dict(expected_version=saved["version"],
+                identity=row["identity"], operation="delete"), self.headers)
+        self.assertEqual(status, 503, body)
+        self.assertEqual(self.runtime.console.desired, "stopped")
+        self.assertEqual(self.runtime.console.snapshot["candidates"], [])
+        restarted = ScannerRuntime(self.temp.name, configuration(), transport=self.transport, automatic=False)
+        self.addCleanup(restarted.close)
+        app = control_plane_web.ControlPlaneApp(self.temp.name, self.app.command_server, scanner_console=restarted.console)
+        self.assertEqual([r["venue"] for r in restarted.console.config["scopes"]], ["21"])
+        self.assertEqual(restarted.console.desired, "stopped")
+
+    def test_settings_environment_switch_fences_late_poll_and_keeps_other_workers(self):
+        config = configuration()
+        alternative = configuration("demo")["bindings"][0]
+        alternative["observation_identity"] = "1101"
+        config["bindings"].append(alternative)
+        self.runtime.close()
+        self.runtime = ScannerRuntime(self.temp.name, config, transport=self.transport,
+            clock=lambda:self.now[0], utc_clock=lambda:self.now[1], automatic=False)
+        self.app.scanner_console = self.runtime.console
+        self.start()
+        saved = self.save_settings()
+        setting = next(r for r in saved["exchanges"] if r["type"] == "okx")
+        workers = dict(self.runtime.workers)
+        old = next(i for i in workers if i[0] == 1)
+        other = next(i for i in workers if i[0] == 21)
+        self.runtime.source.acquire("other-consumer", {old})
+        self.addCleanup(self.runtime.source.release, "other-consumer")
+        entered, released = threading.Event(), threading.Event()
+        original = self.transport.book
+        def delayed(binding):
+            if binding["venue"] == 1 and binding["environment"] == "production":
+                entered.set()
+                if not released.wait(10):
+                    raise TimeoutError("test transport release missing")
+            return original(binding)
+        self.transport.book = delayed
+        poller = threading.Thread(target=self.runtime.step)
+        poller.start()
+        try:
+            self.assertTrue(entered.wait(5))
+            status, body = self.http("/api/exchange-settings", dict(expected_version=saved["version"],
+                identity=setting["identity"], type="okx", name=setting["name"], environment="demo"), self.headers)
+            self.assertEqual(status, 200, body)
+            self.assertEqual(self.runtime.console.view()["phase"], "Warming")
+            self.assertEqual(self.runtime.console.snapshot["candidates"], [])
+        finally:
+            released.set(); poller.join(timeout=10)
+        self.assertFalse(poller.is_alive())
+        self.assertEqual(self.runtime.console.snapshot["candidates"], [])
+        self.tick()
+        view = self.runtime.console.view()
+        self.assertEqual({r["environment"] for r in view["market"]["observations"]}, {"demo", "production"})
+        self.assertEqual(view["snapshot"]["candidates"], [])
+        self.assertIs(self.runtime.workers[old], workers[old])
+        self.assertIs(self.runtime.workers[other], workers[other])
+        self.assertEqual(view["config"]["scopes"][0]["setting_id"], setting["identity"])
+
+    def test_settings_hyperliquid_environment_switch_rebinds_saved_asset_filters(self):
+        self.runtime.close()
+        self.runtime = ScannerRuntime(self.temp.name, dict(schema=1, assets=[], bindings=[]),
+            transport=DynamicHyperliquidTransport(self.now), clock=lambda:self.now[0], utc_clock=lambda:self.now[1], automatic=False)
+        self.app.scanner_console, self.app.scanner_runtime = self.runtime.console, self.runtime
+        self.runtime.console.exchange_settings = self.app.exchange_settings_store
+        status, body = self.http("/api/exchange-settings", dict(expected_version="0", type="hyperliquid", name="永续来源", environment="production"), self.headers)
+        self.assertEqual(status, 200, body)
+        setting = body["result"]["exchanges"][0]
+        self.runtime.discover(setting)
+        assets = {a["code"]:a["identity"] for a in self.runtime.source.assets}
+        self.call("configure", dict(expected_version="0", scopes=[dict(scope(21), include_assets=[assets["ETH"]], quote_asset=assets["USDT"])]))
+        self.call("start"); self.tick()
+        old = set(self.runtime.workers)
+        status, body = self.http("/api/exchange-settings", dict(expected_version="1", identity=setting["identity"],
+            type="hyperliquid", name=setting["name"], environment="testnet"), self.headers)
+        self.assertEqual(status, 200, body)
+        for thread in self.runtime.discovery_threads:
+            thread.join(timeout=10)
+            self.assertFalse(thread.is_alive())
+        self.tick()
+        view = self.runtime.console.view()
+        self.assertEqual(view["phase"], "Running", view["market"]["discovery"])
+        self.assertEqual([r["environment"] for r in view["market"]["observations"]], ["testnet"])
+        self.assertFalse(old & set(self.runtime.workers))
+        self.assertNotEqual(view["config"]["scopes"][0]["include_assets"], [assets["ETH"]])
+        # A failed reverse switch survives a stopped restart and explicit retry.
+        self.runtime.transport.request = lambda *a, **kw: (_ for _ in ()).throw(OSError("catalogue unavailable"))
+        status, body = self.http("/api/exchange-settings", dict(expected_version="2", identity=setting["identity"],
+            type="hyperliquid", name=setting["name"], environment="production"), self.headers)
+        self.assertEqual(status, 200, body)
+        for thread in self.runtime.discovery_threads:
+            thread.join(timeout=10)
+        self.assertIn("21:production", self.runtime.console.config["pending_catalogues"])
+        self.runtime.close()
+        self.runtime = ScannerRuntime(self.temp.name, dict(schema=1, assets=[], bindings=[]),
+            transport=DynamicHyperliquidTransport(self.now), clock=lambda:self.now[0], utc_clock=lambda:self.now[1], automatic=False)
+        recovered = control_plane_web.ControlPlaneApp(self.temp.name, self.app.command_server, scanner_console=self.runtime.console)
+        recovered.scanner_runtime = self.runtime
+        recovered.authorize = lambda headers: (200, {})
+        self.assertEqual(self.runtime.console.desired, "stopped")
+        self.assertEqual(self.runtime.workers, {})
+        status, body = recovered.exchange_settings({}, dict(expected_version="3", identity=setting["identity"],
+            type="hyperliquid", name=setting["name"], environment="production"))
+        self.assertEqual(status, 200, body)
+        for thread in self.runtime.discovery_threads:
+            thread.join(timeout=10)
+        self.assertNotIn("pending_catalogues", self.runtime.console.config)
+        self.runtime.console.start(); self.tick()
+        self.assertEqual([r["environment"] for r in self.runtime.console.view()["market"]["observations"]], ["production"])
 
     def test_dynamic_refresh_lifecycle_through_http_and_native_adapters(self):
         settings = self.save_settings()["exchanges"]
@@ -948,6 +1119,11 @@ class IntegrationTests(unittest.TestCase):
         self.runtime=ScannerRuntime(self.temp.name,configuration("demo"),transport=self.transport,
             clock=lambda:self.now[0],utc_clock=lambda:self.now[1],automatic=False)
         self.app.scanner_console=self.runtime.console
+        self.runtime.console.exchange_settings = self.app.exchange_settings_store
+        for version, kind, environment in (("0", "okx", "demo"), ("1", "hyperliquid", "testnet")):
+            status, body = self.http("/api/exchange-settings", dict(expected_version=version,
+                type=kind, name="测试 "+kind, environment=environment), self.headers)
+            self.assertEqual(status, 200, body)
         self.call("configure",dict(expected_version="0",scopes=[scope(1,"demo"),scope(21,"testnet")]))
         self.call("start"); self.tick()
         view=self.call("start")
@@ -997,7 +1173,15 @@ class IntegrationTests(unittest.TestCase):
         self.runtime=ScannerRuntime(self.temp.name,config,transport=self.transport,
             clock=lambda:self.now[0],utc_clock=lambda:self.now[1],automatic=False)
         self.app.scanner_console=self.runtime.console
+        # This test exercises direct scope changes across four saved sources.
+        self.runtime.console.exchange_settings = self.app.exchange_settings_store
         self.start()
+        saved = self.save_settings()
+        for kind, environment in (("okx", "demo"), ("hyperliquid", "testnet")):
+            status, body = self.http("/api/exchange-settings", dict(expected_version=saved["version"],
+                type=kind, name="备用 "+kind, environment=environment), self.headers)
+            self.assertEqual(status, 200, body)
+            saved = body["result"]
         old_sessions={e["session"] for e in self.call("start")["market"]["evidence"]}
         entered,released=threading.Event(),threading.Event()
         original=self.transport.book

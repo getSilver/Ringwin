@@ -94,7 +94,7 @@ class ScannerRuntime:
         self.discovery_status, self.discovery_threads = {}, []
         self.discovery_lock = threading.Lock()
         self.discovery_settings, self.next_discovery, self.discovery_success = {}, {}, {}
-        self.discovery_inflight = set()
+        self.discovery_inflight, self.source_generations = {}, {}
         cache = self.directory / "scanner-discovery.json"
         if cache.is_file():
             if cache.stat().st_size > MAX_DISCOVERY_BYTES:
@@ -183,27 +183,58 @@ class ScannerRuntime:
             self.discovery_settings[key] = dict(setting)
             if key in self.discovery_inflight or (not refresh and key in self.discovery_status and self.discovery_status[key]["state"] != "failed"):
                 return
-            self.discovery_inflight.add(key)
+            generation = self.source_generations.get(key, 0)
+            self.discovery_inflight[key] = generation
             self.discovery_status[key] = dict(state="loading", error="")
-            thread = threading.Thread(target=self._discover_requested, args=(dict(setting), key), daemon=True, name=setting["type"]+"-catalogue")
+            thread = threading.Thread(target=self._discover_requested, args=(dict(setting), key, generation), daemon=True, name=setting["type"]+"-catalogue")
             self.discovery_threads = [t for t in self.discovery_threads if t.is_alive()]
             self.discovery_threads.append(thread)
             thread.start()
 
-    def _discover_requested(self, setting, key):
+    def _discover_requested(self, setting, key, generation):
         try:
-            self.discover(setting)
+            self.discover(setting, generation=generation)
         finally:
             with self.lock:
-                self.discovery_inflight.discard(key)
+                if self.discovery_inflight.get(key) == generation:
+                    self.discovery_inflight.pop(key, None)
 
-    def discover(self, setting):
+    def _current_setting(self, setting, generation):
+        key = setting["venue"]+":"+setting["environment"]
+        if self.source_generations.get(key, 0) != generation:
+            return False
+        store = self.console.exchange_settings
+        return store is None or any((s["identity"], s["venue"], s["environment"]) ==
+            (setting["identity"], setting["venue"], setting["environment"]) for s in store.view()["exchanges"])
+
+    def settings_changed(self, before, after):
+        """Caller holds the console lock; other consumers retain their workers."""
+        with self.source.lock, self.lock:
+            for old in before:
+                if any((s["identity"], s["venue"], s["environment"]) == (old["identity"], old["venue"], old["environment"]) for s in after):
+                    continue
+                key = old["venue"]+":"+old["environment"]
+                self.source_generations[key] = self.source_generations.get(key, 0)+1
+                self.discovery_inflight.pop(key, None)
+                self.discovery_settings.pop(key, None)
+                self.discovery_status.pop(key, None)
+                self.next_discovery.pop(key, None)
+                self.discovery_success.pop(key, None)
+            for setting in after:
+                changed = not any((s["identity"], s["venue"], s["environment"]) == (setting["identity"], setting["venue"], setting["environment"]) for s in before)
+                pending = setting["venue"]+":"+setting["environment"] in self.console.config.get("pending_catalogues", [])
+                self.request_discovery(setting, refresh=changed or pending)
+
+    def discover(self, setting, *, generation=None):
         """Replace one source snapshot and reconcile its existing consumer scopes."""
         key = setting["venue"] + ":" + setting["environment"]
         if (setting["type"], setting["venue"]) not in (("okx", "1"), ("hyperliquid", "21")) or (int(setting["venue"]), setting["environment"]) not in ROUTES:
             raise ValueError("unsupported discovery setting")
         with self.discovery_lock:
             with self.lock:
+                generation = self.source_generations.get(key, 0) if generation is None else generation
+                if not self._current_setting(setting, generation):
+                    return
                 self.discovery_settings[key] = dict(setting)
                 self.next_discovery[key] = self.clock() + CATALOGUE_REFRESH_NS
                 self.discovery_status[key] = dict(state="loading", error="")
@@ -265,7 +296,7 @@ class ScannerRuntime:
                 if not entries and rejected:
                     raise ValueError("catalogue has no usable instruments: " + str(rejected[:8]))
                 with self.poll_lock, self.console.lock, self.source.lock, self.lock:
-                    if self.closing.is_set():
+                    if self.closing.is_set() or not self._current_setting(setting, generation):
                         return
                     incoming = {e.identity for e in entries}
                     source_identities = {i for i,r in self.bindings.items() if (r["venue"], r["environment"]) ==
@@ -287,6 +318,30 @@ class ScannerRuntime:
                     self.source.registered = {i:e for i,e in self.source.registered.items() if i not in affected}
                     self.source.register(entries)
                     self.bindings, self.source.assets = updated, assets
+                    # A switched scope admits its first complete directory, then resumes
+                    # the saved new-instrument policy for subsequent refreshes.
+                    console = self.console
+                    if key in console.config.get("pending_catalogues", []):
+                        codes = {a["identity"]:a["code"] for a in assets}
+                        base_ids = {codes[r["base_asset"]]:r["base_asset"] for r in rows}
+                        quote_ids = {codes[r["quote_asset"]]:r["quote_asset"] for r in rows}
+                        scopes = []
+                        for scope in console.config["scopes"]:
+                            if (scope["venue"], scope["environment"]) == (setting["venue"], setting["environment"]):
+                                scope = dict(scope,
+                                    include_assets=[base_ids.get(codes.get(i), i) for i in scope["include_assets"]],
+                                    exclude_assets=[base_ids.get(codes.get(i), i) for i in scope["exclude_assets"]],
+                                    quote_asset=quote_ids.get(codes.get(scope["quote_asset"]), scope["quote_asset"]))
+                            scopes.append(scope)
+                        candidate = dict(console.config, version=str(int(console.config["version"])+1),
+                            scopes=scopes,
+                            registered=[list(map(str, i)) for i in sorted({tuple(map(int, i)) for i in console.config["registered"]} | incoming)])
+                        candidate["pending_catalogues"] = [k for k in console.config["pending_catalogues"] if k != key]
+                        if not candidate["pending_catalogues"]:
+                            candidate.pop("pending_catalogues")
+                        if console.config_store is not None:
+                            console.config_store.save(candidate)
+                        console.config = candidate
                     for owner in self.source.owners:
                         self.source.owners[owner].intersection_update(updated)
                     self.source.unavailable.difference_update(source_identities)
@@ -297,6 +352,8 @@ class ScannerRuntime:
                     self._catalogue_changed(changed)
             except (OSError, ValueError, KeyError, TypeError) as error:
                 with self.poll_lock, self.console.lock, self.source.lock, self.lock:
+                    if not self._current_setting(setting, generation):
+                        return
                     affected = {i for i,r in self.bindings.items() if (r["venue"], r["environment"]) ==
                                 (int(setting["venue"]), setting["environment"])}
                     self.source.unavailable.update(affected)
@@ -458,6 +515,8 @@ class ScannerRuntime:
 
     def _step(self):
         """One bounded poll; deterministic transport/clock may drive this in acceptance."""
+        session = self.console.session
+        version = self.console.config["version"]
         with self.lock:
             selected = tuple(self.workers.items())
         for identity, worker in selected:
@@ -518,8 +577,8 @@ class ScannerRuntime:
             cursor = self.cursor
         # Publish with evidence through the same console public seam. No HTTP input route.
         with self.console.lock:
-            if self.console.desired == "running":
-                self.console.publish(self.console.session, cursor, observations, (), at_ns=self.clock(), evidence=evidence)
+            if self.console.desired == "running" and self.console.session == session and self.console.config["version"] == version:
+                self.console.publish(session, cursor, observations, (), at_ns=self.clock(), evidence=evidence)
 
     def status(self):
         observations = []

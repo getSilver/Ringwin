@@ -19,6 +19,7 @@ def main():
     parser.add_argument("--dynamic-okx", action="store_true")
     parser.add_argument("--dynamic-hyperliquid", action="store_true")
     parser.add_argument("--refresh", action="store_true")
+    parser.add_argument("--settings-lifecycle", action="store_true")
     args=parser.parse_args()
     dynamic = args.dynamic_okx or args.dynamic_hyperliquid
     with tempfile.TemporaryDirectory(prefix="ringwin-scanner-internal-") as directory:
@@ -26,7 +27,12 @@ def main():
         transport=DynamicHyperliquidTransport(now) if args.dynamic_hyperliquid else DynamicOkxTransport(now) if args.dynamic_okx else ProtocolTransport(now)
         if args.refresh:
             transport = RefreshTransport(now, args.dynamic_hyperliquid)
-        runtime=ScannerRuntime(directory,dict(schema=1, assets=[], bindings=[]) if dynamic else configuration(),transport=transport,
+        config = dict(schema=1, assets=[], bindings=[]) if dynamic else configuration()
+        if args.settings_lifecycle:
+            alternative = configuration("demo")["bindings"][0]
+            alternative["observation_identity"] = "1101"
+            config["bindings"].append(alternative)
+        runtime=ScannerRuntime(directory,config,transport=transport,
             clock=lambda:now[0],utc_clock=lambda:now[1],automatic=False)
         channel=control_plane.CommandServer(b"f"*32)
         owner_time=int(time.time())
