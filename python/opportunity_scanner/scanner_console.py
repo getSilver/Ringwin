@@ -43,6 +43,7 @@ class CanonicalSource:
     def __init__(self, observations=(), *, subscribe=None, unsubscribe=None, assets=()):
         self.lock = RLock()
         self.registered, self.owners = {}, {}
+        self.unavailable = set()
         self.listeners = {}
         self.subscribe, self.unsubscribe = subscribe, unsubscribe
         self.assets = json.loads(encoded(assets))
@@ -243,6 +244,8 @@ class ScannerConsole:
                     raise ValueError("scanner scope requires saved exchange setting")
         with self.source.lock:
             for identity, observed in self.source.registered.items():
+                if identity in self.source.unavailable:
+                    continue
                 for row, member in zip(self.config["scopes"], scope.members):
                     # Depth is evaluated per fresh publication, not on catalogue admission.
                     match = (observed.venue == int(row["venue"]) and observed.kind == row["product"]

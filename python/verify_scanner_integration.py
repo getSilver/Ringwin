@@ -10,7 +10,7 @@ import control_plane
 import control_plane_web
 import owner_session
 from opportunity_scanner.scanner_runtime import ScannerRuntime
-from test_scanner_integration import ProtocolTransport, DynamicOkxTransport, DynamicHyperliquidTransport, configuration
+from test_scanner_integration import ProtocolTransport, DynamicOkxTransport, DynamicHyperliquidTransport, RefreshTransport, configuration
 
 
 def main():
@@ -18,11 +18,14 @@ def main():
     parser.add_argument("--ui",required=True)
     parser.add_argument("--dynamic-okx", action="store_true")
     parser.add_argument("--dynamic-hyperliquid", action="store_true")
+    parser.add_argument("--refresh", action="store_true")
     args=parser.parse_args()
     dynamic = args.dynamic_okx or args.dynamic_hyperliquid
     with tempfile.TemporaryDirectory(prefix="ringwin-scanner-internal-") as directory:
         now=[2_000_000_000,1_800_000_000_000_000_000]
         transport=DynamicHyperliquidTransport(now) if args.dynamic_hyperliquid else DynamicOkxTransport(now) if args.dynamic_okx else ProtocolTransport(now)
+        if args.refresh:
+            transport = RefreshTransport(now, args.dynamic_hyperliquid)
         runtime=ScannerRuntime(directory,dict(schema=1, assets=[], bindings=[]) if dynamic else configuration(),transport=transport,
             clock=lambda:now[0],utc_clock=lambda:now[1],automatic=False)
         channel=control_plane.CommandServer(b"f"*32)
@@ -51,6 +54,10 @@ def main():
                 if command == "disconnect": transport.fail.add(21)
                 if command == "reconnect": transport.fail.clear()
                 if command == "expire": now[0]+=6_000_000_000
+                if command.startswith("catalogue-") and args.refresh:
+                    transport.mode = command.removeprefix("catalogue-")
+                    setting = app.exchange_settings_store.view()["exchanges"][0]
+                    runtime.discover(setting)
         finally:
             closing.set(); publisher.join(timeout=15)
             server.shutdown(); server.server_close(); thread.join()

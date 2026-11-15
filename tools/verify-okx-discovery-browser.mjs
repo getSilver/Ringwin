@@ -8,6 +8,7 @@ const root=resolve(dirname(fileURLToPath(import.meta.url)),'..');
 const args=process.argv.slice(2);
 const option=(name,fallback)=>args.includes(name)?args[args.indexOf(name)+1]:fallback;
 const hyperliquid=args.includes('--hyperliquid');
+const refresh=args.includes('--refresh');
 const exchangeName=hyperliquid?'动态 Hyperliquid':'动态 OKX';
 const ui=resolve(option('--ui-root','../RingwinUi'));
 const output=resolve(option('--output',hyperliquid?'.scratch/build/hyperliquid-discovery-browser':'.scratch/build/okx-discovery-browser'));
@@ -20,7 +21,7 @@ const click=name=>page.getByRole('button',{name,exact:true}).click();
 const tab=name=>page.getByRole('tab',{name,exact:true}).click();
 const choose=async(name,value)=>{await page.getByRole('combobox',{name,exact:true}).click();await page.getByRole('option',{name:value,exact:true}).click();};
 try {
- fixture=spawn('python',['-u','python/verify_scanner_integration.py',hyperliquid?'--dynamic-hyperliquid':'--dynamic-okx','--ui',join(ui,'dist/index.html')],{cwd:root,stdio:['pipe','pipe','pipe']});
+ fixture=spawn('python',['-u','python/verify_scanner_integration.py',hyperliquid?'--dynamic-hyperliquid':'--dynamic-okx',...(refresh?['--refresh']:[]),'--ui',join(ui,'dist/index.html')],{cwd:root,stdio:['pipe','pipe','pipe']});
  fixture.stderr.on('data',data=>{diagnostics+=data;});
  const ready=await new Promise((resolve,reject)=>{
   let buffer='';const timeout=setTimeout(()=>reject(new Error('fixture startup timeout '+diagnostics)),45000);
@@ -75,6 +76,26 @@ try {
   assert.equal(view.snapshot.cursor === '0',false);
   await writeFile(join(output,'scanner-view.json'),JSON.stringify(view,null,2));
   await page.screenshot({path:join(output,'running.png'),fullPage:true});
+ });
+ if(refresh) await check('catalogue updates retire inputs and recover through native rules',async()=>{
+  const view=async()=>(await(await page.waitForResponse(r=>r.url().endsWith('/api/scanner')&&r.request().method()==='GET'&&r.status()===200)).json()).result;
+  const until=async(predicate)=>{for(let n=0;n<100;n++){const v=await view();if(predicate(v))return v;await page.waitForTimeout(100);}throw new Error('catalogue transition timeout');};
+  const key=hyperliquid?'21:production':'1:production';
+  const initial=(await view()).market.observations[0].rules_version;
+  fixture.stdin.write('catalogue-added\n');
+  await until(v=>v.catalogue.some(r=>r.specification?.coin==='SOL'||r.specification?.base==='SOL'));
+  assert.equal((await view()).market.active_subscriptions,1);
+  fixture.stdin.write('catalogue-rules\n');
+  await until(v=>v.market.observations.length===1&&v.market.observations[0].continuous&&v.market.observations[0].rules_version!==initial);
+  for(const mode of ['failed','capacity','gone']){
+   fixture.stdin.write('catalogue-'+mode+'\n');
+   await until(v=>v.market.discovery[key].state===(mode==='gone'?'ready':'failed')&&v.market.observations.length===0);
+   assert.equal((await view()).snapshot.candidates.length,0);
+   fixture.stdin.write('catalogue-initial\n');
+   await until(v=>v.market.discovery[key].state==='ready'&&v.market.observations.length===1&&v.market.observations[0].continuous);
+   await page.getByRole('table',{name:'规范行情观察',exact:true}).getByText(exchangeName+' · ETH / USDT',{exact:true}).waitFor();
+  }
+  await writeFile(join(output,'refresh-view.json'),JSON.stringify(await view(),null,2));
  });
  await check('stop releases subscriptions and keeps saved scope',async()=>{
   await click('停止扫描');await page.getByText('已停止 · 配置 v1',{exact:true}).waitFor();

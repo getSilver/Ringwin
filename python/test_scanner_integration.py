@@ -115,15 +115,134 @@ def scope(venue, environment="production"):
         include_assets=[], exclude_assets=[], quote_asset="3", min_depth_atoms=None,max_depth_atoms=None,new_instruments=False)
 
 
+class RefreshTransport(PublicTransport):
+    """Mutable full-snapshot protocol input for lifecycle acceptance."""
+    input_kind = "synthetic_protocol_fixture"
+
+    def __init__(self, now, hyperliquid=False):
+        self.base = DynamicHyperliquidTransport(now) if hyperliquid else DynamicOkxTransport(now)
+        self.hyperliquid, self.mode = hyperliquid, "initial"
+
+    def request(self, url, body=None, **kwargs):
+        if self.mode == "failed":
+            raise OSError("synthetic catalogue disconnected")
+        if self.hyperliquid and body == {"type":"l2Book", "coin":"SOL"}:
+            value = json.loads(self.base.request(url, dict(type="l2Book", coin="ETH"), **kwargs))
+            value["coin"] = "SOL"
+            return json.dumps(value)
+        value = json.loads(self.base.request(url, body, **kwargs))
+        metadata = body == {"type":"meta"} if self.hyperliquid else "/instruments?" in url
+        if self.hyperliquid and not metadata and self.mode == "rules":
+            value["levels"][0][0]["sz"] = "2.001"
+        if metadata:
+            field = "universe" if self.hyperliquid else "data"
+            if self.mode == "capacity":
+                value[field] *= 4097
+            elif self.mode == "gone":
+                value[field] = []
+            else:
+                if self.mode == "rules":
+                    value[field][0]["szDecimals" if self.hyperliquid else "tickSz"] = 3 if self.hyperliquid else "0.001"
+                if self.mode == "added":
+                    row = dict(value[field][0])
+                    if self.hyperliquid:
+                        row["name"] = "SOL"
+                    else:
+                        row["instId"] = row["instId"].replace("ETH", "SOL")
+                        row["ctValCcy" if row["instType"] == "SWAP" else "baseCcy"] = "SOL"
+                    value[field].append(row)
+                if not self.hyperliquid and "&instId=" in url:
+                    value[field] = [r for r in value[field] if r["instId"] == url.split("&instId=")[1]]
+        return json.dumps(value)
+
+
 class DynamicCatalogueTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.now = [2_000_000_000, 1_800_000_000_000_000_000]
         self.transport = DynamicOkxTransport(self.now)
-        self.runtime = ScannerRuntime(self.temp.name, dict(schema=1, assets=[], bindings=[]), transport=self.transport, automatic=False)
+        self.runtime = ScannerRuntime(self.temp.name, dict(schema=1, assets=[], bindings=[]), transport=self.transport,
+            clock=lambda:self.now[0], utc_clock=lambda:self.now[1], automatic=False)
         self.addCleanup(self.runtime.close)
         self.setting = dict(identity="a"*32, venue="1", type="okx", name="我的 OKX", environment="demo")
+
+    def test_refresh_retires_disappeared_inputs_and_rewarms_changed_rules(self):
+        self.runtime.discover(self.setting)
+        console = self.runtime.console
+        console.configure(dict(expected_version="0", scopes=[dict(scope(1, "demo"), quote_asset=None)]))
+        console.start()
+        self.runtime.step()
+        identity, = self.runtime.workers
+        old = self.runtime.workers[identity]
+        original = self.transport.request
+        mode = ["changed"]
+        def response(url, *args, **kwargs):
+            value = json.loads(original(url, *args, **kwargs))
+            if "/instruments?" in url:
+                if mode[0] == "gone" and "SPOT" in url:
+                    value["data"] = []
+                elif mode[0] == "changed":
+                    value["data"][0]["tickSz"] = "0.001"
+            return json.dumps(value)
+        self.transport.request = response
+        self.runtime.discover(self.setting)
+        self.assertNotIn(identity, self.runtime.observations)
+        self.assertIsNone(self.runtime.workers[identity])
+        self.assertIsNotNone(old[0].poll())
+        self.assertIn(identity, console.warming)
+        self.runtime.step()
+        self.assertTrue(self.runtime.status()["observations"][0]["continuous"])
+        mode[0] = "gone"
+        self.runtime.discover(self.setting)
+        self.assertNotIn(identity, self.runtime.source.registered)
+        self.assertNotIn(identity, self.runtime.workers)
+        self.assertFalse(console.view()["snapshot"]["candidates"])
+
+    def test_periodic_refresh_ttl_and_other_consumer_ownership(self):
+        transport = RefreshTransport(self.now)
+        self.runtime.transport = transport
+        self.runtime.discover(self.setting)
+        console = self.runtime.console
+        console.configure(dict(expected_version="0", scopes=[dict(scope(1, "demo"), quote_asset=None, new_instruments=True)]))
+        console.start(); self.runtime.step()
+        original = set(self.runtime.workers)
+        self.runtime.source.acquire("other-consumer", original)
+        transport.mode = "added"
+        self.now[0] += 30_000_000_000; self.now[1] += 30_000_000_000
+        self.runtime.step()
+        for thread in self.runtime.discovery_threads:
+            thread.join(timeout=20)
+            self.assertFalse(thread.is_alive())
+        self.assertEqual(len(self.runtime.workers), 2)
+        self.assertEqual(self.runtime.source.owners["other-consumer"], original)
+        # A stalled metadata request must not keep old inputs alive beyond TTL.
+        entered, resume = threading.Event(), threading.Event()
+        catalogue = transport.catalogue
+        def stalled(*args):
+            entered.set()
+            if not resume.wait(20): raise OSError("fixture timeout")
+            return catalogue(*args)
+        transport.catalogue = stalled
+        self.now[0] += 30_000_000_000; self.now[1] += 30_000_000_000
+        self.runtime.step()
+        self.assertTrue(entered.wait(5))
+        try:
+            self.now[0] += 90_000_000_000; self.now[1] += 90_000_000_000
+            self.runtime.step()
+            view = console.view()
+            self.assertEqual(view["market"]["observations"], [])
+            self.assertIn("TTL", view["market"]["discovery"]["1:demo"]["error"])
+            self.assertEqual(self.runtime.source.owners["other-consumer"], original)
+        finally:
+            resume.set()
+            for thread in self.runtime.discovery_threads: thread.join(timeout=20)
+        self.runtime.step()
+        self.assertTrue(all(o["continuous"] for o in console.view()["market"]["observations"]))
+        console.stop()
+        self.assertEqual(set(self.runtime.workers), original)
+        self.runtime.source.release("other-consumer")
+        self.assertEqual(self.runtime.workers, {})
 
     def test_legacy_assembly_does_not_skip_settings_driven_discovery(self):
         self.runtime.close()
@@ -396,6 +515,85 @@ class IntegrationTests(unittest.TestCase):
                 type=kind, name=name, environment=environment), self.headers)
             self.assertEqual(status, 200, body)
         return body["result"]
+
+    def test_dynamic_refresh_lifecycle_through_http_and_native_adapters(self):
+        settings = self.save_settings()["exchanges"]
+        for hyperliquid in (False, True):
+            with self.subTest(hyperliquid=hyperliquid):
+                self.runtime.close()
+                venue = 21 if hyperliquid else 1
+                transport = RefreshTransport(self.now, hyperliquid)
+                self.runtime = ScannerRuntime(Path(self.temp.name)/str(venue), dict(schema=1, assets=[], bindings=[]),
+                    transport=transport, clock=lambda:self.now[0], utc_clock=lambda:self.now[1], automatic=False)
+                self.app.scanner_console = self.runtime.console
+                self.runtime.console.exchange_settings = self.app.exchange_settings_store
+                setting = next(s for s in settings if s["venue"] == str(venue))
+                self.runtime.discover(setting)
+                row = dict(scope(venue), quote_asset=None)
+                self.call("configure", dict(expected_version="0", scopes=[row]))
+                self.call("start"); self.tick()
+                initial = set(self.runtime.workers)
+                self.assertEqual(len(initial), 1)
+                transport.mode = "added"
+                self.runtime.discover(setting)
+                self.assertEqual(set(self.runtime.workers), initial)
+                self.call("configure", dict(expected_version="1", scopes=[dict(row, new_instruments=True)]))
+                self.tick()
+                self.assertEqual(len(self.runtime.workers), 2)
+                self.assertTrue(all(o["continuous"] for o in self.http("/api/scanner", headers=self.headers)[1]["result"]["market"]["observations"]))
+                transport.mode = "rules"
+                self.runtime.discover(setting)
+                self.assertEqual(self.http("/api/scanner", headers=self.headers)[1]["result"]["market"]["observations"], [])
+                self.assertEqual(len(self.runtime.workers), 1)
+                self.assertEqual(len(self.http("/api/scanner", headers=self.headers)[1]["result"]["warming"]), 1)
+                self.tick()
+                self.assertTrue(self.http("/api/scanner", headers=self.headers)[1]["result"]["market"]["observations"][0]["continuous"])
+                for mode in ("failed", "capacity", "gone"):
+                    transport.mode = mode
+                    self.runtime.discover(setting)
+                    view = self.http("/api/scanner", headers=self.headers)[1]["result"]
+                    self.assertFalse(view["snapshot"]["candidates"])
+                    self.assertFalse(view["market"]["observations"])
+                    self.assertEqual(view["exchanges"][0 if venue == 1 else 1]["catalogue_state"], "ready" if mode == "gone" else "failed")
+                    self.assertEqual(len(view["exchanges"]), 2)
+                    transport.mode = "initial"
+                    self.runtime.discover(setting); self.tick()
+                    self.assertTrue(self.http("/api/scanner", headers=self.headers)[1]["result"]["market"]["observations"][0]["continuous"])
+
+    def test_refresh_failure_and_scope_changes_leave_other_source_running(self):
+        settings = self.save_settings()["exchanges"]
+        self.runtime.close()
+        okx, hl = RefreshTransport(self.now), RefreshTransport(self.now, True)
+        transport = PublicTransport()
+        transport.request = lambda url, body=None, **kw: (hl if body else okx).request(url, body, **kw)
+        self.runtime = ScannerRuntime(Path(self.temp.name)/"mixed", dict(schema=1, assets=[], bindings=[]),
+            transport=transport, clock=lambda:self.now[0], utc_clock=lambda:self.now[1], automatic=False)
+        self.app.scanner_console = self.runtime.console
+        self.runtime.console.exchange_settings = self.app.exchange_settings_store
+        for setting in settings: self.runtime.discover(setting)
+        rows = [dict(scope(v), quote_asset=None, new_instruments=True) for v in (1, 21)]
+        self.call("configure", dict(expected_version="0", scopes=rows))
+        self.call("start"); self.tick()
+        identity = next(i for i in self.runtime.workers if i[0] == 21)
+        worker = self.runtime.workers[identity]
+        self.runtime.source.acquire("other-consumer", {identity})
+        okx.mode = "failed"
+        self.runtime.discover(settings[0]); self.tick()
+        self.assertIs(self.runtime.workers[identity], worker)
+        observations = self.http("/api/scanner", headers=self.headers)[1]["result"]["market"]["observations"]
+        self.assertEqual([o["venue"] for o in observations], ["21"])
+        self.assertTrue(observations[0]["continuous"])
+        okx.mode = "initial"
+        self.runtime.discover(settings[0]); self.tick()
+        rows[0]["exclude_assets"] = sorted({str(e.rules.base_asset) for e in self.runtime.source.registered.values() if e.venue == 1})
+        self.call("configure", dict(expected_version="1", scopes=rows))
+        self.tick()
+        self.assertEqual(set(self.runtime.workers), {identity})
+        self.assertIs(self.runtime.workers[identity], worker)
+        self.call("stop")
+        self.assertIs(self.runtime.workers[identity], worker)
+        self.runtime.source.release("other-consumer")
+        self.assertEqual(self.runtime.workers, {})
 
     def test_dynamic_hyperliquid_settings_scope_native_scan_and_restart(self):
         self.runtime.close()

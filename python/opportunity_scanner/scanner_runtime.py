@@ -27,6 +27,8 @@ MAX_FRAME = 120 * 1024
 MAX_CATALOGUE = 8192
 MAX_DISCOVERY_BYTES = 4 * 1024 * 1024
 MAX_HL_METADATA_BYTES = 1024 * 1024
+CATALOGUE_REFRESH_NS = 30_000_000_000
+CATALOGUE_TTL_NS = 90_000_000_000
 ROUTES = {
     (1, "production"): ("https://www.okx.com", "production"),
     (1, "demo"): ("https://www.okx.com", "production"),
@@ -91,6 +93,8 @@ class ScannerRuntime:
         self.bindings, entries = {}, []
         self.discovery_status, self.discovery_threads = {}, []
         self.discovery_lock = threading.Lock()
+        self.discovery_settings, self.next_discovery, self.discovery_success = {}, {}, {}
+        self.discovery_inflight = set()
         cache = self.directory / "scanner-discovery.json"
         if cache.is_file():
             if cache.stat().st_size > MAX_DISCOVERY_BYTES:
@@ -168,25 +172,37 @@ class ScannerRuntime:
             lot * 10**assets[base]["atomic_scale"], -(-minimum.numerator // minimum.denominator), 0, 0, (1<<64)-1)
         return CatalogueEntry(row["venue"], int(row["observation_identity"]), row["product"], rules, row["environment"], row.get("specification"))
 
-    def request_discovery(self, setting):
+    def request_discovery(self, setting, *, refresh=False):
         key = setting["venue"] + ":" + setting["environment"]
         if (setting["type"], setting["venue"]) not in (("okx", "1"), ("hyperliquid", "21")):
             raise ValueError("unsupported discovery source")
         with self.lock:
-            if key in self.discovery_status and self.discovery_status[key]["state"] != "failed":
+            self.discovery_settings[key] = dict(setting)
+            if key in self.discovery_inflight or (not refresh and key in self.discovery_status and self.discovery_status[key]["state"] != "failed"):
                 return
+            self.discovery_inflight.add(key)
             self.discovery_status[key] = dict(state="loading", error="")
-            thread = threading.Thread(target=self.discover, args=(dict(setting),), daemon=True, name=setting["type"]+"-catalogue")
+            thread = threading.Thread(target=self._discover_requested, args=(dict(setting), key), daemon=True, name=setting["type"]+"-catalogue")
+            self.discovery_threads = [t for t in self.discovery_threads if t.is_alive()]
             self.discovery_threads.append(thread)
             thread.start()
 
+    def _discover_requested(self, setting, key):
+        try:
+            self.discover(setting)
+        finally:
+            with self.lock:
+                self.discovery_inflight.discard(key)
+
     def discover(self, setting):
-        """Explicit settings action; discovery never acquires a market subscription."""
+        """Replace one source snapshot and reconcile its existing consumer scopes."""
         key = setting["venue"] + ":" + setting["environment"]
         if (setting["type"], setting["venue"]) not in (("okx", "1"), ("hyperliquid", "21")) or (int(setting["venue"]), setting["environment"]) not in ROUTES:
             raise ValueError("unsupported discovery setting")
         with self.discovery_lock:
             with self.lock:
+                self.discovery_settings[key] = dict(setting)
+                self.next_discovery[key] = self.clock() + CATALOGUE_REFRESH_NS
                 self.discovery_status[key] = dict(state="loading", error="")
             try:
                 rows, rejected, evidence = [], [], []
@@ -243,26 +259,81 @@ class ScannerRuntime:
                 entries = [self._entry(row, asset_definitions) for row in rows]
                 if len({e.identity for e in entries}) != len(entries):
                     raise ValueError("duplicate catalogue identity")
-                if not entries:
+                if not entries and rejected:
                     raise ValueError("catalogue has no usable instruments: " + str(rejected[:8]))
-                with self.console.lock, self.source.lock, self.lock:
+                with self.poll_lock, self.console.lock, self.source.lock, self.lock:
                     if self.closing.is_set():
                         return
-                    updated = dict(self.bindings)
+                    incoming = {e.identity for e in entries}
+                    source_identities = {i for i,r in self.bindings.items() if (r["venue"], r["environment"]) ==
+                                         (int(setting["venue"]), setting["environment"])}
+                    affected = {i for i in source_identities if "okx_binding" in self.bindings[i]
+                                or self.bindings[i].get("hl_discovered") or i in incoming}
+                    updated = {i:r for i,r in self.bindings.items() if i not in affected}
                     updated.update((entry.identity, row) for entry, row in zip(entries, rows))
                     if len(updated) > MAX_CATALOGUE:
                         raise ValueError("scanner catalogue capacity")
-                    state = dict(state="ready", error="", rejected=rejected, evidence=evidence)
+                    state = dict(state="ready", error="", rejected=rejected, evidence=evidence,
+                                 count=len(entries), complete=True, refresh_ns=str(CATALOGUE_REFRESH_NS), ttl_ns=str(CATALOGUE_TTL_NS))
                     sources = {k:v for k,v in self.discovery_status.items() if v["state"] == "ready"}
                     sources[key] = state
                     atomic_json(self.directory/"scanner-discovery.json", dict(schema=1, assets=assets,
                         bindings=[r for r in updated.values() if "okx_binding" in r or "hl_discovered" in r], sources=sources), MAX_DISCOVERY_BYTES)
+                    changed = {i for i in affected if i not in updated or self.bindings[i] != updated[i]}
+                    self.source.registered = {i:e for i,e in self.source.registered.items() if i not in affected}
                     self.source.register(entries)
                     self.bindings, self.source.assets = updated, assets
+                    for owner in self.source.owners:
+                        self.source.owners[owner].intersection_update(updated)
+                    self.source.unavailable.difference_update(source_identities)
+                    self.discovery_success[key] = self.clock()
                     self.discovery_status[key] = state
+                    self._catalogue_changed(changed)
             except (OSError, ValueError, KeyError, TypeError) as error:
-                with self.lock:
-                    self.discovery_status[key] = dict(state="failed", error=str(error)[:2048], evidence=evidence, rejected=rejected)
+                with self.poll_lock, self.console.lock, self.source.lock, self.lock:
+                    affected = {i for i,r in self.bindings.items() if (r["venue"], r["environment"]) ==
+                                (int(setting["venue"]), setting["environment"])}
+                    self.source.unavailable.update(affected)
+                    self._catalogue_changed(affected)
+                    self.discovery_status[key] = dict(state="failed", error=str(error)[:2048], evidence=evidence,
+                                                     rejected=rejected, complete=False)
+
+    def _catalogue_changed(self, changed):
+        # Caller serializes polling and holds console/source/runtime locks.
+        for identity in changed:
+            owned = identity in self.workers
+            self.release(identity)
+            if owned and identity in self.bindings:
+                self.workers[identity] = None
+        console = self.console
+        console.snapshot["candidates"] = [r for r in console.snapshot["candidates"]
+            if not any(tuple(map(int, leg)) in changed for leg in r["pair"])]
+        if console.desired == "running":
+            before = set(self.source.owners.get(console.session, ()))
+            selected = console._selected()
+            self.source.acquire(console.session, selected)
+            console.warming.intersection_update(selected)
+            console.warming.update((selected - before) | (selected & changed))
+            console.phase = "Warming" if console.warming else "Running"
+
+    def _refresh_catalogues(self):
+        settings = (self.console.exchange_settings.view()["exchanges"] if self.console.exchange_settings is not None
+                    else tuple(self.discovery_settings.values()))
+        selected = {(r["venue"], r["environment"]) for r in self.console.config["scopes"]}
+        for setting in settings:
+            key = setting["venue"] + ":" + setting["environment"]
+            if key not in self.discovery_status or (setting["venue"], setting["environment"]) not in selected:
+                continue
+            if self.clock() - self.discovery_success.get(key, 0) >= CATALOGUE_TTL_NS:
+                with self.poll_lock, self.console.lock, self.source.lock, self.lock:
+                    affected = {i for i,r in self.bindings.items() if (r["venue"], r["environment"]) ==
+                                (int(setting["venue"]), setting["environment"])}
+                    if not affected <= self.source.unavailable:
+                        self.source.unavailable.update(affected)
+                        self._catalogue_changed(affected)
+                    self.discovery_status[key].update(state="failed", error="catalogue TTL expired", complete=False)
+            if self.clock() >= self.next_discovery.get(key, 0):
+                self.request_discovery(setting, refresh=True)
 
     def _hyperliquid_row(self, setting, item, assets):
         key = "21:" + setting["environment"]
@@ -371,6 +442,7 @@ class ScannerRuntime:
                     for identity, worker in tuple(self.workers.items()) if worker is not None}
 
     def step(self):
+        self._refresh_catalogues()
         with self.poll_lock:
             self._step()
 
@@ -380,7 +452,7 @@ class ScannerRuntime:
             selected = tuple(self.workers.items())
         for identity, worker in selected:
             with self.lock:
-                if identity in self.blocked or identity not in self.workers or self.workers[identity] is not worker:
+                if identity in self.source.unavailable or identity in self.blocked or identity not in self.workers or self.workers[identity] is not worker:
                     continue
             row = self.bindings[identity]
             try:

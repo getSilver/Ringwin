@@ -86,3 +86,11 @@ node tools/verify-scanner-integration-browser.mjs --ui-root D:/github/RingwinUi-
 OKX 动态发现定向浏览器验收：`node tools/verify-okx-discovery-browser.mjs --dev --ui-root D:/github/RingwinUi`。仅依赖定向生成的 native worker，不需要全量构建；Zig 直接测试应沿用 build.zig 的 `--stack 536870912`，并按用例名称过滤，避免入口的传递测试扩展到无关核心模块。
 
 Hyperliquid 动态发现复用同一浏览器 runner：`node tools/verify-okx-discovery-browser.mjs --dev --hyperliquid`。从空目录保存命名设置，经实际 Python／Zig 到页面 ETH 盘口。Hyperliquid 完整 meta 的发现和订阅重验限 1 MiB／4096 品种，普通盘口仍限 120 KiB；超限明确失败，不截取部分目录。
+
+已应用扫描范围内的动态来源每 30 秒后台刷新完整目录；失败同周期重试，目录 TTL 为 90 秒（进程内单调时间，重启不继承新鲜度）。刷新不阻塞其他来源的盘口轮询。加载和失败保留命名设置选项；`market.discovery` 提供状态、错误、拒绝原因、完整性及成功目录数量。TTL 到期或刷新失败即撤销该来源的有效输入和候选，恢复后重验元数据并取得新盘口。
+
+成功刷新按来源替换动态目录，删除消失、暂停或退市的品种；规则变化关闭旧 worker／session，清空旧盘口后按新规则重新预热。新增品种受已保存的 `new_instruments`、产品及资产纳入／排除控制；关闭开关只保留配置保存时的登记身份。深度门槛仍在每次新盘口发布时以报价资产单位判定。超过 16 个活跃订阅时明确失败并要求缩小范围，不把部分订阅当作完整覆盖。其他消费者持有的未变订阅独立保留。
+
+当前声明范围为 [OKX instruments](https://www.okx.com/docs-v5/en/#public-data-rest-api-get-instruments) 的完整 SPOT／SWAP 响应，以及 [Hyperliquid 标准永续 meta](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/info-endpoint/perpetuals) 的完整 universe；这两个目录请求没有分页游标。Hyperliquid 时间区间查询的分页规则不适用于 meta；不把历史查询或 HIP-3 分页纳入目录范围。完整数组由实际 Zig 协议实现解码；消息、行数、驻留目录或捕获容量超限均失败，不截断后标记完整。
+
+刷新定向浏览器验收为 `node tools/verify-okx-discovery-browser.mjs --dev --refresh`，Hyperliquid 追加 `--hyperliquid`。确定性序列覆盖新增、规则变更、断连、容量、消失和恢复，仍仅替换公共 transport 字节。
