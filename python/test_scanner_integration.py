@@ -276,6 +276,7 @@ class DynamicCatalogueTests(unittest.TestCase):
         self.runtime.close()
         self.runtime = ScannerRuntime(self.temp.name, dict(schema=1, assets=[], bindings=[]), transport=self.transport,
             clock=lambda:self.now[0], utc_clock=lambda:self.now[1], automatic=False)
+        self.addCleanup(self.runtime.close)
         self.assertEqual(self.runtime.status()["discovery"]["1:demo"]["state"], "unloaded")
         self.assertEqual(self.runtime.workers, {})
         self.runtime.console.configure(dict(expected_version="0", scopes=[dict(scope(1, "demo"), quote_asset=None)]))
@@ -283,11 +284,55 @@ class DynamicCatalogueTests(unittest.TestCase):
         settings = ExchangeSettings(Path(self.temp.name)/"exchange-settings.json")
         settings.save(dict(expected_version="0", type="okx", name="我的 OKX", environment="demo"))
         self.runtime.console.exchange_settings = settings
+        self.runtime.console.start()
         self.runtime.step()
         for thread in self.runtime.discovery_threads:
             thread.join(timeout=20)
             self.assertFalse(thread.is_alive())
         self.assertEqual(self.runtime.status()["discovery"]["1:demo"]["state"], "ready")
+
+    def test_stopped_restart_and_pause_do_not_refresh_until_start_or_explicit_load(self):
+        from opportunity_scanner.exchange_settings import ExchangeSettings
+        settings = ExchangeSettings(Path(self.temp.name)/"exchange-settings.json")
+        self.setting = settings.save(dict(expected_version="0", type="okx", name="我的 OKX", environment="demo"))["exchanges"][0]
+        self.runtime.discover(self.setting)
+        self.runtime.console.exchange_settings = settings
+        self.runtime.console.configure(dict(expected_version="0", scopes=[dict(scope(1, "demo"), quote_asset=None)]))
+        self.runtime.close()
+        self.runtime = ScannerRuntime(self.temp.name, dict(schema=1, assets=[], bindings=[]), transport=self.transport,
+            clock=lambda:self.now[0], utc_clock=lambda:self.now[1], automatic=False)
+        self.addCleanup(self.runtime.close)
+        self.runtime.console.exchange_settings = settings
+        requests = len(self.transport.urls)
+        self.now[0] += 120_000_000_000; self.now[1] += 120_000_000_000
+        self.runtime.step()
+        for thread in self.runtime.discovery_threads: thread.join(timeout=20)
+        self.assertEqual(self.runtime.console.desired, "stopped")
+        self.assertEqual(len(self.transport.urls), requests)
+        self.assertEqual(self.runtime.workers, {})
+        self.runtime.console.start()
+        self.runtime.step()
+        for thread in self.runtime.discovery_threads: thread.join(timeout=20)
+        self.assertGreater(len(self.transport.urls), requests)
+        self.runtime.console.pause()
+        requests = len(self.transport.urls)
+        self.now[0] += 120_000_000_000; self.now[1] += 120_000_000_000
+        self.runtime.step()
+        for thread in self.runtime.discovery_threads: thread.join(timeout=20)
+        self.assertEqual(len(self.transport.urls), requests)
+        # Explicit directory loading remains available while paused.
+        self.runtime.discover(self.setting)
+        self.assertGreater(len(self.transport.urls), requests)
+        identity = next(i for i,e in self.runtime.source.registered.items() if e.kind == "spot")
+        self.runtime.source.acquire("other-consumer", {identity})
+        requests = sum(url.endswith("instType=SPOT") for url in self.transport.urls)
+        self.now[0] += 30_000_000_000; self.now[1] += 30_000_000_000
+        self.runtime.step()
+        for thread in self.runtime.discovery_threads: thread.join(timeout=20)
+        self.assertGreater(sum(url.endswith("instType=SPOT") for url in self.transport.urls), requests)
+        self.assertEqual(self.runtime.console.desired, "paused")
+        self.assertEqual(self.runtime.source.owners["other-consumer"], {identity})
+        self.runtime.source.release("other-consumer")
 
     def test_legacy_assembly_does_not_skip_settings_driven_discovery(self):
         self.runtime.close()
@@ -654,6 +699,46 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(view["snapshot"]["candidates"], [])
         self.assertEqual([o["venue"] for o in view["market"]["observations"]], ["21"])
         self.assertIs(self.runtime.workers[identity], worker)
+
+    def test_complete_catalogue_revokes_missing_legacy_inputs_and_candidates(self):
+        self.start()
+        self.assertEqual(len(self.call("start")["snapshot"]["candidates"]), 3)
+        legacy = next(i for i in self.runtime.workers if i[0] == 1)
+        healthy = next(i for i in self.runtime.workers if i[0] == 21)
+        worker = self.runtime.workers[healthy]
+        self.runtime.source.acquire("other-consumer", {legacy, healthy})
+        self.transport.catalogue = DynamicOkxTransport(self.now).catalogue
+        self.runtime.discover(self.app.exchange_settings_store.view()["exchanges"][0])
+        view = self.http("/api/scanner", headers=self.headers)[1]["result"]
+        self.assertEqual(view["market"]["discovery"]["1:production"]["state"], "ready")
+        self.assertEqual(view["snapshot"]["candidates"], [])
+        self.assertEqual([o["venue"] for o in view["market"]["observations"]], ["21"])
+        self.assertIs(self.runtime.workers[healthy], worker)
+        self.assertEqual(self.runtime.source.owners["other-consumer"], {legacy, healthy})
+        self.tick()
+        self.assertEqual([o["venue"] for o in self.runtime.status()["observations"]], ["21"])
+        self.assertIs(self.runtime.workers[healthy], worker)
+        catalogue = DynamicOkxTransport(self.now).catalogue
+        def restored(setting, product):
+            value = json.loads(catalogue(setting, product))
+            if product == "spot":
+                value["data"][0].update(instId="BTC-USDC", baseCcy="BTC", quoteCcy="USDC",
+                    tickSz="0.1", lotSz="0.00000001", minSz="0.00001")
+            return json.dumps(value)
+        metadata = self.transport.metadata
+        self.transport.catalogue = restored
+        def restored_metadata(row):
+            if row["venue"] == 1:
+                return restored(self.app.exchange_settings_store.view()["exchanges"][0], row["product"])
+            return metadata(row)
+        self.transport.metadata = restored_metadata
+        self.runtime.discover(self.app.exchange_settings_store.view()["exchanges"][0])
+        self.assertIn(list(map(str, legacy)), self.call("start")["warming"])
+        self.tick()
+        view = self.call("start")
+        self.assertEqual(len(view["snapshot"]["candidates"]), 3)
+        self.assertTrue(all(o["continuous"] for o in view["market"]["observations"]))
+        self.assertIs(self.runtime.workers[healthy], worker)
 
     def test_dynamic_hyperliquid_settings_scope_native_scan_and_restart(self):
         self.runtime.close()

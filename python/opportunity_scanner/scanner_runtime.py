@@ -282,13 +282,16 @@ class ScannerRuntime:
                     sources[key] = state
                     atomic_json(self.directory/"scanner-discovery.json", dict(schema=1, assets=assets,
                         bindings=[r for r in updated.values() if "okx_binding" in r or "hl_discovered" in r], sources=sources), MAX_DISCOVERY_BYTES)
-                    changed = {i for i in affected if i not in updated or self.bindings[i] != updated[i]}
+                    missing = source_identities - incoming
+                    changed = missing | {i for i in affected if i not in updated or self.bindings[i] != updated[i]}
                     self.source.registered = {i:e for i,e in self.source.registered.items() if i not in affected}
                     self.source.register(entries)
                     self.bindings, self.source.assets = updated, assets
                     for owner in self.source.owners:
                         self.source.owners[owner].intersection_update(updated)
                     self.source.unavailable.difference_update(source_identities)
+                    # Transitional static registrations cannot override a complete source snapshot.
+                    self.source.unavailable.update(missing & updated.keys())
                     self.discovery_success[key] = self.clock()
                     self.discovery_status[key] = state
                     self._catalogue_changed(changed)
@@ -322,7 +325,10 @@ class ScannerRuntime:
     def _refresh_catalogues(self):
         settings = (self.console.exchange_settings.view()["exchanges"] if self.console.exchange_settings is not None
                     else tuple(self.discovery_settings.values()))
-        selected = {(r["venue"], r["environment"]) for r in self.console.config["scopes"]}
+        with self.console.lock, self.source.lock:
+            selected = {(r["venue"], r["environment"]) for r in self.console.config["scopes"]} if self.console.desired == "running" else set()
+            selected.update((str(self.bindings[i]["venue"]), self.bindings[i]["environment"])
+                            for identities in self.source.owners.values() for i in identities if i in self.bindings)
         for setting in settings:
             key = setting["venue"] + ":" + setting["environment"]
             if key not in self.discovery_status or (setting["venue"], setting["environment"]) not in selected:
