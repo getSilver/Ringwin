@@ -242,7 +242,7 @@ class HyperliquidCatalogueTests(unittest.TestCase):
             self.assertEqual(Path(self.temp.name, "scanner-discovery.json").read_bytes(), cache)
 
     def test_complete_large_metadata_and_reordered_universe_preserve_identity(self):
-        self.transport.metadata_document["padding"] = "x" * (130*1024)
+        self.transport.metadata_document["padding"] = "x" * (300*1024)
         self.transport.metadata_document["universe"].append(dict(name="SOL", szDecimals=2, maxLeverage=25, marginTableId=53))
         self.runtime.discover(self.setting)
         identities = {row["symbol"]: identity for identity, row in self.runtime.bindings.items()}
@@ -268,6 +268,49 @@ class HyperliquidCatalogueTests(unittest.TestCase):
             {"https://api.hyperliquid.xyz/info", "https://api.hyperliquid-testnet.xyz/info"})
         with self.assertRaises(ValueError): self.runtime.discover(dict(self.setting, type="okx"))
         with self.assertRaises(ValueError): self.runtime.discover(dict(self.setting, environment="demo"))
+
+    def test_legacy_symbol_does_not_hide_saved_dynamic_identity_and_scope_after_restart(self):
+        self.runtime.close()
+        legacy = configuration()
+        self.runtime = ScannerRuntime(self.temp.name, legacy, transport=self.transport,
+            clock=lambda:self.now[0], utc_clock=lambda:self.now[1], automatic=False)
+        self.addCleanup(self.runtime.close)
+        self.transport.metadata_document["universe"][0]["name"] = "BTC"
+        original_request = self.transport.request
+        def request(url, body=None, **kwargs):
+            if body == dict(type="l2Book", coin="BTC"):
+                book = json.loads(original_request(url, dict(type="l2Book", coin="ETH"), **kwargs))
+                book["coin"] = "BTC"
+                return json.dumps(book)
+            return original_request(url, body, **kwargs)
+        self.transport.request = request
+        self.runtime.discover(self.setting)
+        identity, row = next((identity, row) for identity, row in self.runtime.bindings.items() if row.get("hl_discovered"))
+        before = set(self.runtime.source.registered)
+        self.runtime.console.configure(dict(expected_version="0", scopes=[dict(scope(21),
+            include_assets=[row["base_asset"]], quote_asset=row["quote_asset"])]))
+        self.runtime.console.start()
+        self.runtime.step()
+        self.assertEqual(set(self.runtime.workers), {identity})
+        self.assertTrue(self.runtime.status()["observations"][0]["continuous"])
+        saved_scope = self.runtime.console.view()["config"]
+        self.runtime.close()
+        requests = len(self.transport.requests)
+        self.runtime = ScannerRuntime(self.temp.name, legacy, transport=self.transport,
+            clock=lambda:self.now[0], utc_clock=lambda:self.now[1], automatic=False)
+        self.addCleanup(self.runtime.close)
+        self.assertEqual(set(self.runtime.source.registered), before)
+        self.assertEqual(self.runtime.console.view()["config"], saved_scope)
+        self.assertEqual(self.runtime.console.desired, "stopped")
+        self.assertEqual(self.runtime.status()["active_subscriptions"], 0)
+        self.runtime.request_discovery(self.setting)
+        self.assertEqual(len(self.transport.requests), requests)
+        self.runtime.console.start()
+        self.now[0] += 100_000_000; self.now[1] += 100_000_000
+        self.runtime.step()
+        self.assertEqual(set(self.runtime.workers), {identity})
+        self.assertEqual(self.runtime.status()["failures"], {})
+        self.assertTrue(self.runtime.status()["observations"][0]["continuous"])
 
     def test_changed_rules_wrong_binding_and_invalid_book_never_publish_healthy_input(self):
         self.runtime.discover(self.setting)

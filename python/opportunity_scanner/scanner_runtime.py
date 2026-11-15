@@ -98,8 +98,9 @@ class ScannerRuntime:
             saved = json.loads(cache.read_text(encoding="utf-8"), object_pairs_hook=_object)
             if saved.get("schema") != 1 or set(saved) != {"schema", "assets", "bindings", "sources"}:
                 raise ValueError("saved discovery schema")
+            configured_identities = {(b["venue"], int(b["observation_identity"]), int(b["instrument"])) for b in bindings}
             configuration = dict(schema=1, assets=configuration["assets"] + [a for a in saved["assets"] if a["identity"] not in {x["identity"] for x in configuration["assets"]}],
-                bindings=bindings + [b for b in saved["bindings"] if (b["venue"], b["environment"], b["symbol"]) not in {(x["venue"], x["environment"], x["symbol"]) for x in bindings}])
+                bindings=bindings + [b for b in saved["bindings"] if (b["venue"], int(b["observation_identity"]), int(b["instrument"])) not in configured_identities])
             bindings = configuration["bindings"]
             self.discovery_status = saved["sources"]
             if len(bindings) > MAX_CATALOGUE:
@@ -325,7 +326,9 @@ class ScannerRuntime:
         path = self.directory / ("market-" + secrets.token_hex(16) + ".raw")
         executable = ROOT/"zig-out/bin"/("ringwin-scanner-market.exe" if os.name == "nt" else "ringwin-scanner-market")
         process = subprocess.Popen([str(executable), str(path)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        channel = NativeAuthority(process, timeout=15 if discovery else 5, max_frame_bytes=5*1024*1024 if discovery else 256*1024)
+        # Full Hyperliquid metadata also travels inside the JSON request envelope.
+        channel = NativeAuthority(process, timeout=15 if discovery else 5,
+            max_frame_bytes=5*1024*1024 if discovery or row["venue"] == 21 else 256*1024)
         config = dict(schema=1, discovery=discovery, requested_environment=row["environment"], session=session, venue=row["venue"], environment=ROUTES[row["venue"], row["environment"]][1],
             instrument=int(row["instrument"]), rules_version=row["rules_version"], tick=row["tick"], lot=row["lot_wire"])
         config["minimum_size"] = row.get("minimum_size")
