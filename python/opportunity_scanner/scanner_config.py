@@ -28,8 +28,10 @@ def _validate(config):
     for row in config["scopes"]:
         fields = {"venue", "product", "environment", "include_assets", "exclude_assets", "quote_asset",
                   "min_depth_atoms", "max_depth_atoms", "new_instruments"}
-        if type(row) is not dict or set(row) != fields or type(row["new_instruments"]) is not bool:
+        if type(row) is not dict or set(row) - {"setting_id"} != fields or type(row["new_instruments"]) is not bool:
             raise ValueError("saved scanner scope fields")
+        if "setting_id" in row and (type(row["setting_id"]) is not str or not row["setting_id"]):
+            raise ValueError("saved scanner setting reference")
         key = row["venue"], row["product"], row["environment"]
         if key in keys:
             raise ValueError("duplicate scanner subscription")
@@ -90,19 +92,23 @@ class ConfigStore:
 
     def save(self, config):
         _validate(config)
-        data = json.dumps(dict(schema="scanner_config_v1", config=config), sort_keys=True,
-                          separators=(",", ":"), allow_nan=False).encode()
-        if len(data) > MAX_CONFIG_BYTES:
-            raise ValueError("saved scanner config capacity")
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = None
-        try:
-            with tempfile.NamedTemporaryFile(dir=self.path.parent, prefix=".scanner-config-", suffix=".tmp", delete=False) as target:
-                temporary = Path(target.name)
-                target.write(data)
-                target.flush()
-                os.fsync(target.fileno())
-            os.replace(temporary, self.path)
-        finally:
-            if temporary is not None:
-                temporary.unlink(missing_ok=True)
+        atomic_json(self.path, dict(schema="scanner_config_v1", config=config), MAX_CONFIG_BYTES)
+
+
+def atomic_json(path, document, capacity):
+    """Publish one complete runtime configuration, preserving the old file on failure."""
+    data = json.dumps(document, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+    if len(data) > capacity:
+        raise ValueError("saved configuration capacity")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=path.parent, prefix="."+path.stem+"-", suffix=".tmp", delete=False) as target:
+            temporary = Path(target.name)
+            target.write(data)
+            target.flush()
+            os.fsync(target.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)

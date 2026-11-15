@@ -4,10 +4,12 @@ Synthetic protocol fixtures replace only the external public transport.
 """
 import http.client
 import json
+import os
 from pathlib import Path
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 
 import control_plane
 import control_plane_web
@@ -120,9 +122,62 @@ class IntegrationTests(unittest.TestCase):
         self.runtime.close(); self.temp.cleanup()
 
     def start(self):
+        self.save_settings()
         self.call("configure",dict(expected_version="0",scopes=[scope(1),scope(21)]))
         self.assertEqual(self.call("start")["phase"],"Warming")
         self.tick()
+
+    def save_settings(self):
+        status, body = self.http("/api/exchange-settings", headers=self.headers)
+        self.assertEqual(status, 200, body)
+        for kind, name, environment in (("okx", "我的现货", "production"), ("hyperliquid", "我的永续", "production")):
+            if any(row["type"] == kind and row["environment"] == environment for row in body["result"]["exchanges"]):
+                continue
+            status, body = self.http("/api/exchange-settings", dict(expected_version=body["result"]["version"],
+                type=kind, name=name, environment=environment), self.headers)
+            self.assertEqual(status, 200, body)
+        return body["result"]
+
+    def test_settings_auth_scope_reference_loading_failure_and_service_restart(self):
+        self.assertEqual(self.http("/api/exchange-settings")[0], 401)
+        self.assertEqual(self.http("/api/exchange-settings", dict(expected_version="0", type="okx", name="市场", environment="production"), {"Cookie": self.cookie})[0], 403)
+        self.assertEqual(self.call("stop")["exchanges"], [])
+        self.assertEqual(self.runtime.status()["active_subscriptions"], 0)
+        self.assertEqual(self.http("/api/scanner", dict(operation="configure", payload=dict(expected_version="0", scopes=[scope(1)])), self.headers)[0], 400)
+        self.save_settings()
+        view = self.call("stop")
+        status, body = self.http("/api/exchange-settings", dict(expected_version="2", type="okx", name="  ", environment="demo"), self.headers)
+        self.assertEqual(status, 400, body)
+        status, body = self.http("/api/exchange-settings", dict(expected_version="0", type="okx", name="旧版本", environment="demo"), self.headers)
+        self.assertEqual(status, 409, body)
+        replace_file = os.replace
+        def fail_settings_write(source, destination):
+            if Path(destination).name == "exchange-settings.json":
+                raise OSError("settings disk failure")
+            return replace_file(source, destination)
+        with patch("os.replace", side_effect=fail_settings_write):
+            status, body = self.http("/api/exchange-settings", dict(expected_version="2", type="okx", name="失败保存", environment="demo"), self.headers)
+        self.assertEqual(status, 503, body)
+        self.assertEqual(self.http("/api/exchange-settings", headers=self.headers)[1]["result"]["version"], "2")
+        self.assertEqual([r["name"] for r in view["exchanges"]], ["我的现货", "我的永续"])
+        self.assertTrue(all(r["catalogue_state"] == "registered" for r in view["exchanges"]))
+        self.call("configure", dict(expected_version="0", scopes=[scope(1), scope(21)]))
+        self.assertTrue(all(r["setting_id"] in {s["identity"] for s in view["exchanges"]} for r in self.call("stop")["config"]["scopes"]))
+        self.assertTrue(all(r["catalogue_state"] == "loading" for r in self.call("start")["exchanges"]))
+        self.tick()
+        self.assertEqual(len(self.call("start")["snapshot"]["candidates"]), 3)
+        self.transport.fail.add(21); self.tick()
+        failed = self.call("start")
+        self.assertEqual(failed["exchanges"][1]["catalogue_state"], "failed")
+        self.assertIn("disconnected", failed["exchanges"][1]["catalogue_error"])
+        self.assertEqual(failed["exchanges"][1]["name"], "我的永续")
+        self.runtime.close()
+        self.runtime = ScannerRuntime(self.temp.name, configuration(), transport=self.transport, automatic=False)
+        restored = control_plane_web.ControlPlaneApp(self.temp.name, self.app.command_server, scanner_console=self.runtime.console)
+        restored_view = restored.scanner_console.view()
+        self.assertEqual(restored_view["exchanges"], view["exchanges"])
+        self.assertEqual((restored_view["desired"], restored_view["config_version"]), ("stopped", "1"))
+        self.assertEqual(self.runtime.status()["active_subscriptions"], 0)
 
     def test_authenticated_full_chain_missing_evidence_history_and_restart(self):
         self.assertEqual(self.http("/api/scanner")[0],401)

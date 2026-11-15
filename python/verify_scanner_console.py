@@ -46,7 +46,7 @@ def canonical_fixture():
     position = replace(plan.scenarios[0].entry, legs=tuple(replace(leg, account=(20, 30)[i], rules=rules[i],
         exit_fee=replace(leg.exit_fee, instrument=101+i, rules_version=2)) for i, leg in enumerate(plan.scenarios[0].entry.legs)))
     paths = tuple(scenario(replace(item, entry=position)) for item in plan.scenarios)
-    observations = tuple(s.Observation((1, 21)[i], (20, 30)[i], "linear", rules[i], paths[0].markets[0].books[i], True)
+    observations = tuple(s.Observation((1, 21)[i], (20, 30)[i], "linear", rules[i], paths[0].markets[0].books[i], True, environment="production")
                          for i in range(2))
     pair = tuple(o.identity for o in observations)
     policy = replace(plan.policy, scope=s.candidate_id(pair, 1, "taker_taker", None), base_asset=0x425443,
@@ -133,6 +133,10 @@ class Fixture:
         app_type = DevelopmentControlPlaneApp if development else control_plane_web.ControlPlaneApp
         self.app = app_type(directory, self.channel, scanner_console=self.console, ui_path=ui_path,
             clock=lambda: int(time.time())+self.owner_offset)
+        if self.app.exchange_settings_store.view()["version"] == "0":
+            for index, kind in enumerate(("okx", "hyperliquid")):
+                self.app.exchange_settings_store.save(dict(expected_version=str(index), type=kind,
+                    name="Fixture "+kind, environment="production"))
         self.app.setup(PASSPHRASE)
         self.server = control_plane_web.serve(self.app)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
@@ -153,6 +157,7 @@ class Fixture:
     def restart_console(self):
         self.console.close()
         self.console = self.new_console()
+        self.console.exchange_settings = self.app.exchange_settings_store
         self.app.scanner_console = self.console
 
     def _publish(self):

@@ -207,6 +207,8 @@ class ControlPlaneApp:
         self.instance_manager = (strategy_instance.InstanceManager(directory, release_manager, instance_source)
                                  if release_manager is not None and instance_source is not None else None)
         self.lifecycle_outbox = lifecycle_outbox
+        from opportunity_scanner.exchange_settings import ExchangeSettings
+        self.exchange_settings_store = ExchangeSettings(Path(directory)/"exchange-settings.json")
         self.scanner_runtime = None
         market_config = Path(directory)/"scanner-market.json"
         if scanner_console is None and market_config.is_file():
@@ -215,9 +217,13 @@ class ControlPlaneApp:
                 raise ValueError("scanner market configuration capacity")
             self.scanner_runtime = ScannerRuntime(directory, json.loads(market_config.read_text(encoding="utf-8")))
             scanner_console = self.scanner_runtime.console
+        if scanner_console is None:
+            from opportunity_scanner.scanner_console import CanonicalSource, ScannerConsole, History
+            scanner_console = ScannerConsole(CanonicalSource(), History(), config_path=Path(directory)/"scanner-config.json")
         self.scanner_console = scanner_console
         if scanner_console is not None and scanner_console.config_store is None:
             scanner_console.bind_config(Path(directory)/"scanner-config.json")
+        scanner_console.exchange_settings = self.exchange_settings_store
         self.credential_packages = credential_packages.CredentialPackages(
             os.path.join(directory, "credential-packages"))
         self._command_results: dict[int, tuple[str, dict]] = {}
@@ -519,6 +525,18 @@ class ControlPlaneApp:
             return 404, b"asset not found", "text/plain"
         return 200, target.read_bytes(), mimetypes.guess_type(target.name)[0] or "application/octet-stream"
 
+    def exchange_settings(self, headers, request=None):
+        status, body = self.authorize(headers)
+        if status != 200:
+            return status, body
+        try:
+            result = self.exchange_settings_store.view() if request is None else self.exchange_settings_store.save(request)
+            return 200, {"ok": True, "result": result}
+        except (ValueError, KeyError, TypeError) as error:
+            return 409 if "conflict" in str(error) else 400, {"ok": False, "error": str(error)}
+        except OSError as error:
+            return 503, {"ok": False, "error": str(error)}
+
     def scanner(self, headers, request=None):
         status, body = self.authorize(headers)
         if status != 200:
@@ -714,6 +732,8 @@ def make_handler(app: ControlPlaneApp):
                     lambda body: app.strategy_instances(dict(self.headers), body)),
                 "/api/scanner": lambda: self._post(
                     lambda body: app.scanner(dict(self.headers), body)),
+                "/api/exchange-settings": lambda: self._post(
+                    lambda body: app.exchange_settings(dict(self.headers), body)),
             }
             handler = routes.get(self.path)
             if handler is None:
@@ -737,6 +757,7 @@ def make_handler(app: ControlPlaneApp):
                 "/api/releases": lambda: self._get(app.releases),
                 "/api/strategy-instances": lambda: self._get(app.strategy_instances),
                 "/api/scanner": lambda: self._get(app.scanner),
+                "/api/exchange-settings": lambda: self._get(app.exchange_settings),
             }
             handler = routes.get(self.path)
             if handler is None:

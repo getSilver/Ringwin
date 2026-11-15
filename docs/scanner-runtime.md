@@ -14,7 +14,15 @@ python python/control_plane_node.py --directory .scratch/run/scanner --ui D:/git
 
 首次启动在本机终端设置 Owner 口令，并按现有 setup 结果保存 TOTP 信息。访问 `http://127.0.0.1:8765`，复用正常登录、内存 CSRF 和扫描 API。刷新需要重新认证，已有服务端历史仍可查询。
 
-运行目录中的 `scanner-market.json` 是可信的部署目录。没有此文件时，扫描 API 返回能力不可用，不自动装载测试数据。`scanner-config.json` 由扫描范围 API 单独版本化保存；重启恢复范围，默认 Stopped。
+在现有设置页的“交易所”中选择类型、填写必填名称和环境后保存；扫描范围直接显示配置名称，不需要账户、凭证或策略加载。刷新后重新登录即可恢复设置。初次运行为空，不预置交易所。
+
+`exchange-settings.json` 保存 `exchange_settings_v1`、独立配置版本及 `identity/venue/type/name/environment`。稳定设置身份由服务端生成，名称不参与路由；同 Venue／环境禁止重复。认证接口 `GET/POST /api/exchange-settings` 复用 OwnerSession／CSRF；写入包含 `expected_version/type/name/environment`，旧版本返回 409，校验失败返回 400，存储失败返回 503。采用同目录临时文件、flush、fsync、原子替换，落盘后才更新内存与返回成功。损坏的已保存文件使启动明确失败；残留临时文件不参与恢复。
+
+`scanner-config.json` 继续独立版本化保存范围；控制面写入的每条范围携带 `setting_id`，并校验它对应的 Venue／环境。重启恢复设置和范围，默认 Stopped，不自动请求行情。
+
+01 阶段暂时保留 `scanner-market.json` 作为已有来源的内部部署过渡。没有此文件仍可保存设置、在扫描范围看到名称和“目录未加载”状态，但本票不提供动态发现；02／03 接入动态目录，06 移除该文件。用户无需为新增设置创建静态目录。已登记来源在配置范围后可走现有实际 Python／Zig 链路。
+
+扫描视图的 `exchanges` 独立于 `catalogue`，包含设置字段及 `source_id`（Venue／环境）、`products`、`catalogue_state`、`catalogue_error`；状态为 unloaded／registered／loading／ready／failed。目录行携带 `setting_id`。未加载、加载中和失败不移除设置选项；未保存的来源不可经控制面加入范围。交易所账户预览与这份设置分别管理；环境切换和删除的订阅协调由 05 实施。
 
 ## 支持范围
 
@@ -66,5 +74,7 @@ node tools/verify-scanner-integration-browser.mjs --ui-root D:/github/RingwinUi-
 ```
 
 浏览器 runner 只在公共 transport 返回标记为 `synthetic_protocol_fixture` 的两家协议输入。HTTP 不接受行情、候选或批准回执；内部适配器、规范投影、扫描器和认证均为正式实现。
+
+只验证本次设置／范围改动且不构建整个前端时，可运行 `node tools/verify-scanner-integration-browser.mjs --dev --ui-root D:/github/RingwinUi`。runner 启动本地 Vite 并代理到临时认证后端，使用相同正式页面；要求现有 `ringwin-scanner-market` 二进制、Playwright 和 Chromium。设置存储及服务恢复回归为 `python -m unittest discover -s python -p test_exchange_settings.py`，范围与真实适配器回归为 `test_scanner_console.py`、`test_scanner_integration.py`。
 
 本交付只验项目内部整合。在线端点、真实盘口、新鲜度、限流和长期运行另验；trading_qualified 恒为 false，12–15 及经济／运行／生产资格不变。

@@ -129,6 +129,7 @@ class ScannerConsole:
         self.config = history.latest_config() or dict(version="0", scopes=[], registered=[],
             statistics=dict(version="1", min_profit_atoms="0", min_probability_ppm=0))
         self.config_store = None
+        self.exchange_settings = None
         if config_path is not None:
             self.bind_config(config_path)
         self.sequence = self.committed = self.cursor = 0
@@ -233,6 +234,12 @@ class ScannerConsole:
             return set()
         permitted = {tuple(map(int, x)) for x in self.config["registered"]}
         result = set()
+        if self.exchange_settings is not None:
+            settings = self.exchange_settings.view()["exchanges"]
+            for row in self.config["scopes"]:
+                if not any((s["venue"], s["environment"]) == (row["venue"], row["environment"])
+                           and row.get("setting_id", s["identity"]) == s["identity"] for s in settings):
+                    raise ValueError("scanner scope requires saved exchange setting")
         with self.source.lock:
             for identity, observed in self.source.registered.items():
                 for row, member in zip(self.config["scopes"], scope.members):
@@ -260,7 +267,7 @@ class ScannerConsole:
             for row in rows:
                 fields = {"venue", "product", "environment", "include_assets", "exclude_assets", "quote_asset",
                           "min_depth_atoms", "max_depth_atoms", "new_instruments"}
-                if type(row) is not dict or set(row) != fields or type(row["new_instruments"]) is not bool:
+                if type(row) is not dict or set(row) - {"setting_id"} != fields or type(row["new_instruments"]) is not bool:
                     raise ValueError("scanner scope fields")
                 venue = uint_text(row["venue"], minimum=1)
                 key = venue, row["product"], row["environment"]
@@ -277,7 +284,14 @@ class ScannerConsole:
                         uint_text(row[field], minimum=1 if field == "quote_asset" else 0)
                 if not any((o.venue, o.kind, o.environment) == key for o in self.source.registered.values()):
                     raise ValueError("venue/product/environment not registered by node")
-                normalized.append(json.loads(encoded(row)))
+                saved_row = json.loads(encoded(row))
+                if self.exchange_settings is not None:
+                    setting = next((s for s in self.exchange_settings.view()["exchanges"]
+                                    if (s["venue"], s["environment"]) == (row["venue"], row["environment"])), None)
+                    if setting is None or row.get("setting_id", setting["identity"]) != setting["identity"]:
+                        raise ValueError("scanner scope requires saved exchange setting")
+                    saved_row["setting_id"] = setting["identity"]
+                normalized.append(saved_row)
             statistics = request.get("statistics", self.config["statistics"])
             if (type(statistics) is not dict or set(statistics) != {"version", "min_profit_atoms", "min_probability_ppm"}
                     or type(statistics["min_probability_ppm"]) is not int or not 0 <= statistics["min_probability_ppm"] <= 1_000_000):
@@ -583,18 +597,40 @@ class ScannerConsole:
             catalogue = [dict(venue=str(x.venue), account=str(x.account), instrument=str(x.rules.instrument),
                 product=x.kind, environment=x.environment, base_asset=str(x.rules.exposure_asset),
                 quote_asset=str(x.rules.quote_asset), rules_version=str(x.rules.version)) for x in self.source.registered.values()]
+            market = self.source.runtime_status()
+            settings = self.exchange_settings.view() if self.exchange_settings is not None else None
+            exchanges = []
+            if settings is not None:
+                for setting in settings["exchanges"]:
+                    members = [r for r in catalogue if (r["venue"], r["environment"]) == (setting["venue"], setting["environment"])]
+                    failures = [market.get("failures", {}).get(str(tuple(map(int, (r["venue"], r["account"], r["instrument"]))))) for r in members]
+                    failures = [error for error in failures if error]
+                    active = [r for r in market.get("observations", []) if (r["venue"], r["environment"]) == (setting["venue"], setting["environment"])]
+                    state = "failed" if failures else "ready" if active else "loading" if any(
+                        tuple(map(int, (r["venue"], r["account"], r["instrument"]))) in self.warming for r in members
+                    ) else "registered" if members else "unloaded"
+                    exchanges.append(dict(setting, source_id=setting["venue"]+":"+setting["environment"],
+                        products=next(a["products"] for a in settings["types"] if a["type"] == setting["type"]),
+                        catalogue_state=state, catalogue_error="; ".join(failures)))
+                    for row in members:
+                        row["setting_id"] = setting["identity"]
+                catalogue = [row for row in catalogue if "setting_id" in row]
+                if market:
+                    market = dict(market, routes=[route for route in market.get("routes", []) if any(
+                        (s["venue"], s["environment"]) == (route["venue"], route["requested_environment"]) for s in exchanges)])
             history_window = self.history.status()
             cutoff = int(history_window["window_start_wall_ms"])
             self.coverage_gaps = [gap for gap in self.coverage_gaps if gap["wall_ms"] >= cutoff][-64:]
             return json.loads(encoded(dict(self._envelope(), phase=self.phase, desired=self.desired, config=self.config,
-                        catalogue=catalogue, wall_ms=str(self.wall_clock()), clock_domain="server_monotonic_ns",
+                        catalogue=catalogue, exchanges=exchanges, settings_version=settings["version"] if settings else "0",
+                        wall_ms=str(self.wall_clock()), clock_domain="server_monotonic_ns",
                         remaining_validity_ns={r["id"]: str(max(0, int(r["valid_until_ns"])-now)) for r in self.snapshot["candidates"]},
                         trading_bindings=self.trading_bindings,
                         assets=self.source.assets,
                         latest_sequence=str(self.sequence), committed_sequence=str(self.committed),
                         backlog=0, storage_healthy=self.history.healthy, history_window=history_window,
                         storage_error=self.history.error, coverage_gaps=list(self.coverage_gaps)+history_window["gaps"], errors=list(self.errors[-64:]),
-                        warming=[list(map(str, x)) for x in sorted(self.warming)], market=self.source.runtime_status(), trading_qualified=False)))
+                        warming=[list(map(str, x)) for x in sorted(self.warming)], market=market or None, trading_qualified=False)))
 
     def close(self):
         if not self.shutdown.is_set():

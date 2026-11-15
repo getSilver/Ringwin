@@ -71,7 +71,7 @@ try {
     await textbox('口令').fill(ready.passphrase);
     await textbox('TOTP 验证码').fill(ready.totp);
     const login = page.waitForResponse(r => r.url() === base+'/login');
-    await click('登录扫描控制台');
+    await click('登录');
     csrf = (await (await login).json()).csrf_token;
     await page.getByText('已停止 · 配置 v0', {exact:true}).waitFor();
   });
@@ -80,8 +80,8 @@ try {
     await current.focus(); await page.keyboard.press('ArrowRight');
     assert(await page.getByRole('tab',{name:'扫描范围',exact:true}).evaluate(element => element === document.activeElement));
     await page.keyboard.press('Enter');
-    await page.getByRole('checkbox',{name:'Venue 1',exact:true}).check();
-    await page.getByRole('checkbox',{name:'Venue 21',exact:true}).check();
+    await page.getByRole('checkbox',{name:'Fixture okx',exact:true}).check();
+    await page.getByRole('checkbox',{name:'Fixture hyperliquid',exact:true}).check();
     await page.getByRole('checkbox',{name:'永续',exact:true}).check();
     await choose('深度报价资产','USDT');
     await textbox('盘口深度最低金额（可空）').fill('1');
@@ -94,7 +94,7 @@ try {
     assert.equal((await api('history',{kind:'config',limit:50})).body.result.rows.length,0);
   });
   await check('optimistic config conflict preserves draft', async () => {
-    const scope = venue => ({venue,product:'linear',environment:'simulation',include_assets:[],exclude_assets:[],quote_asset:'1',min_depth_atoms:'0',max_depth_atoms:null,new_instruments:false});
+    const scope = venue => ({venue,product:'linear',environment:'production',include_assets:[],exclude_assets:[],quote_asset:'1',min_depth_atoms:'0',max_depth_atoms:null,new_instruments:false});
     assert.equal((await api('configure',{expected_version:'0',scopes:[scope('1'),scope('21')]})).status,200);
     await click('应用扫描范围');
     await page.getByText(/scanner config version conflict/).waitFor();
@@ -266,7 +266,7 @@ try {
     await page.reload();
     await textbox('口令').fill(ready.passphrase); await textbox('TOTP 验证码').fill(await code);
     const response=page.waitForResponse(r=>r.url()===base+'/login');
-    await click('登录扫描控制台'); csrf=(await(await response).json()).csrf_token;
+    await click('登录'); csrf=(await(await response).json()).csrf_token;
     await tab('历史统计'); await click('查询历史');
     assert.equal((await api('history',{kind:'events'})).body.result.rows.length,before);
     await page.getByText(/最近 24 小时 · 服务端内存 · UTC/).waitFor();
@@ -286,7 +286,7 @@ try {
   await check('expired owner session clears projection and reload offers login', async () => {
     await context.clearCookies();
     await page.getByText('连接中断').first().waitFor(); await count(0);
-    await page.reload(); await page.getByRole('button',{name:'登录扫描控制台',exact:true}).waitFor();
+    await page.reload(); await page.getByRole('button',{name:'登录',exact:true}).waitFor();
   });
   await check('finalized demo UI remains isolated', async () => {
     await page.goto(base+'/?variant=A&demo=scanner#opportunities');

@@ -184,9 +184,16 @@ class ConsoleTests(unittest.TestCase):
 
     def test_http_authorization_csrf_and_no_market_or_receipt_injection(self):
         with tempfile.TemporaryDirectory() as directory:
-            console, _, _, _ = self.make_console(directory)
+            from verify_scanner_console import canonical_fixture
+            observations, _ = canonical_fixture()
+            console = c.ScannerConsole(c.CanonicalSource(observations), c.History())
             channel = control_plane.CommandServer(b"s"*32)
             app = control_plane_web.ControlPlaneApp(directory, channel, scanner_console=console)
+            for index, kind in enumerate(("okx", "hyperliquid")):
+                app.exchange_settings_store.save(dict(expected_version=str(index), type=kind, name=kind, environment="production"))
+            console.configure(dict(expected_version="0", scopes=[dict(venue=str(o.venue), product=o.kind,
+                environment=o.environment, include_assets=[], exclude_assets=[], quote_asset=None,
+                min_depth_atoms=None, max_depth_atoms=None, new_instruments=False) for o in observations]))
             token = app.sessions.issue(app.clock)
             import hashlib
             app.csrf_by_token_hash[hashlib.sha256(token.encode()).hexdigest()] = "scanner-csrf"

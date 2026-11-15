@@ -7,11 +7,11 @@ import {fileURLToPath,pathToFileURL} from 'node:url';
 const root=resolve(dirname(fileURLToPath(import.meta.url)),'..');
 const args=process.argv.slice(2);
 const option=(name,fallback)=>args.includes(name)?args[args.indexOf(name)+1]:fallback;
-const ui=resolve(option('--ui-root','../RingwinUi-scanner-integration'));
+const ui=resolve(option('--ui-root','../RingwinUi'));
 const output=resolve(option('--output','.scratch/build/scanner-integration-browser'));
 const {chromium}=await import(pathToFileURL(resolve(option('--playwright-module','../RingwinUi/.scratch/build/scanner-qa/node_modules/playwright-core/index.mjs'))).href);
 await mkdir(output,{recursive:true});
-let fixture,browser,page,diagnostics='';
+let fixture,browser,page,vite,diagnostics='';
 const results=[],errors=[],external=[];
 const check=async(name,fn)=>{await fn();results.push(name);console.log('passed: '+name);};
 const click=name=>page.getByRole('button',{name,exact:true}).click();
@@ -25,7 +25,18 @@ try {
   fixture.on('error',reject);fixture.on('exit',code=>{clearTimeout(timeout);reject(new Error('fixture exited '+code+' '+diagnostics));});
   fixture.stdout.on('data',data=>{buffer+=data;if(buffer.includes('\n')){clearTimeout(timeout);resolve(JSON.parse(buffer.split('\n')[0]));}});
  });
- const base='http://127.0.0.1:'+ready.port;
+ let base='http://127.0.0.1:'+ready.port;
+ if(args.includes('--dev')) {
+  vite=spawn(process.execPath,[join(ui,'node_modules/vite/bin/vite.js'),'--port','5187'],{
+   cwd:ui,env:{...process.env,RINGWIN_CONTROL_PROXY_URL:base,VITE_RINGWIN_LIVE_API:'1'},stdio:['ignore','pipe','pipe']});
+  vite.stderr.on('data',data=>{diagnostics+=data;});
+  await new Promise((resolve,reject)=>{
+   const timeout=setTimeout(()=>reject(new Error('Vite startup timeout '+diagnostics)),30000);
+   vite.once('exit',code=>{clearTimeout(timeout);reject(new Error('Vite exited '+code+' '+diagnostics));});
+   vite.stdout.on('data',data=>{if(String(data).includes('5187')){clearTimeout(timeout);resolve();}});
+  });
+  base='http://127.0.0.1:5187';
+ }
  browser=await chromium.launch({headless:true,executablePath:option('--browser','C:/Users/X/AppData/Local/ms-playwright/chromium-1217/chrome-win64/chrome.exe')});
  const context=await browser.newContext({viewport:{width:1600,height:1100}});
  await context.route('**/*',route=>{if(!route.request().url().startsWith(base+'/')){external.push(route.request().url());return route.abort();}return route.continue();});
@@ -34,18 +45,42 @@ try {
   await page.goto(base+'/#opportunities');
   await page.getByRole('textbox',{name:'口令',exact:true}).fill(ready.passphrase);
   await page.getByRole('textbox',{name:'TOTP 验证码',exact:true}).fill(ready.totp);
-  await click('登录扫描控制台');
+  await click('登录');
   await page.getByText('已停止 · 配置 v0',{exact:true}).waitFor();
+ });
+ await check('save named exchange settings through UI and recover on reopening',async()=>{
+  await tab('扫描范围');
+  assert.equal(await page.getByRole('checkbox',{name:'我的现货',exact:true}).count(),0);
+  await click('Settings');
+  await click('交易所');
+  assert(await page.getByRole('button',{name:'保存交易所',exact:true}).isDisabled());
+  await page.getByRole('textbox',{name:'交易所名称',exact:true}).fill('  我的现货  ');
+  await click('保存交易所');
+  await page.getByRole('table',{name:'已保存交易所'}).getByText('我的现货',{exact:true}).waitFor();
+  await choose('交易所类型','Hyperliquid');
+  await page.getByRole('textbox',{name:'交易所名称',exact:true}).fill('我的永续');
+  await click('保存交易所');
+  await page.getByRole('table',{name:'已保存交易所'}).getByText('我的永续',{exact:true}).waitFor();
+  await page.getByRole('textbox',{name:'交易所名称',exact:true}).fill('重复来源');
+  await click('保存交易所');
+  await page.getByText(/duplicate exchange source/).waitFor();
+  assert.equal(await page.getByRole('table',{name:'已保存交易所'}).getByText('重复来源',{exact:true}).count(),0);
+  await page.keyboard.press('Escape');
+  await page.getByRole('checkbox',{name:'我的现货',exact:true}).waitFor();
+  await page.getByRole('checkbox',{name:'我的永续',exact:true}).waitFor();
+  await click('Settings');
+  await page.getByRole('table',{name:'已保存交易所'}).getByText('我的现货',{exact:true}).waitFor();
+  await page.keyboard.press('Escape');
  });
  await check('configure OKX spot and Hyperliquid perpetual through UI',async()=>{
   await tab('扫描范围');
   await page.getByText(/请求 production → 来源 production/).first().waitFor();
-  await page.getByRole('checkbox',{name:'Venue 1',exact:true}).check();
+  await page.getByRole('checkbox',{name:'我的现货',exact:true}).check();
   await page.getByRole('checkbox',{name:'现货',exact:true}).check();
   await choose('深度报价资产','USDC');await click('添加到草稿');
-  await page.getByRole('checkbox',{name:'Venue 1',exact:true}).uncheck();
+  await page.getByRole('checkbox',{name:'我的现货',exact:true}).uncheck();
   await page.getByRole('checkbox',{name:'现货',exact:true}).uncheck();
-  await page.getByRole('checkbox',{name:'Venue 21',exact:true}).check();
+  await page.getByRole('checkbox',{name:'我的永续',exact:true}).check();
   await page.getByRole('checkbox',{name:'永续',exact:true}).check();
   await click('添加到草稿');await click('应用扫描范围');await tab('当前机会');
  });
@@ -72,8 +107,17 @@ try {
   await page.reload();
   await page.getByRole('textbox',{name:'口令',exact:true}).fill(ready.passphrase);
   await page.getByRole('textbox',{name:'TOTP 验证码',exact:true}).fill(ready.totp_next);
-  await click('登录扫描控制台');
+  await click('登录');
   await page.getByRole('heading',{name:'当前跨所机会 · 3',exact:true}).waitFor();
+  await click('Settings');
+  await click('交易所');
+  await page.getByRole('table',{name:'已保存交易所'}).getByText('我的现货',{exact:true}).waitFor();
+  await page.getByRole('table',{name:'已保存交易所'}).getByText('我的永续',{exact:true}).waitFor();
+  await page.keyboard.press('Escape');
+  await tab('扫描范围');
+  await page.getByRole('checkbox',{name:'我的现货',exact:true}).waitFor();
+  await page.getByRole('table',{name:'实际生效范围'}).getByText('我的永续',{exact:true}).waitFor();
+  await tab('当前机会');
   await page.setViewportSize({width:390,height:844});
   await page.getByRole('button',{name:'暂停扫描',exact:true}).scrollIntoViewIfNeeded();
   await page.screenshot({path:join(output,'narrow.png'),fullPage:true});
@@ -92,5 +136,6 @@ try {
  await writeFile(join(output,'report.json'),JSON.stringify({status:'failed',results,error:String(error),diagnostics,errors,external},null,2));throw error;
 } finally {
  await browser?.close();
+ if(vite&&vite.exitCode===null) {vite.kill();await new Promise(resolve=>vite.once('exit',resolve));}
  if(fixture&&fixture.exitCode===null){fixture.stdin.write('quit\n');await new Promise(resolve=>{const timeout=setTimeout(()=>{fixture.kill();resolve();},15000);fixture.once('exit',()=>{clearTimeout(timeout);resolve();});});}
 }

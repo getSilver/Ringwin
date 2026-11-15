@@ -35,6 +35,8 @@ def main():
         server.server_close()
         if app.scanner_runtime:
             app.scanner_runtime.close()
+        elif app.scanner_console:
+            app.scanner_console.close()
         app.command_server.close()
 
 
