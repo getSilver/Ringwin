@@ -116,16 +116,22 @@ pub fn main(init: std.process.Init) !void {
     store.* = .{ .dir = undefined };
     if (builtin.os.tag == .windows) try store.initWindowsVerification(init.io, raw_path) else try store.initLinux(init.io, raw_path);
     defer store.close(init.io);
-    var raw: Raw = .{ .allocator = init.gpa, .configuration = cfg, .sink = .{ .durable_sink = try raw_ingress.DurableSink.init(store.interface(), init.io, .{ .domain = .raw_ingress, .id = cfg.session }), .budget = cfg.raw_budget_bytes, .max_bytes = if (cfg.discovery) 4 * 1024 * 1024 else 120 * 1024 } };
+    var raw: Raw = .{ .allocator = init.gpa, .configuration = cfg, .sink = .{ .durable_sink = try raw_ingress.DurableSink.init(store.interface(), init.io, .{ .domain = .raw_ingress, .id = cfg.session }), .budget = cfg.raw_budget_bytes, .max_bytes = if (cfg.discovery) 4 * 1024 * 1024 else if (cfg.venue == 21) hl.max_frame_bytes else 120 * 1024 } };
     var ofeed = okx.OkxMarketFeed.init(.{ .ptr = &raw, .append_fn = Raw.ok });
     if (cfg.venue == 1 and cfg.okx_binding == null and @intFromEnum(cfg.okx_instrument) > 2) return error.InvalidConfiguration;
     const okx_instrument = if (cfg.okx_binding) |b| try ofeed.bind(b) else cfg.okx_instrument;
     if (cfg.venue == 1 and ofeed.instrumentIdentity(okx_instrument) != cfg.instrument) return error.InstrumentIdentityMismatch;
     ofeed.decoder.rest_book_instrument = okx_instrument;
     var hfeed: hl.HyperliquidMarketFeed = undefined;
-    if (cfg.venue == 21) hfeed = hl.HyperliquidMarketFeed.init(cfg.binding orelse return error.MissingBinding, .{ .ptr = &raw, .append_fn = Raw.hyper }, 0);
+    if (cfg.venue == 21 and !cfg.discovery) {
+        const binding = cfg.binding orelse return error.MissingBinding;
+        if (binding.instrument != cfg.instrument or binding.rules_version != cfg.rules_version or
+            (try (try c.Decimal.parse(cfg.tick)).exactAtoms(binding.price_scale)) != binding.tick_atoms or
+            (try (try c.Decimal.parse(cfg.lot)).exactAtoms(binding.quantity_scale)) != binding.lot_atoms) return error.InstrumentRulesMismatch;
+        hfeed = hl.HyperliquidMarketFeed.init(binding, .{ .ptr = &raw, .append_fn = Raw.hyper }, 0);
+    }
     const adapter = if (cfg.venue == 1) ofeed.adapter() else hfeed.adapter();
-    try adapter.start(.{ .venue = cfg.venue, .environment = cfg.environment, .subscription_set = cfg.session, .config_version = cfg.rules_version, .session = cfg.session, .output_capacity = 32 });
+    if (!cfg.discovery) try adapter.start(.{ .venue = cfg.venue, .environment = cfg.environment, .subscription_set = cfg.session, .config_version = cfg.rules_version, .session = cfg.session, .output_capacity = 32 });
     var state: projection.Projection = .{};
     var sequence: u64 = 0;
     var last_time: u64 = 0;
@@ -145,7 +151,7 @@ pub fn main(init: std.process.Init) !void {
         sequence = r.sequence;
         last_time = r.monotonic_ns;
         if (r.operation == .discover) {
-            if (!cfg.discovery or cfg.venue != 1 or r.payload.len > 4 * 1024 * 1024) return error.DiscoveryCapacity;
+            if (!cfg.discovery or r.payload.len > 4 * 1024 * 1024) return error.DiscoveryCapacity;
             var digest: [32]u8 = undefined;
             std.crypto.hash.sha2.Sha256.hash(r.payload, &digest, .{});
             _ = try Raw.ok(&raw, .{
@@ -160,6 +166,31 @@ pub fn main(init: std.process.Init) !void {
             defer document.deinit();
             const root = document.value;
             if (root != .object) return error.InvalidCatalogue;
+            if (cfg.venue == 21) {
+                if (r.payload.len > hl.max_frame_bytes) return error.DiscoveryCapacity;
+                if (cfg.discovery_product != .linear) return error.CatalogueProductMismatch;
+                const universe = root.object.get("universe") orelse return error.InvalidCatalogue;
+                if (universe != .array or universe.array.items.len > 4096) return error.DiscoveryCapacity;
+                const Item = struct { item: ?hl.PerpetualSpecification, symbol: ?[]const u8, failure: ?[]const u8 };
+                var items: std.ArrayList(Item) = .empty;
+                defer items.deinit(init.gpa);
+                for (universe.array.items, 0..) |value, index| {
+                    const item = hl.perpetualSpecification(init.gpa, root, @intCast(index), 0) catch |err| {
+                        const symbol = if (value == .object) value.object.get("name") else null;
+                        try items.append(init.gpa, .{ .item = null, .symbol = if (symbol != null and symbol.? == .string) symbol.?.string else null, .failure = @errorName(err) });
+                        continue;
+                    };
+                    if (item.coin.len > 32) {
+                        try items.append(init.gpa, .{ .item = null, .symbol = item.coin, .failure = "UnsupportedAssetCode" });
+                        continue;
+                    }
+                    try items.append(init.gpa, .{ .item = item, .symbol = item.coin, .failure = null });
+                }
+                try std.json.Stringify.value(.{ .schema = 1, .session = cfg.session, .sequence = sequence, .items = items.items, .raw_sequence = raw.sink.durable_sink.next_sequence - 1, .raw_sha256 = std.fmt.bytesToHex(digest, .lower) }, .{}, &output.interface);
+                try output.interface.writeByte('\n');
+                try output.interface.flush();
+                continue;
+            }
             const code = root.object.get("code") orelse return error.InvalidCatalogue;
             if (code != .string or !std.mem.eql(u8, code.string, "0")) return error.InvalidCatalogue;
             const data = root.object.get("data") orelse return error.InvalidCatalogue;
@@ -191,7 +222,7 @@ pub fn main(init: std.process.Init) !void {
             try output.interface.flush();
             continue;
         }
-        if (cfg.discovery or r.payload.len > 120 * 1024) return error.RequestCapacity;
+        if (cfg.discovery or r.payload.len > (if (cfg.venue == 21 and r.operation == .metadata) hl.max_frame_bytes else @as(usize, 120 * 1024))) return error.RequestCapacity;
         const times: hl.Times = .{ .receive_time_utc_ns = r.utc_ns, .wall_time_utc_ns = r.utc_ns, .monotonic_time_ns = r.monotonic_ns };
         var failure: ?[]const u8 = null;
         if (cfg.venue == 1) {

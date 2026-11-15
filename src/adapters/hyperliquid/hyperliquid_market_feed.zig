@@ -45,6 +45,44 @@ pub const RawSink = struct {
     append_fn: *const fn (*anyopaque, RawRecord, []const u8) RawError!u64,
 };
 pub const Evidence = struct { sequence: u64, digest: [32]u8 };
+pub const PerpetualSpecification = struct {
+    coin: []const u8,
+    universe_index: u32,
+    size_decimals: u8,
+    metadata_digest: [32]u8,
+};
+
+/// Standard perp metadata only; a coin label never establishes cross-venue asset equivalence.
+pub fn perpetualSpecification(allocator: std.mem.Allocator, value: std.json.Value, index: u32, collateral: u32) !PerpetualSpecification {
+    const root = try object(value);
+    const universe = try array(try field(root, "universe"));
+    if (index >= universe.items.len) return error.UnsupportedInstrument;
+    const row = try object(universe.items[index]);
+    const coin = try string(try field(row, "name"));
+    if (coin.len == 0 or coin.len > 64) return error.UnsupportedInstrument;
+    for (coin) |byte| if (byte < 33 or byte > 126 or byte == '"' or byte == '\\' or byte == ':') return error.UnsupportedInstrument;
+    if (try uint(try field(root, "collateralToken")) != collateral) return error.UnsupportedCollateral;
+    if (try uint(try field(row, "maxLeverage")) == 0) return error.UnsupportedInstrument;
+    if (row.get("isDelisted")) |delisted| if (delisted != .bool or delisted.bool) return error.UnsupportedInstrument;
+    const size = try uint(try field(row, "szDecimals"));
+    if (size > 6) return error.UnsupportedDecimalUnits;
+    var hash = std.crypto.hash.sha2.Sha256.init(.{});
+    try hashValue(allocator, &hash, .{ .object = row });
+    const table_id = try uint(try field(row, "marginTableId"));
+    var found = false;
+    for ((try array(try field(root, "marginTables"))).items) |item| {
+        const pair = try array(item);
+        if (pair.items.len != 2) return error.InvalidFrame;
+        if (try uint(pair.items[0]) == table_id) {
+            if (found) return error.DuplicateMarginTable;
+            _ = try object(pair.items[1]);
+            try hashValue(allocator, &hash, item);
+            found = true;
+        }
+    }
+    if (!found) return error.MissingMarginTable;
+    return .{ .coin = coin, .universe_index = index, .size_decimals = @intCast(size), .metadata_digest = hash.finalResult() };
+}
 const TradeKey = struct { time: u64, tid: u64, trade: c.MarketTrade };
 
 pub const HyperliquidMarketFeed = struct {
@@ -234,23 +272,9 @@ pub const HyperliquidMarketFeed = struct {
         if (!std.mem.eql(u8, try string(try field(row, "name")), self.binding.coin)) return error.UnsupportedInstrument;
         var size: u64 = undefined;
         if (self.binding.product == .isolated_linear) {
-            if (try uint(try field(root, "collateralToken")) != self.binding.quote_token) return error.UnsupportedInstrument;
-            if (try uint(try field(row, "maxLeverage")) == 0) return error.UnsupportedInstrument;
-            const table_id = try uint(try field(row, "marginTableId"));
-            var table_found = false;
-            for ((try array(try field(root, "marginTables"))).items) |item| {
-                const pair = try array(item);
-                if (pair.items.len != 2) return error.InvalidFrame;
-                if (try uint(pair.items[0]) == table_id) {
-                    if (table_found) return error.DuplicateMarginTable;
-                    _ = try object(pair.items[1]);
-                    try hashValue(allocator, &rules_hash, item);
-                    table_found = true;
-                }
-            }
-            if (!table_found) return error.MissingMarginTable;
-            if (row.get("isDelisted")) |delisted| if (delisted != .bool or delisted.bool) return error.UnsupportedInstrument;
-            size = try uint(try field(row, "szDecimals"));
+            const spec = try perpetualSpecification(allocator, value, self.binding.universe_index, self.binding.quote_token);
+            size = spec.size_decimals;
+            if (!std.mem.eql(u8, &spec.metadata_digest, &self.binding.expected_metadata_digest)) return error.InstrumentRulesChanged;
         } else {
             const pair = try array(try field(row, "tokens"));
             if (pair.items.len != 2 or try uint(pair.items[0]) != self.binding.base_token or try uint(pair.items[1]) != self.binding.quote_token)
@@ -280,7 +304,7 @@ pub const HyperliquidMarketFeed = struct {
             return error.InstrumentRulesChanged;
         }
         const digest = rules_hash.finalResult();
-        if (!std.mem.eql(u8, &self.binding.expected_metadata_digest, &digest)) return error.InstrumentRulesChanged;
+        if (self.binding.product != .isolated_linear and !std.mem.eql(u8, &self.binding.expected_metadata_digest, &digest)) return error.InstrumentRulesChanged;
         try self.append(output, times, evidence, null, .{ .instrument_definition_observed = .{ .instrument = self.binding.instrument, .rules_version = self.binding.rules_version } });
         self.observed = true;
     }

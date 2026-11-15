@@ -10,23 +10,25 @@ import control_plane
 import control_plane_web
 import owner_session
 from opportunity_scanner.scanner_runtime import ScannerRuntime
-from test_scanner_integration import ProtocolTransport, DynamicOkxTransport, configuration
+from test_scanner_integration import ProtocolTransport, DynamicOkxTransport, DynamicHyperliquidTransport, configuration
 
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ui",required=True)
     parser.add_argument("--dynamic-okx", action="store_true")
+    parser.add_argument("--dynamic-hyperliquid", action="store_true")
     args=parser.parse_args()
+    dynamic = args.dynamic_okx or args.dynamic_hyperliquid
     with tempfile.TemporaryDirectory(prefix="ringwin-scanner-internal-") as directory:
         now=[2_000_000_000,1_800_000_000_000_000_000]
-        transport=DynamicOkxTransport(now) if args.dynamic_okx else ProtocolTransport(now)
-        runtime=ScannerRuntime(directory,dict(schema=1, assets=[], bindings=[]) if args.dynamic_okx else configuration(),transport=transport,
+        transport=DynamicHyperliquidTransport(now) if args.dynamic_hyperliquid else DynamicOkxTransport(now) if args.dynamic_okx else ProtocolTransport(now)
+        runtime=ScannerRuntime(directory,dict(schema=1, assets=[], bindings=[]) if dynamic else configuration(),transport=transport,
             clock=lambda:now[0],utc_clock=lambda:now[1],automatic=False)
         channel=control_plane.CommandServer(b"f"*32)
         owner_time=int(time.time())
         app=control_plane_web.ControlPlaneApp(directory,channel,scanner_console=runtime.console,ui_path=args.ui,clock=lambda:owner_time)
-        if args.dynamic_okx:
+        if dynamic:
             app.scanner_runtime = runtime
         passphrase="synthetic-internal-integration-only"
         app.setup(passphrase)

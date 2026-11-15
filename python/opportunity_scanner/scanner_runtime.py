@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parents[2]
 MAX_FRAME = 120 * 1024
 MAX_CATALOGUE = 8192
 MAX_DISCOVERY_BYTES = 4 * 1024 * 1024
+MAX_HL_METADATA_BYTES = 1024 * 1024
 ROUTES = {
     (1, "production"): ("https://www.okx.com", "production"),
     (1, "demo"): ("https://www.okx.com", "production"),
@@ -49,6 +50,10 @@ class PublicTransport:
 
     def catalogue(self, setting, product):
         base, _ = ROUTES[int(setting["venue"]), setting["environment"]]
+        if (setting["type"], setting["venue"], product) == ("hyperliquid", "21", "linear"):
+            return self.request(base + "/info", {"type": "meta"}, max_bytes=MAX_HL_METADATA_BYTES)
+        if setting["type"] != "okx" or setting["venue"] != "1" or product not in ("spot", "linear"):
+            raise ValueError("unsupported discovery source")
         kind = "SPOT" if product == "spot" else "SWAP"
         return self.request(base + "/api/v5/public/instruments?instType=" + kind, max_bytes=MAX_DISCOVERY_BYTES)
 
@@ -57,13 +62,17 @@ class PublicTransport:
         if binding["venue"] == 1:
             kind = "SPOT" if binding["product"] == "spot" else "SWAP"
             return self.request(base + "/api/v5/public/instruments?instType=" + kind + "&instId=" + binding["symbol"])
-        return self.request(base + "/info", {"type": "meta"})
+        if binding["venue"] == 21 and binding["product"] == "linear":
+            return self.request(base + "/info", {"type": "meta"}, max_bytes=MAX_HL_METADATA_BYTES)
+        raise ValueError("unsupported metadata source")
 
     def book(self, binding):
         base, _ = ROUTES[binding["venue"], binding["environment"]]
         if binding["venue"] == 1:
             return self.request(base + "/api/v5/market/books?instId=" + binding["symbol"] + "&sz=5")
-        return self.request(base + "/info", {"type": "l2Book", "coin": binding["symbol"]})
+        if binding["venue"] == 21 and binding["product"] == "linear":
+            return self.request(base + "/info", {"type": "l2Book", "coin": binding["symbol"]})
+        raise ValueError("unsupported book source")
 
 
 class ScannerRuntime:
@@ -110,9 +119,9 @@ class ScannerRuntime:
             if base not in assets or quote not in assets:
                 raise ValueError("missing trusted asset definition")
             if (venue == 1 and assets[quote]["code"] != row["symbol"].split("-")[1]
-                    or venue == 21 and assets[quote]["code"] != "USDC"):
+                    or venue == 21 and assets[quote]["code"] != ("USDT" if "hl_discovered" in row else "USDC")):
                 raise ValueError("settlement/quote asset mismatch")
-            if assets[base]["code"] != row["symbol"].split("-")[0]:
+            if assets[base]["code"] != (row["symbol"].split("-")[0] if venue == 1 else row["symbol"]):
                 raise ValueError("base asset identity mismatch")
             if venue == 1 and row["product"] == "spot" and Fraction(row["lot_base"]) != Fraction(row["lot_wire"]):
                 raise ValueError("OKX spot quantity units mismatch")
@@ -126,6 +135,10 @@ class ScannerRuntime:
                         or tick != Fraction(b["tick_atoms"], 10**b["price_scale"])
                         or lot != Fraction(b["lot_atoms"], 10**b["quantity_scale"])):
                     raise ValueError("Hyperliquid binding units mismatch")
+                if row.get("hl_discovered") and b.get("quote_token", 0) != 0:
+                    raise ValueError("Hyperliquid collateral binding mismatch")
+                if row.get("hl_discovered") and (int(row["settlement_asset"]) not in assets or assets[int(row["settlement_asset"])]["code"] != "USDC"):
+                    raise ValueError("Hyperliquid settlement asset mismatch")
             entry = self._entry(row, assets)
             if entry.identity in self.bindings:
                 raise ValueError("duplicate scanner binding")
@@ -156,35 +169,39 @@ class ScannerRuntime:
 
     def request_discovery(self, setting):
         key = setting["venue"] + ":" + setting["environment"]
-        if setting["type"] != "okx":
-            return
+        if (setting["type"], setting["venue"]) not in (("okx", "1"), ("hyperliquid", "21")):
+            raise ValueError("unsupported discovery source")
         with self.lock:
             if key in self.discovery_status and self.discovery_status[key]["state"] != "failed":
                 return
             self.discovery_status[key] = dict(state="loading", error="")
-            thread = threading.Thread(target=self.discover, args=(dict(setting),), daemon=True, name="okx-catalogue")
+            thread = threading.Thread(target=self.discover, args=(dict(setting),), daemon=True, name=setting["type"]+"-catalogue")
             self.discovery_threads.append(thread)
             thread.start()
 
     def discover(self, setting):
         """Explicit settings action; discovery never acquires a market subscription."""
         key = setting["venue"] + ":" + setting["environment"]
-        if setting["type"] != "okx" or setting["venue"] != "1":
-            raise ValueError("OKX discovery setting required")
+        if (setting["type"], setting["venue"]) not in (("okx", "1"), ("hyperliquid", "21")) or (int(setting["venue"]), setting["environment"]) not in ROUTES:
+            raise ValueError("unsupported discovery setting")
         with self.discovery_lock:
             with self.lock:
                 self.discovery_status[key] = dict(state="loading", error="")
             try:
                 rows, rejected, evidence = [], [], []
-                assets_by_code = {a["code"]: a for a in self.source.assets}
-                for product in ("spot", "linear"):
+                assets_by_id = {a["identity"]: a for a in self.source.assets}
+                hl_assets = {r[field] for r in self.bindings.values() if r.get("hl_discovered")
+                    for field in ("base_asset", "quote_asset", "settlement_asset")}
+                okx_assets = {a["code"]: a for a in self.source.assets if a["identity"] not in hl_assets}
+                for product in (("spot", "linear") if setting["type"] == "okx" else ("linear",)):
                     if self.closing.is_set():
                         return
-                    row = dict(venue=1, product=product, environment=setting["environment"], symbol="BTC-USDT", instrument=str(OKX["BTC-USDT"][0]),
+                    row = dict(venue=int(setting["venue"]), product=product, environment=setting["environment"], symbol="BTC-USDT" if setting["type"] == "okx" else "",
+                        instrument=str(OKX["BTC-USDT"][0] if setting["type"] == "okx" else self._stable_id("scanner-catalogue-v1", key)),
                         rules_version=1, tick="1", lot_wire="1")
                     worker = self._open(None, row=row, discovery=True)
                     capture = dict(raw_path=worker[3], requested_environment=setting["environment"],
-                        actual_environment=ROUTES[1, setting["environment"]][1], product=product)
+                        actual_environment=ROUTES[int(setting["venue"]), setting["environment"]][1], product=product)
                     evidence.append(capture)
                     try:
                         result = self._input(worker, "discover", self.transport.catalogue(setting, product))
@@ -197,12 +214,16 @@ class ScannerRuntime:
                             rejected.append(dict(symbol=result_row["symbol"], reason=result_row["failure"]))
                             continue
                         item = result_row["item"]
+                        if setting["type"] == "hyperliquid":
+                            rows.append(self._hyperliquid_row(setting, item, assets_by_id))
+                            continue
                         if item["product"] != product:
                             raise ValueError("OKX catalogue product mismatch")
                         for code in (item["base"], item["quote"]):
-                            if code not in assets_by_code:
+                            if code not in okx_assets:
                                 # Observation-only fixed precision, independent of core AssetDefinition.
-                                assets_by_code[code] = dict(identity=str(self._stable_id("scanner-asset-v1", code)), code=code, atomic_scale=18)
+                                identity = str(self._stable_id("scanner-asset-v1", code))
+                                assets_by_id[identity] = okx_assets[code] = dict(identity=identity, code=code, atomic_scale=18)
                         instrument = OKX[item["symbol"]][0] if item["symbol"] in OKX else self._stable_id("okx-instrument-v1", item["symbol"])
                         version = self._stable_id("okx-rules-v1", json.dumps(item, sort_keys=True, separators=(",", ":"))) & ((1<<53)-1) or 1
                         lot_base = Fraction(item["lot"]) * Fraction(item["contract_value"] or "1")
@@ -213,16 +234,16 @@ class ScannerRuntime:
                         observation_identity = previous["observation_identity"] if previous else str(self._stable_id("scanner-source-v1", key))
                         rows.append(dict(venue=1, environment=setting["environment"], symbol=item["symbol"], product=product,
                             instrument=str(instrument), observation_identity=observation_identity, rules_version=version,
-                            base_asset=assets_by_code[item["base"]]["identity"], quote_asset=assets_by_code[item["quote"]]["identity"],
+                            base_asset=okx_assets[item["base"]]["identity"], quote_asset=okx_assets[item["quote"]]["identity"],
                             tick=item["tick"], lot_wire=item["lot"], lot_base=str(lot_base), minimum_size=item["minimum_size"], contract_value=item["contract_value"], specification=item,
                             okx_binding=dict(symbol=item["symbol"], instrument=instrument, product=product, base=item["base"], quote=item["quote"])))
-                assets = list(assets_by_code.values())
+                assets = list(assets_by_id.values())
                 asset_definitions = {int(a["identity"]): a for a in assets}
                 entries = [self._entry(row, asset_definitions) for row in rows]
                 if len({e.identity for e in entries}) != len(entries):
-                    raise ValueError("duplicate OKX catalogue identity")
+                    raise ValueError("duplicate catalogue identity")
                 if not entries:
-                    raise ValueError("OKX catalogue has no usable instruments: " + str(rejected[:8]))
+                    raise ValueError("catalogue has no usable instruments: " + str(rejected[:8]))
                 with self.console.lock, self.source.lock, self.lock:
                     if self.closing.is_set():
                         return
@@ -234,13 +255,36 @@ class ScannerRuntime:
                     sources = {k:v for k,v in self.discovery_status.items() if v["state"] == "ready"}
                     sources[key] = state
                     atomic_json(self.directory/"scanner-discovery.json", dict(schema=1, assets=assets,
-                        bindings=[r for r in updated.values() if "okx_binding" in r], sources=sources), MAX_DISCOVERY_BYTES)
+                        bindings=[r for r in updated.values() if "okx_binding" in r or "hl_discovered" in r], sources=sources), MAX_DISCOVERY_BYTES)
                     self.source.register(entries)
                     self.bindings, self.source.assets = updated, assets
                     self.discovery_status[key] = state
             except (OSError, ValueError, KeyError, TypeError) as error:
                 with self.lock:
                     self.discovery_status[key] = dict(state="failed", error=str(error)[:2048], evidence=evidence, rejected=rejected)
+
+    def _hyperliquid_row(self, setting, item, assets):
+        key = "21:" + setting["environment"]
+        coin = item["coin"]
+        # Protocol coin identity is scoped to the standard perp namespace and environment.
+        def asset(role, code):
+            identity = str(self._stable_id("hyperliquid-observation-asset-v1", key+":"+role+":"+code))
+            assets[identity] = dict(identity=identity, code=code, atomic_scale=18)
+            return identity
+        base, quote, settlement = asset("perp", coin), asset("price-denomination", "USDT"), asset("collateral-0", "USDC")
+        instrument = self._stable_id("hyperliquid-standard-perp-v1", key+":"+coin)
+        version = self._stable_id("hyperliquid-rules-v1", json.dumps(item, sort_keys=True, separators=(",", ":"))) & ((1<<53)-1) or 1
+        size = item["size_decimals"]
+        tick = "0."+"0"*(5-size)+"1" if size < 6 else "1"
+        lot = "0."+"0"*(size-1)+"1" if size else "1"
+        binding = dict(instrument=instrument, coin=coin, product="isolated_linear", universe_index=item["universe_index"],
+            size_decimals=size, rules_version=version, expected_metadata_digest=item["metadata_digest"],
+            price_scale=6-size, tick_atoms=1, quantity_scale=size, lot_atoms=1)
+        return dict(venue=21, environment=setting["environment"], symbol=coin, product="linear", instrument=str(instrument),
+            observation_identity=str(self._stable_id("scanner-source-v1", key)), rules_version=version,
+            base_asset=base, quote_asset=quote, settlement_asset=settlement, tick=tick, lot_wire=lot, lot_base=lot,
+            specification=dict(item, product="linear", quote="USDT", settlement="USDC", collateral_token=0,
+                max_significant_digits=5, integer_price_exception=True), binding=binding, hl_discovered=True)
 
     @staticmethod
     def _stable_id(namespace, value):
@@ -295,18 +339,19 @@ class ScannerRuntime:
             else:
                 config["okx_instrument"] = OKX[row["symbol"]][1]
             config["contract_value"] = row.get("contract_value")
-        else:
+        elif row["venue"] == 21 and not discovery:
             config["binding"] = row["binding"]
         try:
             channel.request(config)
         except Exception:
             self._close_worker((process, channel, None, None))
             raise
-        return process, channel, dict(session=session, sequence=0, epoch=0, next_metadata_ns=0), str(path)
+        return process, channel, dict(session=session, sequence=0, epoch=0, next_metadata_ns=0, venue=row["venue"]), str(path)
 
     def _input(self, worker, operation, payload):
         _, channel, state, _ = worker
-        if len(payload.encode()) > (MAX_DISCOVERY_BYTES if operation == "discover" else MAX_FRAME):
+        limit = MAX_DISCOVERY_BYTES if operation == "discover" else MAX_HL_METADATA_BYTES if operation == "metadata" and state["venue"] == 21 else MAX_FRAME
+        if len(payload.encode()) > limit:
             raise ValueError("public frame capacity")
         state["sequence"] += 1
         request = dict(schema=1, session=state["session"], sequence=state["sequence"], epoch=state["epoch"], operation=operation, payload=payload,

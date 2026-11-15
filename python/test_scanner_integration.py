@@ -92,6 +92,24 @@ class DynamicOkxTransport(PublicTransport):
             bids=[["3000.00", "2", "0", "1"]], asks=[["3000.01", "3", "0", "1"]])]))
 
 
+class DynamicHyperliquidTransport(PublicTransport):
+    input_kind = "synthetic_protocol_fixture"
+
+    def __init__(self, now):
+        self.now, self.requests = now, []
+        self.metadata_document = dict(collateralToken=0, universe=[dict(name="ETH", szDecimals=4, maxLeverage=25, marginTableId=53)],
+            marginTables=[[53, dict(marginTiers=[dict(lowerBound="0", maxLeverage=25)])]])
+
+    def request(self, url, body=None, **kwargs):
+        self.requests.append((url, body))
+        if body == {"type": "meta"}:
+            return json.dumps(self.metadata_document)
+        if body == {"type": "l2Book", "coin": "ETH"}:
+            return json.dumps(dict(coin="ETH", time=self.now[1]//1_000_000,
+                levels=[[dict(px="3000", sz="2.0001", n=1)], [dict(px="3000.1", sz="3", n=1)]]))
+        raise ValueError("unexpected public request")
+
+
 def scope(venue, environment="production"):
     return dict(venue=str(venue), product="spot" if venue == 1 else "linear", environment=environment,
         include_assets=[], exclude_assets=[], quote_asset="3", min_depth_atoms=None,max_depth_atoms=None,new_instruments=False)
@@ -181,6 +199,100 @@ class DynamicCatalogueTests(unittest.TestCase):
         self.assertEqual(restored.status()["active_subscriptions"], 0)
 
 
+class HyperliquidCatalogueTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.now = [2_000_000_000, 1_800_000_000_000_000_000]
+        self.transport = DynamicHyperliquidTransport(self.now)
+        self.runtime = ScannerRuntime(self.temp.name, dict(schema=1, assets=[], bindings=[]), transport=self.transport,
+            clock=lambda:self.now[0], utc_clock=lambda:self.now[1], automatic=False)
+        self.addCleanup(self.runtime.close)
+        self.setting = dict(identity="b"*32, venue="21", type="hyperliquid", name="永续", environment="production")
+
+    def test_rejected_metadata_is_visible_and_never_registers_or_subscribes(self):
+        original = json.loads(json.dumps(self.transport.metadata_document))
+        for mode, reason in (("collateral", "UnsupportedCollateral"), ("precision", "UnsupportedDecimalUnits"),
+                ("delisted", "UnsupportedInstrument"), ("margin", "MissingMarginTable"), ("name", "UnsupportedInstrument")):
+            with self.subTest(mode=mode):
+                document = json.loads(json.dumps(original))
+                if mode == "collateral": document["collateralToken"] = 1
+                if mode == "precision": document["universe"][0]["szDecimals"] = 7
+                if mode == "delisted": document["universe"][0]["isDelisted"] = True
+                if mode == "margin": document["marginTables"] = []
+                if mode == "name": document["universe"][0]["name"] = "xyz:ETH"
+                self.transport.metadata_document = document
+                self.runtime.discover(self.setting)
+                state = self.runtime.status()["discovery"]["21:production"]
+                self.assertEqual(state["state"], "failed", state)
+                self.assertEqual(state["rejected"][0]["reason"], reason)
+                self.assertEqual(state["evidence"][0]["captures"], 1)
+                self.assertEqual(self.runtime.source.registered, {})
+                self.assertEqual(self.runtime.status()["active_subscriptions"], 0)
+
+    def test_duplicate_and_capacity_fail_without_replacing_persisted_directory(self):
+        self.runtime.discover(self.setting)
+        cache = Path(self.temp.name, "scanner-discovery.json").read_bytes()
+        identities = set(self.runtime.source.registered)
+        for count in (2, 4097):
+            self.transport.metadata_document["universe"] = [self.transport.metadata_document["universe"][0]] * count
+            self.runtime.discover(self.setting)
+            self.assertEqual(self.runtime.status()["discovery"]["21:production"]["state"], "failed")
+            self.assertEqual(set(self.runtime.source.registered), identities)
+            self.assertEqual(Path(self.temp.name, "scanner-discovery.json").read_bytes(), cache)
+
+    def test_complete_large_metadata_and_reordered_universe_preserve_identity(self):
+        self.transport.metadata_document["padding"] = "x" * (130*1024)
+        self.transport.metadata_document["universe"].append(dict(name="SOL", szDecimals=2, maxLeverage=25, marginTableId=53))
+        self.runtime.discover(self.setting)
+        identities = {row["symbol"]: identity for identity, row in self.runtime.bindings.items()}
+        self.assertEqual(len(identities), 2, self.runtime.status())
+        self.transport.metadata_document["universe"].reverse()
+        self.runtime.discover(self.setting)
+        self.assertEqual({row["symbol"]: identity for identity, row in self.runtime.bindings.items()}, identities)
+        self.runtime.acquire(identities["ETH"])
+        self.runtime.step()
+        self.assertEqual(self.runtime.status()["failures"], {})
+        self.assertTrue(self.runtime.status()["observations"][0]["continuous"])
+        self.assertEqual(next(iter(self.runtime.audit().values()))["captures"], 3)
+
+    def test_environment_and_same_named_assets_are_isolated(self):
+        self.runtime.discover(self.setting)
+        self.runtime.discover(dict(self.setting, environment="testnet"))
+        rows = list(self.runtime.bindings.values())
+        self.assertEqual(len(rows), 2)
+        self.assertNotEqual(rows[0]["instrument"], rows[1]["instrument"])
+        self.assertNotEqual(rows[0]["base_asset"], rows[1]["base_asset"])
+        self.assertNotEqual(rows[0]["settlement_asset"], rows[1]["settlement_asset"])
+        self.assertEqual({url for url, _ in self.transport.requests},
+            {"https://api.hyperliquid.xyz/info", "https://api.hyperliquid-testnet.xyz/info"})
+        with self.assertRaises(ValueError): self.runtime.discover(dict(self.setting, type="okx"))
+        with self.assertRaises(ValueError): self.runtime.discover(dict(self.setting, environment="demo"))
+
+    def test_changed_rules_wrong_binding_and_invalid_book_never_publish_healthy_input(self):
+        self.runtime.discover(self.setting)
+        identity, = self.runtime.bindings
+        row = self.runtime.bindings[identity]
+        for mode in ("rules", "binding", "unit", "book"):
+            with self.subTest(mode=mode):
+                original = json.loads(json.dumps(row))
+                if mode == "rules": self.transport.metadata_document["universe"][0]["maxLeverage"] = 24
+                if mode == "binding": row["binding"]["instrument"] += 1
+                if mode == "unit": row["tick"] = "0.1"
+                book = self.transport.book
+                if mode == "book":
+                    self.transport.book = lambda binding: json.dumps(dict(coin="BTC", time=self.now[1]//1_000_000, levels=[[], []]))
+                self.runtime.acquire(identity)
+                self.runtime.step()
+                status = self.runtime.status()
+                self.assertTrue(status["failures"], status)
+                self.assertFalse(any(o["continuous"] for o in status["observations"]))
+                self.runtime.release(identity)
+                row.clear(); row.update(original)
+                self.transport.metadata_document["universe"][0]["maxLeverage"] = 25
+                self.transport.book = book
+
+
 class IntegrationTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -241,6 +353,49 @@ class IntegrationTests(unittest.TestCase):
                 type=kind, name=name, environment=environment), self.headers)
             self.assertEqual(status, 200, body)
         return body["result"]
+
+    def test_dynamic_hyperliquid_settings_scope_native_scan_and_restart(self):
+        self.runtime.close()
+        transport = DynamicHyperliquidTransport(self.now)
+        self.runtime = ScannerRuntime(self.temp.name, dict(schema=1, assets=[], bindings=[]), transport=transport,
+            clock=lambda:self.now[0], utc_clock=lambda:self.now[1], automatic=False)
+        self.app.scanner_console = self.runtime.console
+        self.app.scanner_runtime = self.runtime
+        self.runtime.console.exchange_settings = self.app.exchange_settings_store
+        status, body = self.http("/api/exchange-settings", dict(expected_version="0", type="hyperliquid",
+            name="动态永续", environment="testnet"), self.headers)
+        self.assertEqual(status, 200, body)
+        for thread in self.runtime.discovery_threads:
+            thread.join(timeout=20)
+            self.assertFalse(thread.is_alive())
+        view = self.call("stop")
+        self.assertEqual(len(view["catalogue"]), 1, view["market"])
+        assets = {a["code"]: a["identity"] for a in view["assets"]}
+        self.assertEqual(set(assets), {"ETH", "USDT", "USDC"})
+        self.call("configure", dict(expected_version="0", scopes=[dict(scope(21, "testnet"),
+            quote_asset=assets["USDT"], include_assets=[assets["ETH"]])]))
+        self.call("start"); self.tick()
+        view = self.http("/api/scanner", headers=self.headers)[1]["result"]
+        observation, = view["market"]["observations"]
+        self.assertTrue(observation["continuous"], view["market"])
+        self.assertEqual(observation["ask_quote_atoms"], [str(30001*10**17), "1"])
+        entry, = self.runtime.source.registered.values()
+        self.assertEqual(entry.rules.base_atoms_per_lot, 10**14)
+        self.assertEqual(entry.rules.tick_quote_atoms_per_base_atom, Fraction(1, 100))
+        row, = self.runtime.bindings.values()
+        self.assertEqual(row["specification"]["settlement"], "USDC")
+        self.assertNotEqual(row["quote_asset"], row["settlement_asset"])
+        self.assertEqual(next(iter(self.runtime.audit().values()))["captures"], 3)
+        self.assertTrue(all(url == "https://api.hyperliquid-testnet.xyz/info" for url, _ in transport.requests))
+        self.assertEqual(transport.requests[-1][1], dict(type="l2Book", coin="ETH"))
+        identities = set(self.runtime.source.registered)
+        self.runtime.discover(body["result"]["exchanges"][0])
+        self.assertEqual(set(self.runtime.source.registered), identities)
+        self.runtime.close()
+        self.runtime = ScannerRuntime(self.temp.name, dict(schema=1, assets=[], bindings=[]), transport=transport, automatic=False)
+        self.assertEqual(set(self.runtime.source.registered), identities)
+        self.assertEqual(self.runtime.console.desired, "stopped")
+        self.assertEqual(self.runtime.status()["active_subscriptions"], 0)
 
     def test_dynamic_okx_discovery_and_scan_outside_original_allowlist(self):
         self.runtime.close()

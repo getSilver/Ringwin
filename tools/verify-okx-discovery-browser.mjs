@@ -7,8 +7,10 @@ import {fileURLToPath,pathToFileURL} from 'node:url';
 const root=resolve(dirname(fileURLToPath(import.meta.url)),'..');
 const args=process.argv.slice(2);
 const option=(name,fallback)=>args.includes(name)?args[args.indexOf(name)+1]:fallback;
+const hyperliquid=args.includes('--hyperliquid');
+const exchangeName=hyperliquid?'动态 Hyperliquid':'动态 OKX';
 const ui=resolve(option('--ui-root','../RingwinUi'));
-const output=resolve(option('--output','.scratch/build/okx-discovery-browser'));
+const output=resolve(option('--output',hyperliquid?'.scratch/build/hyperliquid-discovery-browser':'.scratch/build/okx-discovery-browser'));
 const {chromium}=await import(pathToFileURL(resolve(option('--playwright-module','../RingwinUi/.scratch/build/scanner-qa/node_modules/playwright-core/index.mjs'))).href);
 await mkdir(output,{recursive:true});
 let fixture,browser,page,vite,diagnostics='';
@@ -18,7 +20,7 @@ const click=name=>page.getByRole('button',{name,exact:true}).click();
 const tab=name=>page.getByRole('tab',{name,exact:true}).click();
 const choose=async(name,value)=>{await page.getByRole('combobox',{name,exact:true}).click();await page.getByRole('option',{name:value,exact:true}).click();};
 try {
- fixture=spawn('python',['-u','python/verify_scanner_integration.py','--dynamic-okx','--ui',join(ui,'dist/index.html')],{cwd:root,stdio:['pipe','pipe','pipe']});
+ fixture=spawn('python',['-u','python/verify_scanner_integration.py',hyperliquid?'--dynamic-hyperliquid':'--dynamic-okx','--ui',join(ui,'dist/index.html')],{cwd:root,stdio:['pipe','pipe','pipe']});
  fixture.stderr.on('data',data=>{diagnostics+=data;});
  const ready=await new Promise((resolve,reject)=>{
   let buffer='';const timeout=setTimeout(()=>reject(new Error('fixture startup timeout '+diagnostics)),45000);
@@ -48,27 +50,28 @@ try {
   await click('登录');
   await page.getByText('已停止 · 配置 v0',{exact:true}).waitFor();
  });
- await check('save named OKX and discover ETH without a market configuration file',async()=>{
+ await check('save named exchange and discover ETH without a market configuration file',async()=>{
   await click('Settings');await click('交易所');
-  await page.getByRole('textbox',{name:'交易所名称',exact:true}).fill('动态 OKX');
+  await page.getByRole('textbox',{name:'交易所名称',exact:true}).fill(exchangeName);
+  if(hyperliquid) await choose('交易所类型','Hyperliquid');
   await click('保存交易所');
-  await page.getByRole('table',{name:'已保存交易所'}).getByText('动态 OKX',{exact:true}).waitFor();
+  await page.getByRole('table',{name:'已保存交易所'}).getByText(exchangeName,{exact:true}).waitFor();
   await page.keyboard.press('Escape');await tab('扫描范围');
-  await page.getByRole('checkbox',{name:'动态 OKX',exact:true}).check();
-  await page.getByRole('checkbox',{name:'现货',exact:true}).check();
+  await page.getByRole('checkbox',{name:exchangeName,exact:true}).check();
+  await page.getByRole('checkbox',{name:hyperliquid?'永续':'现货',exact:true}).check();
   await choose('深度报价资产','USDT');
   await click('添加到草稿');await click('应用扫描范围');await tab('当前机会');
  });
- await check('native ETH spot input reaches scanner and visible depth coverage',async()=>{
+ await check('native ETH input reaches scanner and visible depth coverage',async()=>{
   await click('启动扫描');
   const table=page.getByRole('table',{name:'规范行情观察',exact:true});
-  await table.getByText('动态 OKX · ETH / USDT',{exact:true}).waitFor();
-  await table.getByText('3000.01 USDT',{exact:true}).waitFor();
+  await table.getByText(exchangeName+' · ETH / USDT',{exact:true}).waitFor();
+  await table.getByText(hyperliquid?'3000.1 USDT':'3000.01 USDT',{exact:true}).waitFor();
   await table.getByText('1 / 1 档 · 来源有限快照',{exact:true}).waitFor();
   const response=await page.waitForResponse(r=>r.url().endsWith('/api/scanner')&&r.request().method()==='GET'&&r.status()===200);const view=(await response.json()).result;
   assert.equal(view.market.observations.length,1);assert(view.market.observations[0].continuous);
   assert.equal(view.market.evidence[0].input_kind,'synthetic_protocol_fixture');
-  assert.equal(view.market.discovery['1:production'].evidence.length,2);
+  assert.equal(view.market.discovery[hyperliquid?'21:production':'1:production'].evidence.length,hyperliquid?1:2);
   assert.equal(view.snapshot.cursor === '0',false);
   await writeFile(join(output,'scanner-view.json'),JSON.stringify(view,null,2));
   await page.screenshot({path:join(output,'running.png'),fullPage:true});
@@ -76,7 +79,7 @@ try {
  await check('stop releases subscriptions and keeps saved scope',async()=>{
   await click('停止扫描');await page.getByText('已停止 · 配置 v1',{exact:true}).waitFor();
   await tab('扫描范围');
-  await page.getByRole('table',{name:'实际生效范围'}).getByText('动态 OKX',{exact:true}).waitFor();
+  await page.getByRole('table',{name:'实际生效范围'}).getByText(exchangeName,{exact:true}).waitFor();
   const view=(await(await page.waitForResponse(r=>r.url().endsWith('/api/scanner')&&r.request().method()==='GET'&&r.status()===200)).json()).result;
   assert.equal(view.market.active_subscriptions,0);assert.equal(view.config.version,'1');
  });
