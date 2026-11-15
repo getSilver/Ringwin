@@ -11,6 +11,7 @@ const protocol = @import("../adapters/okx/okx_public_market.zig");
 const hl = @import("../adapters/hyperliquid/hyperliquid_market_feed.zig");
 const projection = @import("../market/market_projection.zig");
 const depth = @import("../market/depth_snapshot.zig");
+const okx_future_skew_ns: u64 = 500 * std.time.ns_per_ms;
 
 const Configuration = struct {
     schema: u16,
@@ -160,7 +161,10 @@ pub fn main(init: std.process.Init) !void {
         if (try adapter.tryDrain()) |batch| for (batch.slice()) |record| {
             if (record.event == .l2_book_snapshot or record.event == .l2_book_delta) {
                 const source = record.envelope.times.source_utc_ns;
-                if (source == null or source.? > r.utc_ns or r.utc_ns - source.? > 5_000_000_000) {
+                if (source == null or (source.? > r.utc_ns and
+                    (cfg.venue != 1 or source.? - r.utc_ns > okx_future_skew_ns)) or
+                    (source.? <= r.utc_ns and r.utc_ns - source.? > 5_000_000_000))
+                {
                     failure = "StaleSourceTime";
                 } else book_time = r.monotonic_ns;
             }
