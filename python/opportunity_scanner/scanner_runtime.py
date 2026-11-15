@@ -4,6 +4,8 @@ Only the public transport is replaceable. No credentials or execution capability
 """
 from dataclasses import replace
 from fractions import Fraction
+import hashlib
+import copy
 import json
 import os
 from pathlib import Path
@@ -16,11 +18,14 @@ import urllib.request
 from strategies.cross_venue import arbitrage_economics as economics
 from opportunity_scanner.arbitrage_scanner import Observation, decode_depth_snapshot
 from opportunity_scanner.scanner_console import CanonicalSource, CatalogueEntry, ScannerConsole
+from opportunity_scanner.scanner_config import atomic_json, _object
 from opportunity_scanner.scanner_history import History
 from strategy_instance import NativeAuthority
 
 ROOT = Path(__file__).resolve().parents[2]
 MAX_FRAME = 120 * 1024
+MAX_CATALOGUE = 8192
+MAX_DISCOVERY_BYTES = 4 * 1024 * 1024
 ROUTES = {
     (1, "production"): ("https://www.okx.com", "production"),
     (1, "demo"): ("https://www.okx.com", "production"),
@@ -33,14 +38,19 @@ OKX = {"BTC-USDC": (0x4f4b5800000003, "btc_usdc_spot", "spot"),
 
 
 class PublicTransport:
-    def request(self, url, body=None):
+    def request(self, url, body=None, *, max_bytes=MAX_FRAME):
         data = None if body is None else json.dumps(body, separators=(",", ":")).encode()
         request = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(request, timeout=3) as response:
-            payload = response.read(MAX_FRAME + 1)
-        if len(payload) > MAX_FRAME:
+            payload = response.read(max_bytes + 1)
+        if len(payload) > max_bytes:
             raise ValueError("public transport capacity exceeded")
         return payload.decode("utf-8")
+
+    def catalogue(self, setting, product):
+        base, _ = ROUTES[int(setting["venue"]), setting["environment"]]
+        kind = "SPOT" if product == "spot" else "SWAP"
+        return self.request(base + "/api/v5/public/instruments?instType=" + kind, max_bytes=MAX_DISCOVERY_BYTES)
 
     def metadata(self, binding):
         base, _ = ROUTES[binding["venue"], binding["environment"]]
@@ -62,7 +72,7 @@ class ScannerRuntime:
         if configuration.get("schema") != 1 or set(configuration) != {"schema", "assets", "bindings"}:
             raise ValueError("scanner market configuration schema")
         bindings = configuration["bindings"]
-        if type(bindings) is not list or not 1 <= len(bindings) <= 16:
+        if type(bindings) is not list or not 0 <= len(bindings) <= MAX_CATALOGUE:
             raise ValueError("scanner market binding capacity")
         self.directory = Path(directory).resolve()
         self.directory.mkdir(parents=True, exist_ok=True)
@@ -70,21 +80,36 @@ class ScannerRuntime:
         self.lock = threading.RLock()
         self.poll_lock = threading.Lock()
         self.bindings, entries = {}, []
+        self.discovery_status, self.discovery_threads = {}, []
+        self.discovery_lock = threading.Lock()
+        cache = self.directory / "scanner-discovery.json"
+        if cache.is_file():
+            if cache.stat().st_size > MAX_DISCOVERY_BYTES:
+                raise ValueError("saved discovery capacity")
+            saved = json.loads(cache.read_text(encoding="utf-8"), object_pairs_hook=_object)
+            if saved.get("schema") != 1 or set(saved) != {"schema", "assets", "bindings", "sources"}:
+                raise ValueError("saved discovery schema")
+            configuration = dict(schema=1, assets=configuration["assets"] + [a for a in saved["assets"] if a["identity"] not in {x["identity"] for x in configuration["assets"]}],
+                bindings=bindings + [b for b in saved["bindings"] if (b["venue"], b["environment"], b["symbol"]) not in {(x["venue"], x["environment"], x["symbol"]) for x in bindings}])
+            bindings = configuration["bindings"]
+            self.discovery_status = saved["sources"]
+            if len(bindings) > MAX_CATALOGUE:
+                raise ValueError("saved discovery binding capacity")
         assets = {int(a["identity"]): a for a in configuration["assets"]}
         for row in bindings:
             venue, environment = row["venue"], row["environment"]
             if (venue, environment) not in ROUTES:
                 raise ValueError("unsupported venue/environment; Hyperliquid uses testnet, not demo")
-            if venue == 1:
+            if venue == 1 and "okx_binding" not in row:
                 instrument, _, product = OKX.get(row["symbol"], (None, None, None))
                 if (instrument, product) != (int(row["instrument"]), row["product"]):
                     raise ValueError("unsupported OKX instrument/product")
-            elif row["product"] != "linear" or row["symbol"] != row["binding"]["coin"]:
+            elif venue == 21 and (row["product"] != "linear" or row["symbol"] != row["binding"]["coin"]):
                 raise ValueError("Hyperliquid supports configured standard linear perpetuals only")
             base, quote = int(row["base_asset"]), int(row["quote_asset"])
             if base not in assets or quote not in assets:
                 raise ValueError("missing trusted asset definition")
-            if (venue == 1 and assets[quote]["code"] != ("USDC" if row["symbol"] == "BTC-USDC" else "USDT")
+            if (venue == 1 and assets[quote]["code"] != row["symbol"].split("-")[1]
                     or venue == 21 and assets[quote]["code"] != "USDC"):
                 raise ValueError("settlement/quote asset mismatch")
             if assets[base]["code"] != row["symbol"].split("-")[0]:
@@ -101,10 +126,7 @@ class ScannerRuntime:
                         or tick != Fraction(b["tick_atoms"], 10**b["price_scale"])
                         or lot != Fraction(b["lot_atoms"], 10**b["quantity_scale"])):
                     raise ValueError("Hyperliquid binding units mismatch")
-            rules = economics.InstrumentRules(int(row["instrument"]), row["rules_version"], base, quote,
-                tick * Fraction(10**assets[quote]["atomic_scale"], 10**assets[base]["atomic_scale"]),
-                lot * 10**assets[base]["atomic_scale"], 1, 0, 0, (1<<64)-1)
-            entry = CatalogueEntry(venue, int(row["observation_identity"]), row["product"], rules, environment)
+            entry = self._entry(row, assets)
             if entry.identity in self.bindings:
                 raise ValueError("duplicate scanner binding")
             self.bindings[entry.identity] = dict(row)
@@ -122,10 +144,114 @@ class ScannerRuntime:
             self.thread = threading.Thread(target=self._run, daemon=True, name="public-scanner-feeds")
             self.thread.start()
 
+    @staticmethod
+    def _entry(row, assets):
+        base, quote = int(row["base_asset"]), int(row["quote_asset"])
+        tick, lot = Fraction(row["tick"]), Fraction(row["lot_base"])
+        minimum = Fraction(row.get("minimum_size", row["lot_wire"])) / Fraction(row["lot_wire"])
+        rules = economics.InstrumentRules(int(row["instrument"]), row["rules_version"], base, quote,
+            tick * Fraction(10**assets[quote]["atomic_scale"], 10**assets[base]["atomic_scale"]),
+            lot * 10**assets[base]["atomic_scale"], -(-minimum.numerator // minimum.denominator), 0, 0, (1<<64)-1)
+        return CatalogueEntry(row["venue"], int(row["observation_identity"]), row["product"], rules, row["environment"], row.get("specification"))
+
+    def request_discovery(self, setting):
+        key = setting["venue"] + ":" + setting["environment"]
+        if setting["type"] != "okx":
+            return
+        with self.lock:
+            if key in self.discovery_status and self.discovery_status[key]["state"] != "failed":
+                return
+            self.discovery_status[key] = dict(state="loading", error="")
+            thread = threading.Thread(target=self.discover, args=(dict(setting),), daemon=True, name="okx-catalogue")
+            self.discovery_threads.append(thread)
+            thread.start()
+
+    def discover(self, setting):
+        """Explicit settings action; discovery never acquires a market subscription."""
+        key = setting["venue"] + ":" + setting["environment"]
+        if setting["type"] != "okx" or setting["venue"] != "1":
+            raise ValueError("OKX discovery setting required")
+        with self.discovery_lock:
+            with self.lock:
+                self.discovery_status[key] = dict(state="loading", error="")
+            try:
+                rows, rejected, evidence = [], [], []
+                assets_by_code = {a["code"]: a for a in self.source.assets}
+                for product in ("spot", "linear"):
+                    if self.closing.is_set():
+                        return
+                    row = dict(venue=1, product=product, environment=setting["environment"], symbol="BTC-USDT", instrument=str(OKX["BTC-USDT"][0]),
+                        rules_version=1, tick="1", lot_wire="1")
+                    worker = self._open(None, row=row, discovery=True)
+                    capture = dict(raw_path=worker[3], requested_environment=setting["environment"],
+                        actual_environment=ROUTES[1, setting["environment"]][1], product=product)
+                    evidence.append(capture)
+                    try:
+                        result = self._input(worker, "discover", self.transport.catalogue(setting, product))
+                        audit = self._input(worker, "audit", "")
+                        capture.update(raw_sha256=result["raw_sha256"], raw_sequence=result["raw_sequence"], captures=audit["captures"])
+                    finally:
+                        self._close_worker(worker)
+                    for result_row in result["items"]:
+                        if result_row["failure"]:
+                            rejected.append(dict(symbol=result_row["symbol"], reason=result_row["failure"]))
+                            continue
+                        item = result_row["item"]
+                        if item["product"] != product:
+                            raise ValueError("OKX catalogue product mismatch")
+                        for code in (item["base"], item["quote"]):
+                            if code not in assets_by_code:
+                                # Observation-only fixed precision, independent of core AssetDefinition.
+                                assets_by_code[code] = dict(identity=str(self._stable_id("scanner-asset-v1", code)), code=code, atomic_scale=18)
+                        instrument = OKX[item["symbol"]][0] if item["symbol"] in OKX else self._stable_id("okx-instrument-v1", item["symbol"])
+                        version = self._stable_id("okx-rules-v1", json.dumps(item, sort_keys=True, separators=(",", ":"))) & ((1<<53)-1) or 1
+                        lot_base = Fraction(item["lot"]) * Fraction(item["contract_value"] or "1")
+                        if (lot_base * 10**18).denominator != 1:
+                            rejected.append(dict(symbol=item["symbol"], reason="UnsupportedDecimalUnits")); continue
+                        previous = next((r for r in self.bindings.values() if (r["venue"], r["environment"], r["symbol"]) ==
+                                         (1, setting["environment"], item["symbol"])), None)
+                        observation_identity = previous["observation_identity"] if previous else str(self._stable_id("scanner-source-v1", key))
+                        rows.append(dict(venue=1, environment=setting["environment"], symbol=item["symbol"], product=product,
+                            instrument=str(instrument), observation_identity=observation_identity, rules_version=version,
+                            base_asset=assets_by_code[item["base"]]["identity"], quote_asset=assets_by_code[item["quote"]]["identity"],
+                            tick=item["tick"], lot_wire=item["lot"], lot_base=str(lot_base), minimum_size=item["minimum_size"], contract_value=item["contract_value"], specification=item,
+                            okx_binding=dict(symbol=item["symbol"], instrument=instrument, product=product, base=item["base"], quote=item["quote"])))
+                assets = list(assets_by_code.values())
+                asset_definitions = {int(a["identity"]): a for a in assets}
+                entries = [self._entry(row, asset_definitions) for row in rows]
+                if len({e.identity for e in entries}) != len(entries):
+                    raise ValueError("duplicate OKX catalogue identity")
+                if not entries:
+                    raise ValueError("OKX catalogue has no usable instruments: " + str(rejected[:8]))
+                with self.console.lock, self.source.lock, self.lock:
+                    if self.closing.is_set():
+                        return
+                    updated = dict(self.bindings)
+                    updated.update((entry.identity, row) for entry, row in zip(entries, rows))
+                    if len(updated) > MAX_CATALOGUE:
+                        raise ValueError("scanner catalogue capacity")
+                    state = dict(state="ready", error="", rejected=rejected, evidence=evidence)
+                    sources = {k:v for k,v in self.discovery_status.items() if v["state"] == "ready"}
+                    sources[key] = state
+                    atomic_json(self.directory/"scanner-discovery.json", dict(schema=1, assets=assets,
+                        bindings=[r for r in updated.values() if "okx_binding" in r], sources=sources), MAX_DISCOVERY_BYTES)
+                    self.source.register(entries)
+                    self.bindings, self.source.assets = updated, assets
+                    self.discovery_status[key] = state
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                with self.lock:
+                    self.discovery_status[key] = dict(state="failed", error=str(error)[:2048], evidence=evidence, rejected=rejected)
+
+    @staticmethod
+    def _stable_id(namespace, value):
+        return int.from_bytes(hashlib.sha256((namespace+"\0"+value).encode()).digest()[:15], "big") or 1
+
     def acquire(self, identity):
         # Source owns subscription serialization. Network work occurs outside its lock.
         with self.lock:
             if identity not in self.workers:
+                if len(self.workers) >= 16:
+                    raise ValueError("scanner active subscription capacity (16); narrow the asset scope")
                 self.workers[identity] = None
                 self.blocked.discard(identity)
 
@@ -147,20 +273,27 @@ class ScannerRuntime:
         process.wait(timeout=5)
         channel.pipes.close()
 
-    def _open(self, identity):
-        row = self.bindings[identity]
+    def _open(self, identity, *, row=None, discovery=False):
+        row = self.bindings[identity] if row is None else row
         session = secrets.randbelow((1<<53)-1)+1
         if sum(p.stat().st_size for p in self.directory.glob("market-*.raw/**/*") if p.is_file()) >= 64 * 1024 * 1024:
             raise OSError("scanner RawIngress capacity exhausted; archive files before restarting")
         path = self.directory / ("market-" + secrets.token_hex(16) + ".raw")
         executable = ROOT/"zig-out/bin"/("ringwin-scanner-market.exe" if os.name == "nt" else "ringwin-scanner-market")
         process = subprocess.Popen([str(executable), str(path)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        channel = NativeAuthority(process, timeout=5)
-        config = dict(schema=1, session=session, venue=row["venue"], environment=ROUTES[row["venue"], row["environment"]][1],
+        channel = NativeAuthority(process, timeout=15 if discovery else 5, max_frame_bytes=5*1024*1024 if discovery else 256*1024)
+        config = dict(schema=1, discovery=discovery, requested_environment=row["environment"], session=session, venue=row["venue"], environment=ROUTES[row["venue"], row["environment"]][1],
             instrument=int(row["instrument"]), rules_version=row["rules_version"], tick=row["tick"], lot=row["lot_wire"])
+        config["minimum_size"] = row.get("minimum_size")
+        if discovery:
+            config["discovery_product"] = row["product"]
         config["raw_budget_bytes"] = row.get("raw_budget_bytes", 4*1024*1024)
         if row["venue"] == 1:
-            config["okx_instrument"] = OKX[row["symbol"]][1]
+            if "okx_binding" in row:
+                config["okx_binding"] = row["okx_binding"]
+                config["okx_specification"] = row.get("specification")
+            else:
+                config["okx_instrument"] = OKX[row["symbol"]][1]
             config["contract_value"] = row.get("contract_value")
         else:
             config["binding"] = row["binding"]
@@ -173,7 +306,7 @@ class ScannerRuntime:
 
     def _input(self, worker, operation, payload):
         _, channel, state, _ = worker
-        if len(payload.encode()) > MAX_FRAME:
+        if len(payload.encode()) > (MAX_DISCOVERY_BYTES if operation == "discover" else MAX_FRAME):
             raise ValueError("public frame capacity")
         state["sequence"] += 1
         request = dict(schema=1, session=state["session"], sequence=state["sequence"], epoch=state["epoch"], operation=operation, payload=payload,
@@ -274,7 +407,7 @@ class ScannerRuntime:
                 bid_levels=len(book["bids"]), ask_levels=len(book["asks"]),
                 truncated=book["bids_truncated"] or book["asks_truncated"],
                 visible_at_ns=str(book["visible_at_ns"]), rules_version=str(o.rules.version)))
-        return dict(active_subscriptions=len(self.workers), routes=[dict(venue=str(v), requested_environment=e, actual_environment=a, endpoint=url,
+        return dict(discovery=copy.deepcopy(self.discovery_status), active_subscriptions=len(self.workers), routes=[dict(venue=str(v), requested_environment=e, actual_environment=a, endpoint=url,
                                 products=["spot", "linear"] if v == 1 else ["linear"])
                             for (v, e), (url, a) in ROUTES.items()],
                     failures={str(k): v for k, v in self.failures.copy().items()}, observations=observations,
@@ -282,7 +415,7 @@ class ScannerRuntime:
                     missing_evaluation=["research_plan", "model", "calibration", "fees"])
 
     def _run(self):
-        while not self.closing.wait(.5):
+        while not self.closing.wait(.5) and not self.console.shutdown.is_set():
             try:
                 self.step()
             except Exception as error:
@@ -295,6 +428,8 @@ class ScannerRuntime:
     def close(self):
         self.console.close()
         self.closing.set()
+        for thread in self.discovery_threads:
+            thread.join(timeout=30)
         if self.thread:
             self.thread.join(timeout=20)
             if self.thread.is_alive():

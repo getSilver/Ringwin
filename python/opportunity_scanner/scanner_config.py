@@ -45,7 +45,7 @@ def _validate(config):
             uint_text(row["quote_asset"], minimum=1) if row["quote_asset"] is not None else None,
             uint_text(row["min_depth_atoms"]) if row["min_depth_atoms"] is not None else None,
             uint_text(row["max_depth_atoms"]) if row["max_depth_atoms"] is not None else None, environment=row["environment"])
-    if type(config["registered"]) is not list or len(config["registered"]) > 64:
+    if type(config["registered"]) is not list or len(config["registered"]) > 8192:
         raise ValueError("saved scanner catalogue capacity")
     identities = set()
     for identity in config["registered"]:

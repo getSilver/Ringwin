@@ -26,6 +26,7 @@ class CatalogueEntry:
     kind: str
     rules: object
     environment: str
+    specification: object = None
 
     @property
     def identity(self):
@@ -66,7 +67,7 @@ class CanonicalSource:
                     raise ValueError("catalogue identity conflict")
             updated = dict(self.registered)
             updated.update((x.identity, x) for x in observations)
-            if len(updated) > 64:
+            if len(updated) > 8192:
                 raise ValueError("scanner catalogue capacity")
             self.registered = updated
 
@@ -344,8 +345,8 @@ class ScannerConsole:
             if self.desired == "running":
                 return self.view()
             selected = self._selected()
-            if len({self.source.registered[x].venue for x in selected}) < 2:
-                raise ValueError("at least two registered venues required")
+            if not selected:
+                raise ValueError("at least one registered instrument required")
             self.phase, self.session = "Starting", secrets.token_hex(16)
             self.sequence = self.committed = self.cursor = 0
             self.snapshot, self.last_publication = self._empty(), None
@@ -596,7 +597,8 @@ class ScannerConsole:
             self._health()
             catalogue = [dict(venue=str(x.venue), account=str(x.account), instrument=str(x.rules.instrument),
                 product=x.kind, environment=x.environment, base_asset=str(x.rules.exposure_asset),
-                quote_asset=str(x.rules.quote_asset), rules_version=str(x.rules.version)) for x in self.source.registered.values()]
+                quote_asset=str(x.rules.quote_asset), rules_version=str(x.rules.version),
+                **({"specification": x.specification} if isinstance(x, CatalogueEntry) and x.specification else {})) for x in self.source.registered.values()]
             market = self.source.runtime_status()
             settings = self.exchange_settings.view() if self.exchange_settings is not None else None
             exchanges = []
@@ -609,6 +611,11 @@ class ScannerConsole:
                     state = "failed" if failures else "ready" if active else "loading" if any(
                         tuple(map(int, (r["venue"], r["account"], r["instrument"]))) in self.warming for r in members
                     ) else "registered" if members else "unloaded"
+                    discovery = market.get("discovery", {}).get(setting["venue"]+":"+setting["environment"])
+                    if discovery:
+                        state = discovery["state"]
+                        failures += [discovery["error"]] if discovery["error"] else []
+                        failures += [str(r["symbol"])+": "+r["reason"] for r in discovery.get("rejected", [])]
                     exchanges.append(dict(setting, source_id=setting["venue"]+":"+setting["environment"],
                         products=next(a["products"] for a in settings["types"] if a["type"] == setting["type"]),
                         catalogue_state=state, catalogue_error="; ".join(failures)))

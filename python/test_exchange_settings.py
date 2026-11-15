@@ -40,12 +40,13 @@ class SettingsTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "saved exchange settings"):
                 ExchangeSettings(path)
 
-    def test_empty_settings_and_unloaded_option_survive_restart(self):
+    @patch("urllib.request.urlopen", side_effect=OSError("offline discovery failure"))
+    def test_empty_settings_and_unloaded_option_survive_restart(self, _network):
         with tempfile.TemporaryDirectory() as directory:
             channel = control_plane.CommandServer(b"s"*32)
             self.addCleanup(channel.close)
             app = control_plane_web.ControlPlaneApp(directory, channel)
-            self.addCleanup(app.scanner_console.close)
+            self.addCleanup(app.scanner_runtime.close)
             self.assertEqual(app.exchange_settings({})[0], 401)
             # The real OwnerSession/CSRF boundary is covered in scanner integration.
             app.authorize = lambda headers: (200, {})
@@ -54,12 +55,13 @@ class SettingsTests(unittest.TestCase):
             status, body = app.exchange_settings({}, dict(expected_version="0", type="okx", name="公共市场", environment="production"))
             self.assertEqual(status, 200, body)
             view = app.scanner({})[1]["result"]
-            self.assertEqual([(r["name"], r["catalogue_state"]) for r in view["exchanges"]], [("公共市场", "unloaded")])
+            self.assertEqual([r["name"] for r in view["exchanges"]], ["公共市场"])
+            self.assertIn(view["exchanges"][0]["catalogue_state"], ("loading", "failed"))
             self.assertEqual(view["desired"], "stopped")
             self.assertEqual(app.exchange_settings({}, dict(expected_version="0", type="okx", name="旧版本", environment="demo"))[0], 409)
-            app.scanner_console.close()
+            app.scanner_runtime.close()
             restored = control_plane_web.ControlPlaneApp(directory, channel)
-            self.addCleanup(restored.scanner_console.close)
+            self.addCleanup(restored.scanner_runtime.close)
             restored.authorize = app.authorize
             self.assertEqual(restored.exchange_settings({})[1], body)
             self.assertEqual(restored.scanner({})[1]["result"]["desired"], "stopped")

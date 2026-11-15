@@ -4,6 +4,7 @@ Synthetic protocol fixtures replace only the external public transport.
 """
 import http.client
 import json
+from fractions import Fraction
 import os
 from pathlib import Path
 import tempfile
@@ -14,7 +15,7 @@ from unittest.mock import patch
 import control_plane
 import control_plane_web
 import owner_session
-from opportunity_scanner.scanner_runtime import ScannerRuntime
+from opportunity_scanner.scanner_runtime import ScannerRuntime, PublicTransport
 
 
 def configuration(environment="production"):
@@ -72,9 +73,112 @@ class ProtocolTransport:
         return payload
 
 
+class DynamicOkxTransport(PublicTransport):
+    input_kind = "synthetic_protocol_fixture"
+
+    def __init__(self, now):
+        self.now, self.urls = now, []
+
+    def request(self, url, body=None, **kwargs):
+        self.urls.append(url)
+        if "/instruments?" in url:
+            linear = "instType=SWAP" in url
+            row = dict(instId="ETH-USDT-SWAP" if linear else "ETH-USDT", instType="SWAP" if linear else "SPOT",
+                baseCcy="" if linear else "ETH", quoteCcy="" if linear else "USDT", ctType="linear" if linear else "",
+                ctVal="0.1" if linear else "", ctMult="1" if linear else "", ctValCcy="ETH" if linear else "", settleCcy="USDT" if linear else "",
+                state="live", ruleType="normal", tickSz="0.01", lotSz="1" if linear else "0.001", minSz="1" if linear else "0.001", tradeQuoteCcyList=[], upcChg=[])
+            return json.dumps(dict(code="0", data=[row]))
+        return json.dumps(dict(code="0", data=[dict(seqId=self.now[0], ts=str(self.now[1]//1_000_000),
+            bids=[["3000.00", "2", "0", "1"]], asks=[["3000.01", "3", "0", "1"]])]))
+
+
 def scope(venue, environment="production"):
     return dict(venue=str(venue), product="spot" if venue == 1 else "linear", environment=environment,
         include_assets=[], exclude_assets=[], quote_asset="3", min_depth_atoms=None,max_depth_atoms=None,new_instruments=False)
+
+
+class DynamicCatalogueTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.now = [2_000_000_000, 1_800_000_000_000_000_000]
+        self.transport = DynamicOkxTransport(self.now)
+        self.runtime = ScannerRuntime(self.temp.name, dict(schema=1, assets=[], bindings=[]), transport=self.transport, automatic=False)
+        self.addCleanup(self.runtime.close)
+        self.setting = dict(identity="a"*32, venue="1", type="okx", name="我的 OKX", environment="demo")
+
+    def test_legacy_assembly_does_not_skip_settings_driven_discovery(self):
+        self.runtime.close()
+        self.runtime = ScannerRuntime(self.temp.name, configuration(), transport=self.transport, automatic=False)
+        self.addCleanup(self.runtime.close)
+        before = set(self.runtime.source.registered)
+        original = self.transport.request
+        def with_legacy(url, *args, **kwargs):
+            value = json.loads(original(url, *args, **kwargs))
+            if "instType=SPOT" in url:
+                legacy = json.loads(json.dumps(value["data"][0]))
+                legacy.update(instId="BTC-USDC", baseCcy="BTC", quoteCcy="USDC")
+                value["data"].append(legacy)
+            return json.dumps(value)
+        self.transport.request = with_legacy
+        self.setting["environment"] = "production"
+        self.runtime.request_discovery(self.setting)
+        for thread in self.runtime.discovery_threads:
+            thread.join(timeout=20)
+            self.assertFalse(thread.is_alive())
+        self.assertEqual(self.runtime.status()["discovery"]["1:production"]["state"], "ready")
+        self.assertTrue(before <= set(self.runtime.source.registered))
+        self.assertTrue(any(r["symbol"] == "ETH-USDT" for r in self.runtime.bindings.values()))
+        self.assertEqual(self.runtime.status()["active_subscriptions"], 0)
+
+    def test_unverifiable_contract_units_are_visible_and_never_subscribed(self):
+        original = self.transport.request
+        def wrong_units(url, *args, **kwargs):
+            value = json.loads(original(url, *args, **kwargs))
+            if "SWAP" in url:
+                value["data"][0]["ctValCcy"] = "BTC"
+            return json.dumps(value)
+        self.transport.request = wrong_units
+        self.runtime.discover(self.setting)
+        view = self.runtime.status()
+        state = view["discovery"]["1:demo"]
+        self.assertEqual(state["state"], "ready", state)
+        self.assertEqual(state["rejected"], [dict(symbol="ETH-USDT-SWAP", reason="UnsupportedAssetUnits")])
+        self.assertEqual(len(self.runtime.source.registered), 1)
+        self.assertEqual(view["active_subscriptions"], 0)
+        self.assertTrue(all(e["requested_environment"] == "demo" and e["actual_environment"] == "production" and e["captures"] == 1 for e in state["evidence"]))
+        self.assertTrue(all(url.startswith("https://www.okx.com/api/v5/public/instruments?instType=") for url in self.transport.urls))
+
+    def test_large_directory_is_captured_and_duplicate_or_capacity_error_keeps_previous(self):
+        original = self.transport.request
+        mode = ["large"]
+        def response(url, *args, **kwargs):
+            value = json.loads(original(url, *args, **kwargs))
+            if mode[0] == "large":
+                value["padding"] = "x" * (130*1024)
+            elif mode[0] == "duplicate":
+                value["data"] *= 2
+            else:
+                value["data"] *= 4097
+            return json.dumps(value)
+        self.transport.request = response
+        self.runtime.discover(self.setting)
+        before = set(self.runtime.source.registered)
+        self.assertEqual(len(before), 2, self.runtime.status())
+        cache = Path(self.temp.name, "scanner-discovery.json").read_bytes()
+        self.runtime.discover(self.setting)
+        self.assertEqual(set(self.runtime.source.registered), before)
+        for error_mode in ("duplicate", "capacity"):
+            mode[0] = error_mode
+            self.runtime.discover(self.setting)
+            self.assertEqual(self.runtime.status()["discovery"]["1:demo"]["state"], "failed")
+            self.assertEqual(set(self.runtime.source.registered), before)
+        # Failed discovery does not persist a partial catalogue.
+        self.assertEqual(set(json.loads(cache)["sources"]), {"1:demo"})
+        restored = ScannerRuntime(self.temp.name, dict(schema=1, assets=[], bindings=[]), transport=self.transport, automatic=False)
+        self.addCleanup(restored.close)
+        self.assertEqual(set(restored.source.registered), before)
+        self.assertEqual(restored.status()["active_subscriptions"], 0)
 
 
 class IntegrationTests(unittest.TestCase):
@@ -137,6 +241,38 @@ class IntegrationTests(unittest.TestCase):
                 type=kind, name=name, environment=environment), self.headers)
             self.assertEqual(status, 200, body)
         return body["result"]
+
+    def test_dynamic_okx_discovery_and_scan_outside_original_allowlist(self):
+        self.runtime.close()
+        self.runtime = ScannerRuntime(self.temp.name, dict(schema=1, assets=[], bindings=[]),
+            transport=DynamicOkxTransport(self.now), clock=lambda:self.now[0], utc_clock=lambda:self.now[1], automatic=False)
+        self.app.scanner_console = self.runtime.console
+        self.app.scanner_runtime = self.runtime
+        self.runtime.console.exchange_settings = self.app.exchange_settings_store
+        setting = self.save_settings()["exchanges"][0]
+        self.runtime.discover(setting)
+        view = self.call("stop")
+        self.assertEqual(view["market"]["active_subscriptions"], 0)
+        self.assertEqual({a["code"] for a in view["assets"]}, {"ETH", "USDT"})
+        self.assertEqual(len(view["catalogue"]), 2)
+        assets = {a["code"]:a["identity"] for a in view["assets"]}
+        rows = [dict(scope(1), product=product, quote_asset=assets["USDT"], include_assets=[assets["ETH"]]) for product in ("spot", "linear")]
+        self.call("configure", dict(expected_version="0", scopes=rows))
+        self.call("start"); self.tick()
+        self.call("summary")
+        view = self.http("/api/scanner", headers=self.headers)[1]["result"]
+        self.assertEqual(len(view["market"]["observations"]), 2, view)
+        self.assertTrue(all(o["continuous"] for o in view["market"]["observations"]))
+        linear = next(r for r in view["catalogue"] if r["product"] == "linear")
+        entry = next(r for r in self.runtime.source.registered.values() if str(r.rules.instrument) == linear["instrument"])
+        self.assertEqual(entry.rules.base_atoms_per_lot, 10**17)
+        self.assertEqual(entry.rules.tick_quote_atoms_per_base_atom, Fraction(1, 100))
+        self.assertEqual(len(self.runtime.audit()), 2)
+        identities = {(r["product"], r["instrument"]) for r in view["catalogue"]}
+        self.runtime.close()
+        self.runtime = ScannerRuntime(self.temp.name, dict(schema=1, assets=[], bindings=[]), transport=DynamicOkxTransport(self.now), automatic=False)
+        self.assertEqual({(r.kind, str(r.rules.instrument)) for r in self.runtime.source.registered.values()}, identities)
+        self.assertEqual(self.runtime.console.desired, "stopped")
 
     def test_settings_auth_scope_reference_loading_failure_and_service_restart(self):
         self.assertEqual(self.http("/api/exchange-settings")[0], 401)

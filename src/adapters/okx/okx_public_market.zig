@@ -1,4 +1,4 @@
-//! Fail-closed OKX public-data normalization boundary for the fixed first wave.
+//! Fail-closed OKX public-data normalization with bounded observational bindings.
 //! The libcurl transport owner passes complete REST/WS JSON messages here. Every
 //! accepted frame is appended through RawSink before parsing or state mutation.
 //! Local subscription resets return a health payload without fabricating raw evidence.
@@ -9,12 +9,18 @@ const Sha256 = std.crypto.hash.sha2.Sha256;
 
 pub const max_raw_frame_bytes = 1024 * 1024;
 pub const max_book_levels = 400;
-pub const max_events_per_ingress = 2;
+pub const max_events_per_ingress = 16;
 
-pub const Instrument = enum(u8) {
+/// Execution qualification stays closed; public feed slots grant no send capability.
+pub const Instrument = enum(u8) { btc_usdt_spot, btc_usdt_swap, btc_usdc_spot };
+pub const max_bindings = 16;
+pub const Binding = struct { symbol: []const u8, instrument: u128, product: enum { spot, linear }, base: []const u8, quote: []const u8 };
+
+pub const FeedInstrument = enum(u8) {
     btc_usdt_spot,
     btc_usdt_swap,
     btc_usdc_spot,
+    _,
 };
 
 pub const Decimal = @import("../../model/canonical_event.zig").Decimal;
@@ -73,7 +79,7 @@ pub const RuleType = enum(u8) { normal, pre_market };
 pub const ContractType = enum(u8) { linear, inverse };
 
 pub const InstrumentDefinitionObserved = struct {
-    instrument: Instrument,
+    instrument: FeedInstrument,
     state: InstrumentState,
     rule_type: RuleType,
     tick_size: Decimal,
@@ -138,14 +144,14 @@ pub const BookSide = struct {
 };
 
 pub const L2BookSnapshot = struct {
-    instrument: Instrument,
+    instrument: FeedInstrument,
     source_sequence: i64,
     bids: BookSide,
     asks: BookSide,
 };
 
 pub const L2BookDelta = struct {
-    instrument: Instrument,
+    instrument: FeedInstrument,
     previous_source_sequence: i64,
     source_sequence: i64,
     bids: BookSide,
@@ -155,7 +161,7 @@ pub const L2BookDelta = struct {
 pub const ReferencePriceKind = enum(u8) { mark, index };
 
 pub const ReferencePrice = struct {
-    instrument: Instrument,
+    instrument: FeedInstrument,
     kind: ReferencePriceKind,
     price: Decimal,
 };
@@ -163,7 +169,7 @@ pub const ReferencePrice = struct {
 pub const SettlementState = enum(u8) { processing, settled };
 
 pub const FundingRatePublished = struct {
-    instrument: Instrument,
+    instrument: FeedInstrument,
     predicted_rate: Decimal,
     funding_time_utc_ns: u64,
     next_funding_time_utc_ns: u64,
@@ -182,7 +188,7 @@ pub const GapReason = enum(u8) {
 };
 
 pub const MarketDataHealthChanged = struct {
-    instrument: Instrument,
+    instrument: FeedInstrument,
     health: MarketDataHealth,
     reason: ?GapReason,
     last_good_source_sequence: ?i64,
@@ -243,17 +249,38 @@ const FeedMemory = struct {
 
 pub const Decoder = struct {
     /// REST books omit instId; the transport owner binds the requested endpoint.
-    rest_book_instrument: ?Instrument = null,
+    rest_book_instrument: ?FeedInstrument = null,
+    bindings: [max_bindings]?Binding = @splat(null),
+    dynamic_books: [max_bindings]BookState = @splat(.{}),
     spot_book: BookState = .{},
     swap_book: BookState = .{},
     usdc_book: BookState = .{},
-    rules_observed: [3]bool = @splat(false),
-    instrument_memory: [3]FeedMemory = @splat(.{}),
+    rules_observed: [max_bindings]bool = @splat(false),
+    instrument_memory: [max_bindings]FeedMemory = @splat(.{}),
     mark_memory: FeedMemory = .{},
     index_memory: FeedMemory = .{},
     funding_memory: FeedMemory = .{},
 
-    pub fn beginSubscription(self: *Decoder, instrument: Instrument) MarketDataHealthChanged {
+    pub fn bind(self: *Decoder, binding: Binding) !FeedInstrument {
+        if (binding.instrument == 0 or binding.symbol.len == 0 or binding.symbol.len > 64 or binding.base.len == 0 or binding.quote.len == 0) return error.InvalidBinding;
+        for (self.bindings) |existing| if (existing) |b| {
+            if (std.mem.eql(u8, b.symbol, binding.symbol) or b.instrument == binding.instrument) return error.DuplicateBinding;
+        };
+        for (3..max_bindings) |index| if (self.bindings[index] == null) {
+            self.bindings[index] = binding;
+            return @enumFromInt(index);
+        };
+        return error.BindingCapacity;
+    }
+
+    fn parseInstrument(self: *const Decoder, text: []const u8) !FeedInstrument {
+        for (self.bindings, 0..) |binding, index| if (binding) |b| {
+            if (std.mem.eql(u8, text, b.symbol)) return @enumFromInt(index);
+        };
+        return parseFeedInstrument(text);
+    }
+
+    pub fn beginSubscription(self: *Decoder, instrument: FeedInstrument) MarketDataHealthChanged {
         const state = self.bookState(instrument);
         const last = state.last_sequence;
         state.health = .awaiting_snapshot;
@@ -269,11 +296,11 @@ pub const Decoder = struct {
         };
     }
 
-    pub fn isBookHealthy(self: *const Decoder, instrument: Instrument) bool {
+    pub fn isBookHealthy(self: *const Decoder, instrument: FeedInstrument) bool {
         return self.bookStateConst(instrument).health == .healthy;
     }
 
-    pub fn isPublicMarketReady(self: *const Decoder, instrument: Instrument) bool {
+    pub fn isPublicMarketReady(self: *const Decoder, instrument: FeedInstrument) bool {
         return self.rules_observed[@intFromEnum(instrument)] and self.isBookHealthy(instrument);
     }
 
@@ -344,7 +371,7 @@ pub const Decoder = struct {
 
     fn invalidateRejected(self: *Decoder, times: Times, evidence: RawEvidenceRef, batch: *IngressBatch) void {
         for (self.rules_observed, 0..) |observed, index| if (observed) {
-            const instrument: Instrument = @enumFromInt(index);
+            const instrument: FeedInstrument = @enumFromInt(index);
             const state = self.bookState(instrument);
             state.health = .gap;
             state.last_content_hash = null;
@@ -369,7 +396,7 @@ pub const Decoder = struct {
         const datum = try asObject(data.items[0]);
 
         if (std.mem.eql(u8, channel, "books") or std.mem.eql(u8, channel, "books5")) {
-            const instrument = try parseInstrument(try stringField(arg_object, "instId"));
+            const instrument = try self.parseInstrument(try stringField(arg_object, "instId"));
             const compact_snapshot = std.mem.eql(u8, channel, "books5");
             if (compact_snapshot and root_object.get("action") != null and
                 !std.mem.eql(u8, try stringField(root_object, "action"), "snapshot")) return error.InvalidField;
@@ -395,7 +422,7 @@ pub const Decoder = struct {
             };
         }
         if (std.mem.eql(u8, channel, "instruments")) {
-            const instrument = parseInstrument(stringField(datum, "instId") catch
+            const instrument = self.parseInstrument(stringField(datum, "instId") catch
                 return error.InvalidField) catch return error.UnsupportedInstrument;
             return self.decodeInstrument(instrument, datum, times, raw_evidence, batch) catch |err| {
                 self.rules_observed[@intFromEnum(instrument)] = false;
@@ -425,11 +452,11 @@ pub const Decoder = struct {
         const datum = try asObject(data.items[0]);
         if (datum.get("bids") != null) {
             const instrument = self.rest_book_instrument orelse return error.UnsupportedInstrument;
-            if (datum.get("instId")) |value| if (try parseInstrument(try valueString(value)) != instrument) return error.UnsupportedInstrument;
+            if (datum.get("instId")) |value| if (try self.parseInstrument(try valueString(value)) != instrument) return error.UnsupportedInstrument;
             return self.decodeBook(instrument, "snapshot", datum, times, raw_evidence, batch, true);
         }
         if (datum.get("tickSz") != null) {
-            const instrument = try parseInstrument(try stringField(datum, "instId"));
+            const instrument = try self.parseInstrument(try stringField(datum, "instId"));
             return self.decodeInstrument(instrument, datum, times, raw_evidence, batch) catch |err| {
                 self.rules_observed[@intFromEnum(instrument)] = false;
                 return err;
@@ -446,15 +473,17 @@ pub const Decoder = struct {
 
     fn decodeInstrument(
         self: *Decoder,
-        instrument: Instrument,
+        instrument: FeedInstrument,
         datum: std.json.ObjectMap,
         times: Times,
         raw_evidence: RawEvidenceRef,
         batch: *IngressBatch,
     ) !void {
         const declared_type = try stringField(datum, "instType");
-        if ((instrument != .btc_usdt_swap and !std.mem.eql(u8, declared_type, "SPOT")) or
-            (instrument == .btc_usdt_swap and !std.mem.eql(u8, declared_type, "SWAP")))
+        const binding = self.bindings[@intFromEnum(instrument)];
+        const linear = if (binding) |b| b.product == .linear else instrument == .btc_usdt_swap;
+        if ((!linear and !std.mem.eql(u8, declared_type, "SPOT")) or
+            (linear and !std.mem.eql(u8, declared_type, "SWAP")))
             return error.InvalidField;
         const source_ms = try optionalMillis(datum, "ts");
         const definition: InstrumentDefinitionObserved = .{
@@ -470,12 +499,27 @@ pub const Decoder = struct {
             .maximum_market_notional = try optionalDecimalField(datum, "maxMktAmt"),
             .contract_type = try optionalContractType(datum),
             .contract_value = try optionalDecimalField(datum, "ctVal"),
-            .contract_value_currency_btc = try optionalEquals(datum, "ctValCcy", "BTC"),
-            .settlement_currency_usdt = try optionalEquals(datum, "settleCcy", "USDT"),
+            .contract_value_currency_btc = try optionalEquals(datum, "ctValCcy", if (binding) |b| b.base else "BTC"),
+            .settlement_currency_usdt = try optionalEquals(datum, "settleCcy", if (binding) |b| b.quote else "USDT"),
             .trade_quote_currency_usdt = try containsString(datum, "tradeQuoteCcyList", "USDT"),
             .upcoming_changes = try parseUpcomingChanges(datum),
         };
-        if (instrument == .btc_usdt_swap and
+        if (binding) |b| {
+            if (definition.state != .live) return error.InstrumentNotLive;
+            if (definition.rule_type != .normal) return error.UnsupportedRuleType;
+            for ([_]Decimal{ definition.tick_size, definition.lot_size, definition.minimum_size }) |number| {
+                if (number.coefficient <= 0 or number.scale > 18) return error.UnsupportedDecimalUnits;
+            }
+            if (linear) {
+                if (!try optionalEquals(datum, "ctMult", "1")) return error.UnsupportedContractMultiplier;
+                if (definition.contract_value) |number| {
+                    if (number.coefficient <= 0 or number.scale > 18) return error.UnsupportedDecimalUnits;
+                }
+                if (definition.contract_type != .linear or definition.contract_value == null or
+                    !try optionalEquals(datum, "ctValCcy", b.base) or !try optionalEquals(datum, "settleCcy", b.quote)) return error.InvalidField;
+            } else if (!try optionalEquals(datum, "baseCcy", b.base) or !try optionalEquals(datum, "quoteCcy", b.quote)) return error.InvalidField;
+        }
+        if (binding == null and instrument == .btc_usdt_swap and
             (definition.contract_type == null or definition.contract_value == null or
                 !definition.contract_value_currency_btc or
                 !definition.settlement_currency_usdt))
@@ -497,7 +541,7 @@ pub const Decoder = struct {
 
     fn decodeBook(
         self: *Decoder,
-        instrument: Instrument,
+        instrument: FeedInstrument,
         action: []const u8,
         datum: std.json.ObjectMap,
         times: Times,
@@ -618,7 +662,7 @@ pub const Decoder = struct {
 
     fn recordGap(
         self: *Decoder,
-        instrument: Instrument,
+        instrument: FeedInstrument,
         reason: GapReason,
         previous: i64,
         sequence: i64,
@@ -647,14 +691,14 @@ pub const Decoder = struct {
     fn decodeReference(
         self: *Decoder,
         kind: ReferencePriceKind,
-        instrument: Instrument,
+        instrument: FeedInstrument,
         datum: std.json.ObjectMap,
         times: Times,
         raw_evidence: RawEvidenceRef,
         batch: *IngressBatch,
     ) !void {
         const source_ms = try requiredMillis(datum, "ts");
-        const declared = try parseInstrument(try stringField(datum, "instId"));
+        const declared = try self.parseInstrument(try stringField(datum, "instId"));
         if ((kind == .mark and declared != .btc_usdt_swap) or
             (kind == .index and declared != .btc_usdt_spot))
             return error.UnsupportedInstrument;
@@ -676,7 +720,7 @@ pub const Decoder = struct {
         raw_evidence: RawEvidenceRef,
         batch: *IngressBatch,
     ) !void {
-        if (try parseInstrument(try stringField(datum, "instId")) != .btc_usdt_swap)
+        if (try self.parseInstrument(try stringField(datum, "instId")) != .btc_usdt_swap)
             return error.UnsupportedInstrument;
         const source_ms = try requiredMillis(datum, "ts");
         const funding: FundingRatePublished = .{
@@ -697,19 +741,21 @@ pub const Decoder = struct {
         }));
     }
 
-    fn bookState(self: *Decoder, instrument: Instrument) *BookState {
+    fn bookState(self: *Decoder, instrument: FeedInstrument) *BookState {
         return switch (instrument) {
             .btc_usdt_spot => &self.spot_book,
             .btc_usdt_swap => &self.swap_book,
             .btc_usdc_spot => &self.usdc_book,
+            else => &self.dynamic_books[@intFromEnum(instrument)],
         };
     }
 
-    fn bookStateConst(self: *const Decoder, instrument: Instrument) *const BookState {
+    fn bookStateConst(self: *const Decoder, instrument: FeedInstrument) *const BookState {
         return switch (instrument) {
             .btc_usdt_spot => &self.spot_book,
             .btc_usdt_swap => &self.swap_book,
             .btc_usdc_spot => &self.usdc_book,
+            else => &self.dynamic_books[@intFromEnum(instrument)],
         };
     }
 };
@@ -738,7 +784,7 @@ fn healthEvent(
     times: Times,
     source_time_utc_ns: ?u64,
     raw_evidence: RawEvidenceRef,
-    instrument: Instrument,
+    instrument: FeedInstrument,
     health: MarketDataHealth,
     reason: ?GapReason,
     last: ?i64,
@@ -762,7 +808,7 @@ fn healthEvent(
     } });
 }
 
-fn parseInstrument(text: []const u8) !Instrument {
+fn parseFeedInstrument(text: []const u8) !FeedInstrument {
     if (std.mem.eql(u8, text, "BTC-USDC")) return .btc_usdc_spot;
     if (std.mem.eql(u8, text, "BTC-USDT")) return .btc_usdt_spot;
     if (std.mem.eql(u8, text, "BTC-USDT-SWAP")) return .btc_usdt_swap;
@@ -947,7 +993,7 @@ fn valueDecimal(value: std.json.Value) !Decimal {
 
 fn sourceIdentity(
     discriminator: []const u8,
-    instrument: Instrument,
+    instrument: FeedInstrument,
     cursor: u64,
 ) [Sha256.digest_length]u8 {
     var hasher = Sha256.init(.{});
@@ -961,7 +1007,7 @@ fn sourceIdentity(
 
 fn sourceIdentityFromContent(
     discriminator: []const u8,
-    instrument: Instrument,
+    instrument: FeedInstrument,
     content_hash: [Sha256.digest_length]u8,
 ) [Sha256.digest_length]u8 {
     var hasher = Sha256.init(.{});
@@ -972,7 +1018,7 @@ fn sourceIdentityFromContent(
 }
 
 fn healthIdentity(
-    instrument: Instrument,
+    instrument: FeedInstrument,
     health: MarketDataHealth,
     reason: ?GapReason,
     last: ?i64,
@@ -1192,7 +1238,7 @@ test "instrument mark index and funding frames normalize without floats" {
     );
     try std.testing.expectEqual(@as(u8, 1), instrument.event_count);
     const definition = instrument.events[0].payload.instrument_definition_observed;
-    try std.testing.expectEqual(Instrument.btc_usdt_swap, definition.instrument);
+    try std.testing.expectEqual(FeedInstrument.btc_usdt_swap, definition.instrument);
     try std.testing.expectEqual(Decimal{ .coefficient = 1, .scale = 2 }, definition.contract_value.?);
     try std.testing.expectEqual(@as(u8, 1), definition.upcoming_changes.len);
     try std.testing.expectEqualStrings("tickSz", definition.upcoming_changes.items[0].parameter.slice());
@@ -1240,7 +1286,7 @@ test "rule observations are candidates and later changes remain explicit facts" 
         \\{"arg":{"channel":"instruments","instType":"SPOT"},"data":[{"instType":"SPOT","instId":"BTC-USDT","state":"live","ruleType":"normal","tickSz":"0.001","lotSz":"0.00000001","minSz":"0.00001","maxLmtSz":"100","maxMktSz":"10","maxLmtAmt":"1000000","maxMktAmt":"100000","ctType":"","ctVal":"","ctValCcy":"","settleCcy":"","tradeQuoteCcyList":["USDT"],"upcChg":[],"ts":"1800000001000"}]}
     );
     try std.testing.expectEqual(RejectReason.invalid_field, conflicting.rejection.?);
-    try std.testing.expect(!decoder.rules_observed[@intFromEnum(Instrument.btc_usdt_spot)]);
+    try std.testing.expect(!decoder.rules_observed[@intFromEnum(FeedInstrument.btc_usdt_spot)]);
 }
 
 test "public REST bootstrap shape preserves absent source time" {
@@ -1251,7 +1297,7 @@ test "public REST bootstrap shape preserves absent source time" {
     );
     try std.testing.expectEqual(@as(u8, 1), batch.event_count);
     try std.testing.expectEqual(@as(?u64, null), batch.events[0].envelope.source_time_utc_ns);
-    try std.testing.expect(decoder.rules_observed[@intFromEnum(Instrument.btc_usdt_spot)]);
+    try std.testing.expect(decoder.rules_observed[@intFromEnum(FeedInstrument.btc_usdt_spot)]);
 }
 
 test "book duplicates are idempotent and gaps require a fresh snapshot" {
@@ -1380,4 +1426,69 @@ test "malformed book frame revokes health after raw commit" {
     const health = malformed.events[0].payload.market_data_health_changed;
     try std.testing.expectEqual(GapReason.malformed_book_frame, health.reason.?);
     try std.testing.expect(!decoder.isBookHealthy(.btc_usdt_spot));
+}
+
+/// Observational catalogue units use a fixed decimal representation, never core asset activation.
+pub const CatalogueItem = struct {
+    symbol: []const u8,
+    base: []const u8,
+    quote: []const u8,
+    product: enum { spot, linear },
+    tick: []const u8,
+    lot: []const u8,
+    contract_value: ?[]const u8,
+    minimum_size: []const u8,
+    maximum_limit_size: ?Decimal,
+    maximum_market_size: ?Decimal,
+    maximum_limit_notional: ?Decimal,
+    maximum_market_notional: ?Decimal,
+    contract_multiplier: ?[]const u8,
+    state: []const u8,
+};
+
+pub fn catalogueItem(value: std.json.Value) !CatalogueItem {
+    const datum = try asObject(value);
+    const symbol = try stringField(datum, "instId");
+    const kind = try stringField(datum, "instType");
+    var parts = std.mem.splitScalar(u8, symbol, '-');
+    const symbol_base = parts.next() orelse return error.InvalidField;
+    const symbol_quote = parts.next() orelse return error.InvalidField;
+    const linear = std.mem.eql(u8, kind, "SWAP");
+    if (linear) {
+        if (!std.mem.eql(u8, parts.next() orelse return error.InvalidField, "SWAP")) return error.InvalidField;
+        if (!std.mem.eql(u8, try stringField(datum, "ctType"), "linear")) return error.UnsupportedContractUnits;
+        if (!std.mem.eql(u8, try stringField(datum, "ctMult"), "1")) return error.UnsupportedContractMultiplier;
+    } else if (!std.mem.eql(u8, kind, "SPOT")) return error.UnsupportedInstrument;
+    if (parts.next() != null) return error.InvalidField;
+    const base = if (linear) try stringField(datum, "ctValCcy") else try stringField(datum, "baseCcy");
+    const quote = if (linear) try stringField(datum, "settleCcy") else try stringField(datum, "quoteCcy");
+    for ([_][]const u8{ base, quote }) |code| {
+        if (code.len == 0 or code.len > 32) return error.UnsupportedAssetUnits;
+        for (code) |char| if (!std.ascii.isUpper(char) and !std.ascii.isDigit(char) and char != '_') return error.UnsupportedAssetUnits;
+    }
+    if (!std.mem.eql(u8, base, symbol_base) or !std.mem.eql(u8, quote, symbol_quote)) return error.UnsupportedAssetUnits;
+    var decoder: Decoder = .{};
+    const instrument = try decoder.bind(.{ .symbol = symbol, .instrument = 1, .product = if (linear) .linear else .spot, .base = base, .quote = quote });
+    var batch: IngressBatch = .{ .raw_evidence = .{ .stream_sequence = 1, .sha256 = @splat(0) } };
+    try decoder.decodeInstrument(instrument, datum, .{ .receive_time_utc_ns = 0, .wall_time_utc_ns = 0, .monotonic_time_ns = 0 }, batch.raw_evidence, &batch);
+    const definition = batch.eventSlice()[0].payload.instrument_definition_observed;
+    if (definition.state != .live) return error.InstrumentNotLive;
+    if (definition.rule_type != .normal) return error.UnsupportedRuleType;
+    for ([_]Decimal{ definition.tick_size, definition.lot_size, definition.minimum_size }) |number| {
+        if (number.coefficient <= 0 or number.scale > 18) return error.UnsupportedDecimalUnits;
+    }
+    if (definition.contract_value) |number| {
+        if (number.coefficient <= 0 or number.scale > 18) return error.UnsupportedContractUnits;
+    }
+    return .{ .symbol = symbol, .base = base, .quote = quote, .product = if (linear) .linear else .spot, .tick = try stringField(datum, "tickSz"), .lot = try stringField(datum, "lotSz"), .contract_value = if (linear) try stringField(datum, "ctVal") else null, .minimum_size = try stringField(datum, "minSz"), .maximum_limit_size = definition.maximum_limit_size, .maximum_market_size = definition.maximum_market_size, .maximum_limit_notional = definition.maximum_limit_notional, .maximum_market_notional = definition.maximum_market_notional, .contract_multiplier = if (linear) try stringField(datum, "ctMult") else null, .state = try stringField(datum, "state") };
+}
+
+test "dynamic OKX catalogue retains explicit spot and linear units" {
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator,
+        \\{"instId":"ETH-USDT-SWAP","instType":"SWAP","ctType":"linear","ctMult":"1","ctVal":"0.1","ctValCcy":"ETH","settleCcy":"USDT","state":"live","ruleType":"normal","tickSz":"0.01","lotSz":"1","minSz":"1","tradeQuoteCcyList":[],"upcChg":[]}
+    , .{});
+    defer parsed.deinit();
+    const item = try catalogueItem(parsed.value);
+    try std.testing.expectEqualStrings("ETH", item.base);
+    try std.testing.expectEqualStrings("0.1", item.contract_value.?);
 }

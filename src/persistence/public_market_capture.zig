@@ -3,7 +3,7 @@ const std = @import("std");
 const raw = @import("raw_ingress.zig");
 const durable = @import("durable_store.zig");
 const protocol = @import("../adapters/okx/okx_public_market.zig");
-pub const max_capture_bytes = 120 * 1024;
+pub const max_capture_bytes = 4 * 1024 * 1024;
 const header_origin: u16 = 0x5348;
 const chunk_origin: u16 = 0x5342;
 const Header = struct { schema: u16 = 1, length: u32, chunks: u16, digest: [32]u8, metadata: []const u8 };
@@ -11,12 +11,13 @@ const Header = struct { schema: u16 = 1, length: u32, chunks: u16, digest: [32]u
 pub const Sink = struct {
     durable_sink: raw.DurableSink,
     budget: u64,
+    max_bytes: usize = 120 * 1024,
     written: u64 = 0,
     failed: bool = false,
     digest: [32]u8 = @splat(0),
 
     pub fn append(self: *Sink, allocator: std.mem.Allocator, metadata: []const u8, record: protocol.RawIngressRecord, bytes: []const u8) protocol.RawSinkError!u64 {
-        if (self.failed or bytes.len == 0 or bytes.len > max_capture_bytes or metadata.len > 8192) return error.Unavailable;
+        if (self.failed or bytes.len == 0 or bytes.len > @min(self.max_bytes, max_capture_bytes) or metadata.len > 8192) return error.Unavailable;
         var digest: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
         if (record.byte_len != bytes.len or !std.mem.eql(u8, &digest, &record.sha256)) return error.Unavailable;

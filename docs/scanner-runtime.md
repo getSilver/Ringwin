@@ -20,7 +20,7 @@ python python/control_plane_node.py --directory .scratch/run/scanner --ui D:/git
 
 `scanner-config.json` 继续独立版本化保存范围；控制面写入的每条范围携带 `setting_id`，并校验它对应的 Venue／环境。重启恢复设置和范围，默认 Stopped，不自动请求行情。
 
-01 阶段暂时保留 `scanner-market.json` 作为已有来源的内部部署过渡。没有此文件仍可保存设置、在扫描范围看到名称和“目录未加载”状态，但本票不提供动态发现；02／03 接入动态目录，06 移除该文件。用户无需为新增设置创建静态目录。已登记来源在配置范围后可走现有实际 Python／Zig 链路。
+02 阶段：保存 OKX 设置会异步请求公共 SPOT／SWAP 目录，已有静态来源也会发现新增品种，无需 `scanner-market.json`。发现只登记目录；应用范围并启动扫描才创建行情订阅，单来源也可观察盘口。完整动态目录、精确规则与来源证据原子保存到 `scanner-discovery.json`；重启从缓存恢复身份和范围，仍默认停止且不请求网络。发现失败保留原目录，设置仍可见并展示原因；再次保存失败的来源可重试。自动刷新／退市由 04 交付。`scanner-market.json` 目前仅是旧来源和 Hyperliquid 的内部过渡，03 接入后者动态发现，06 移除旧文件。
 
 扫描视图的 `exchanges` 独立于 `catalogue`，包含设置字段及 `source_id`（Venue／环境）、`products`、`catalogue_state`、`catalogue_error`；状态为 unloaded／registered／loading／ready／failed。目录行携带 `setting_id`。未加载、加载中和失败不移除设置选项；未保存的来源不可经控制面加入范围。交易所账户预览与这份设置分别管理；环境切换和删除的订阅协调由 05 实施。
 
@@ -28,7 +28,7 @@ python python/control_plane_node.py --directory .scratch/run/scanner --ui D:/git
 
 | Venue | 请求环境 | 实际公共来源 | 当前产品／目录 |
 |---|---|---|---|
-| OKX (1) | production | production REST | BTC-USDT 现货、BTC-USDC 现货、BTC-USDT-SWAP 线性永续 |
+| OKX (1) | production | production REST | 公共元数据发现的 live／normal 现货及可明确单位的线性永续 |
 | OKX (1) | demo | production 公共 REST，明确标注共享来源 | 同上，不生成 Demo 成交或资金资格 |
 | Hyperliquid (21) | production | 主网公共 info REST | 显式登记的标准 USDC 线性永续 |
 | Hyperliquid (21) | testnet | Testnet 公共 info REST | 显式登记的标准 USDC 线性永续 |
@@ -37,7 +37,7 @@ python python/control_plane_node.py --directory .scratch/run/scanner --ui D:/git
 
 当前在线目录和区域端点可用性没有验收，不能因本表列出协议能力就假定某个市场仍在线。实际元数据不匹配时失败关闭，不改名、回退或替换资产。
 
-配置顶层仅含 `schema: 1`、`assets`、`bindings`。`assets` 复用扫描资产合同：`identity` 十进制字符串、`code`、`atomic_scale`。每个 binding 包含：
+旧内部配置顶层仅含 `schema: 1`、`assets`、`bindings`。`assets` 复用扫描资产合同：`identity` 十进制字符串、`code`、`atomic_scale`。每个 binding 包含：
 
 | 字段 | 语义 |
 |---|---|
@@ -50,6 +50,8 @@ python python/control_plane_node.py --directory .scratch/run/scanner --ui D:/git
 | binding | Hyperliquid 正式 `HyperliquidMarketFeed.Binding` JSON：coin、universe_index、instrument、product=isolated_linear、size_decimals、rules_version、expected_metadata_digest（32 字节数组）、price_scale/tick_atoms、quantity_scale/lot_atoms 及必要代币身份 |
 | raw_budget_bytes（可选） | 每来源会话 RawIngress 上限，2048 到 4194304，默认 4 MiB |
 
+OKX 动态目录的 `specification` 返回产品、资产、状态、tick、lot、最小／最大数量和名义约束及合约面值／乘数；其规范内容摘要决定规则版本。线性合约必须明确 `ctValCcy` 为基础币、`settleCcy` 为符号报价币、`ctMult=1`，基础币 lot = 协议 lot × ctVal。其他单位返回实际拒绝原因。新增资产使用固定 18 位的小数观察表示与稳定身份，不从 lot 推导核心 AssetDefinition，也不激活核心规则或交易权限。重复发现及重启不改变品种身份；现有三个兼容品种保留原 InstrumentIdentity。
+
 Hyperliquid 摘要来自受批准的目录配置，不能用本次观察值自动替换。算法见[公共行情合同](research/2026-11-02-hyperliquid-public-market.md)。正常启动不生成研究计划、模型、校准或费率；缺项返回 pending。即时观察价差不是完整周期净收益。
 
 ## 数据与生命周期
@@ -58,7 +60,7 @@ Hyperliquid 摘要来自受批准的目录配置，不能用本次观察值自�
 
 正常 transport 使用有超时和容量限制的公共 HTTPS REST。OKX 调用 `/api/v5/public/instruments` 和 `/api/v5/market/books?sz=5`；Hyperliquid 调用 `/info` 的 `meta` 和 `l2Book`。依据 [OKX 官方接口](https://www.okx.com/docs-v5)及 [Hyperliquid 官方接口](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api)。元数据在来源启动及每 30 秒刷新，每轮轮询发布完整替换快照。
 
-当前最多登记 16 个来源，单个完整协议响应最多 120 KiB；超限明确失效，不截取部分元数据继续计算。
+动态目录最多 8192 条；每个 OKX SPOT／SWAP 响应最多 4096 行、4 MiB，并受原有 4 MiB 捕获预算约束。实际同时订阅最多 16 个品种，超限要求缩小资产范围；每品种拥有独立 native worker／session／动态绑定，不共享注册槽位。普通行情及订阅元数据响应仍最多 120 KiB，超限明确失败，不截取部分目录。Zig 单个 feed 有 16 个状态槽（3 个保留兼容、13 个动态）；畸形帧可同时撤销全部槽位的健康状态。
 
 每个公共来源使用独立只读 native worker。private pipe 复用现有有界请求实现，校验 schema、会话、连续序号、时间和深度 codec；不涉及 StrategyHost，不增加共享内存。来源终止后迟到结果被拒绝。停止／暂停先撤销候选，然后释放自身订阅；其他消费者的所有权保留。
 
@@ -78,3 +80,5 @@ node tools/verify-scanner-integration-browser.mjs --ui-root D:/github/RingwinUi-
 只验证本次设置／范围改动且不构建整个前端时，可运行 `node tools/verify-scanner-integration-browser.mjs --dev --ui-root D:/github/RingwinUi`。runner 启动本地 Vite 并代理到临时认证后端，使用相同正式页面；要求现有 `ringwin-scanner-market` 二进制、Playwright 和 Chromium。设置存储及服务恢复回归为 `python -m unittest discover -s python -p test_exchange_settings.py`，范围与真实适配器回归为 `test_scanner_console.py`、`test_scanner_integration.py`。
 
 本交付只验项目内部整合。在线端点、真实盘口、新鲜度、限流和长期运行另验；trading_qualified 恒为 false，12–15 及经济／运行／生产资格不变。
+
+OKX 动态发现定向浏览器验收：`node tools/verify-okx-discovery-browser.mjs --dev --ui-root D:/github/RingwinUi`。仅依赖定向生成的 native worker，不需要全量构建；Zig 直接测试应沿用 build.zig 的 `--stack 536870912`，并按用例名称过滤，避免入口的传递测试扩展到无关核心模块。

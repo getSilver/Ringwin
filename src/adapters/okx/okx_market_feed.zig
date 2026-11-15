@@ -14,6 +14,7 @@ pub const btc_usdt_swap: canonical.InstrumentIdentity = 0x4f4b58_00000002;
 
 const State = enum { idle, running, stopped };
 const Rules = struct {
+    identity: canonical.InstrumentIdentity,
     tick_size: okx.Decimal,
     lot_size: okx.Decimal,
     version: u64,
@@ -27,16 +28,32 @@ const BookState = struct {
 
 pub const OkxMarketFeed = struct {
     decoder: okx.Decoder = .{},
+    rejected: bool = false,
     raw_sink: okx.RawSink,
     state: State = .idle,
     config: ?market.Config = null,
     pending: ?canonical.AdapterOutputBatch = null,
     next_event_sequence: u64 = 0,
-    rules: [3]?Rules = @splat(null),
-    books: [3]BookState = @splat(.{}),
+    rules: [okx.max_bindings]?Rules = @splat(null),
+    books: [okx.max_bindings]BookState = @splat(.{}),
 
     pub fn init(raw_sink: okx.RawSink) OkxMarketFeed {
         return .{ .raw_sink = raw_sink };
+    }
+
+    pub fn bind(self: *OkxMarketFeed, binding: okx.Binding) !okx.FeedInstrument {
+        if (self.state != .idle) return error.AlreadyStarted;
+        return self.decoder.bind(binding);
+    }
+
+    pub fn instrumentIdentity(self: *const OkxMarketFeed, instrument: okx.FeedInstrument) canonical.InstrumentIdentity {
+        if (self.decoder.bindings[@intFromEnum(instrument)]) |binding| return binding.instrument;
+        return switch (instrument) {
+            .btc_usdt_spot => btc_usdt_spot,
+            .btc_usdt_swap => btc_usdt_swap,
+            .btc_usdc_spot => btc_usdc_spot,
+            else => unreachable,
+        };
     }
 
     pub fn adapter(self: *OkxMarketFeed) market.MarketFeedAdapter {
@@ -48,7 +65,8 @@ pub const OkxMarketFeed = struct {
         try self.requireRunning();
         if (self.pending != null) return error.OutputPending;
         const ingress = try self.decoder.ingest(allocator, self.raw_sink, try self.sourceSession(), times, raw);
-        try self.stage(ingress);
+        self.rejected = ingress.rejection != null;
+        try self.stage(ingress, times);
     }
 
     pub fn replay(self: *OkxMarketFeed, allocator: std.mem.Allocator, source_session: u64, times: okx.Times, evidence: okx.RawEvidenceRef, raw: []const u8) !void {
@@ -56,18 +74,37 @@ pub const OkxMarketFeed = struct {
         if (self.pending != null) return error.OutputPending;
         if (source_session != try self.sourceSession()) return error.SourceSessionMismatch;
         const ingress = try self.decoder.replay(allocator, times, evidence, raw);
-        try self.stage(ingress);
+        self.rejected = ingress.rejection != null;
+        try self.stage(ingress, times);
     }
 
-    fn stage(self: *OkxMarketFeed, ingress: okx.IngressBatch) !void {
+    fn stage(self: *OkxMarketFeed, ingress: okx.IngressBatch, times: okx.Times) !void {
         var output: canonical.AdapterOutputBatch = .{};
+        if (ingress.rejection != null) {
+            var dynamic = false;
+            for (self.decoder.bindings) |binding| if (binding != null) {
+                dynamic = true;
+            };
+            if (dynamic) {
+                for (&self.rules, 0..) |*rules, index| if (rules.* != null) {
+                    const instrument = self.instrumentIdentity(@enumFromInt(index));
+                    rules.* = null;
+                    self.decoder.rules_observed[index] = false;
+                    self.decoder.instrument_memory[index] = .{};
+                    self.books[index].ready = false;
+                    try self.append(&output, .{ .source_time_utc_ns = null, .receive_time_utc_ns = times.receive_time_utc_ns, .monotonic_time_ns = times.monotonic_time_ns, .wall_time_utc_ns = times.wall_time_utc_ns, .raw_evidence = ingress.raw_evidence, .source_fact_identity = ingress.raw_evidence.sha256 }, instrument, ingress.raw_evidence.stream_sequence, null, .{ .market_data_health_changed = .{ .instrument = instrument, .health = .gap } });
+                };
+                if (output.len != 0) self.pending = output;
+                return;
+            }
+        }
         for (ingress.eventSlice()) |event| {
             self.translate(&output, event) catch |err| {
                 if (event.payload == .l2_book_snapshot or event.payload == .l2_book_delta) {
                     const instrument = if (event.payload == .l2_book_snapshot) event.payload.l2_book_snapshot.instrument else event.payload.l2_book_delta.instrument;
                     self.books[@intFromEnum(instrument)].ready = false;
                     var failed: canonical.AdapterOutputBatch = .{};
-                    try self.append(&failed, event.envelope, instrumentIdentity(instrument), event.envelope.raw_evidence.stream_sequence, null, .{ .market_data_health_changed = .{ .instrument = instrumentIdentity(instrument), .health = .gap } });
+                    try self.append(&failed, event.envelope, self.instrumentIdentity(instrument), event.envelope.raw_evidence.stream_sequence, null, .{ .market_data_health_changed = .{ .instrument = self.instrumentIdentity(instrument), .health = .gap } });
                     self.pending = failed;
                 }
                 return err;
@@ -78,7 +115,7 @@ pub const OkxMarketFeed = struct {
 
     /// The caller supplies the actual subscription acknowledgement/control
     /// frame, so the reset health fact has genuine RawIngress evidence too.
-    pub fn beginSubscription(self: *OkxMarketFeed, instrument: okx.Instrument, times: okx.Times, raw: []const u8) !void {
+    pub fn beginSubscription(self: *OkxMarketFeed, instrument: okx.FeedInstrument, times: okx.Times, raw: []const u8) !void {
         try self.requireRunning();
         if (self.pending != null) return error.OutputPending;
         if (raw.len > okx.max_raw_frame_bytes or raw.len > std.math.maxInt(u32)) return error.FrameTooLarge;
@@ -99,10 +136,10 @@ pub const OkxMarketFeed = struct {
         try self.append(
             &output,
             .{ .source_time_utc_ns = null, .receive_time_utc_ns = times.receive_time_utc_ns, .monotonic_time_ns = times.monotonic_time_ns, .wall_time_utc_ns = times.wall_time_utc_ns, .raw_evidence = evidence, .source_fact_identity = digest },
-            instrumentIdentity(instrument),
+            self.instrumentIdentity(instrument),
             evidence.stream_sequence,
             null,
-            .{ .market_data_health_changed = .{ .instrument = instrumentIdentity(instrument), .health = health(reset.health) } },
+            .{ .market_data_health_changed = .{ .instrument = self.instrumentIdentity(instrument), .health = health(reset.health) } },
         );
         self.pending = output;
     }
@@ -151,10 +188,10 @@ pub const OkxMarketFeed = struct {
             .instrument_definition_observed => |definition| {
                 const index = @intFromEnum(definition.instrument);
                 const version = (self.config orelse return error.NotStarted).config_version;
-                self.rules[index] = .{ .tick_size = definition.tick_size, .lot_size = definition.lot_size, .version = version, .contract_value = definition.contract_value, .state = definition.state };
+                self.rules[index] = .{ .identity = self.instrumentIdentity(definition.instrument), .tick_size = definition.tick_size, .lot_size = definition.lot_size, .version = version, .contract_value = definition.contract_value, .state = definition.state };
                 self.books[index].ready = false;
-                try self.append(output, event.envelope, instrumentIdentity(definition.instrument), event.envelope.raw_evidence.stream_sequence, null, .{
-                    .instrument_definition_observed = .{ .instrument = instrumentIdentity(definition.instrument), .rules_version = version },
+                try self.append(output, event.envelope, self.instrumentIdentity(definition.instrument), event.envelope.raw_evidence.stream_sequence, null, .{
+                    .instrument_definition_observed = .{ .instrument = self.instrumentIdentity(definition.instrument), .rules_version = version },
                 });
             },
             .l2_book_snapshot => |snapshot| {
@@ -162,8 +199,8 @@ pub const OkxMarketFeed = struct {
                 const rules = self.rules[index] orelse return error.MissingInstrumentRules;
                 if (snapshot.bids.len == 0 or snapshot.asks.len == 0) {
                     self.books[index].ready = false;
-                    return self.append(output, event.envelope, instrumentIdentity(snapshot.instrument), event.envelope.raw_evidence.stream_sequence, null, .{
-                        .market_data_health_changed = .{ .instrument = instrumentIdentity(snapshot.instrument), .health = .gap },
+                    return self.append(output, event.envelope, self.instrumentIdentity(snapshot.instrument), event.envelope.raw_evidence.stream_sequence, null, .{
+                        .market_data_health_changed = .{ .instrument = self.instrumentIdentity(snapshot.instrument), .health = .gap },
                     });
                 }
                 const bid = try price(snapshot.instrument, rules, snapshot.bids.slice()[0].price);
@@ -193,17 +230,17 @@ pub const OkxMarketFeed = struct {
                     if (i < depth.ask_count) depth.asks[i] = .{ .ticks = px.ticks, .lots = qty.lots };
                 }
                 const sequence = try sourceSequence(snapshot.source_sequence);
-                try @import("../../market/depth_snapshot.zig").validate(.{ .instrument = instrumentIdentity(snapshot.instrument), .sequence = sequence, .depth = depth, .best_bid = bid, .best_ask = ask, .best_bid_quantity = bid_quantity, .best_ask_quantity = ask_quantity });
+                try @import("../../market/depth_snapshot.zig").validate(.{ .instrument = self.instrumentIdentity(snapshot.instrument), .sequence = sequence, .depth = depth, .best_bid = bid, .best_ask = ask, .best_bid_quantity = bid_quantity, .best_ask_quantity = ask_quantity });
                 self.books[index] = .{ .ready = true, .depth = depth };
-                try self.append(output, event.envelope, instrumentIdentity(snapshot.instrument), sequence, null, .{
-                    .l2_book_snapshot = .{ .instrument = instrumentIdentity(snapshot.instrument), .sequence = sequence, .depth = depth, .best_bid = bid, .best_ask = ask, .best_bid_quantity = bid_quantity, .best_ask_quantity = ask_quantity, .next_ask = if (depth.ask_count > 1) .{ .instrument = bid.instrument, .rules_version = rules.version, .ticks = depth.asks[1].ticks } else null, .next_ask_quantity = if (depth.ask_count > 1) .{ .instrument = bid.instrument, .rules_version = rules.version, .lots = depth.asks[1].lots.? } else null },
+                try self.append(output, event.envelope, self.instrumentIdentity(snapshot.instrument), sequence, null, .{
+                    .l2_book_snapshot = .{ .instrument = self.instrumentIdentity(snapshot.instrument), .sequence = sequence, .depth = depth, .best_bid = bid, .best_ask = ask, .best_bid_quantity = bid_quantity, .best_ask_quantity = ask_quantity, .next_ask = if (depth.ask_count > 1) .{ .instrument = bid.instrument, .rules_version = rules.version, .ticks = depth.asks[1].ticks } else null, .next_ask_quantity = if (depth.ask_count > 1) .{ .instrument = bid.instrument, .rules_version = rules.version, .lots = depth.asks[1].lots.? } else null },
                 });
             },
             .l2_book_delta => |delta| try self.translateDelta(output, event.envelope, delta),
             .reference_price => |reference| {
                 const rules = self.rules[@intFromEnum(reference.instrument)] orelse return error.MissingInstrumentRules;
-                try self.append(output, event.envelope, instrumentIdentity(reference.instrument), event.envelope.raw_evidence.stream_sequence, null, .{
-                    .reference_price = .{ .instrument = instrumentIdentity(reference.instrument), .kind = switch (reference.kind) {
+                try self.append(output, event.envelope, self.instrumentIdentity(reference.instrument), event.envelope.raw_evidence.stream_sequence, null, .{
+                    .reference_price = .{ .instrument = self.instrumentIdentity(reference.instrument), .kind = switch (reference.kind) {
                         .mark => .mark,
                         .index => .index,
                     }, .price = try price(reference.instrument, rules, reference.price) },
@@ -211,15 +248,15 @@ pub const OkxMarketFeed = struct {
             },
             .funding_rate_published => |funding| {
                 const rate = try canonicalDecimal(funding.predicted_rate).exactAtoms(6);
-                try self.append(output, event.envelope, instrumentIdentity(funding.instrument), event.envelope.raw_evidence.stream_sequence, null, .{
-                    .funding_rate_published = .{ .instrument = instrumentIdentity(funding.instrument), .rate_ppm = std.math.cast(i64, rate) orelse return error.FundingRateOverflow, .funding_time_utc_ns = funding.funding_time_utc_ns },
+                try self.append(output, event.envelope, self.instrumentIdentity(funding.instrument), event.envelope.raw_evidence.stream_sequence, null, .{
+                    .funding_rate_published = .{ .instrument = self.instrumentIdentity(funding.instrument), .rate_ppm = std.math.cast(i64, rate) orelse return error.FundingRateOverflow, .funding_time_utc_ns = funding.funding_time_utc_ns },
                 });
             },
             .market_data_health_changed => |change| {
                 if (change.health != .healthy) self.books[@intFromEnum(change.instrument)].ready = false;
                 if (change.health == .healthy and !self.books[@intFromEnum(change.instrument)].ready) return;
-                try self.append(output, event.envelope, instrumentIdentity(change.instrument), event.envelope.raw_evidence.stream_sequence, null, .{
-                    .market_data_health_changed = .{ .instrument = instrumentIdentity(change.instrument), .health = health(change.health) },
+                try self.append(output, event.envelope, self.instrumentIdentity(change.instrument), event.envelope.raw_evidence.stream_sequence, null, .{
+                    .market_data_health_changed = .{ .instrument = self.instrumentIdentity(change.instrument), .health = health(change.health) },
                 });
             },
         }
@@ -233,8 +270,8 @@ pub const OkxMarketFeed = struct {
         const previous = try sourceSequence(delta.previous_source_sequence);
         if (!book.ready or book.depth == null) {
             book.ready = false;
-            return self.append(output, envelope, instrumentIdentity(delta.instrument), sequence, previous, .{
-                .market_data_health_changed = .{ .instrument = instrumentIdentity(delta.instrument), .health = .gap },
+            return self.append(output, envelope, self.instrumentIdentity(delta.instrument), sequence, previous, .{
+                .market_data_health_changed = .{ .instrument = self.instrumentIdentity(delta.instrument), .health = .gap },
             });
         }
         var depth = book.depth.?;
@@ -243,7 +280,7 @@ pub const OkxMarketFeed = struct {
         try updateSide(&depth.asks, &depth.ask_count, delta.asks.slice(), delta.instrument, rules, false);
         if (depth.bid_count == 0 or depth.ask_count == 0) return error.IncompleteBookSnapshot;
         depth.visible_at_ns = envelope.receive_time_utc_ns;
-        const instrument = instrumentIdentity(delta.instrument);
+        const instrument = self.instrumentIdentity(delta.instrument);
         const bid: canonical.InstrumentPrice = .{ .instrument = instrument, .rules_version = rules.version, .ticks = depth.bids[0].ticks };
         const ask: canonical.InstrumentPrice = .{ .instrument = instrument, .rules_version = rules.version, .ticks = depth.asks[0].ticks };
         const bid_quantity: canonical.InstrumentQuantity = .{ .instrument = instrument, .rules_version = rules.version, .lots = depth.bids[0].lots.? };
@@ -260,11 +297,23 @@ pub const OkxMarketFeed = struct {
     fn append(self: *OkxMarketFeed, output: *canonical.AdapterOutputBatch, envelope: okx.EventEnvelope, instrument: canonical.InstrumentIdentity, source_sequence: u64, previous: ?u64, event: canonical.Payload) !void {
         const config = self.config orelse return error.NotStarted;
         self.next_event_sequence = std.math.add(u64, self.next_event_sequence, 1) catch return error.EventSequenceOverflow;
+        var fact_identity = envelope.source_fact_identity;
+        for (self.decoder.bindings) |binding| if (binding) |b| {
+            if (b.instrument == instrument) {
+                var encoded: [16]u8 = undefined;
+                std.mem.writeInt(u128, &encoded, instrument, .little);
+                var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+                hasher.update(&encoded);
+                hasher.update(&fact_identity);
+                fact_identity = hasher.finalResult();
+                break;
+            }
+        };
         try output.append(.{ .envelope = .{
             .event_type = @intFromEnum(canonical.eventType(event)),
             .schema_version = canonical.schema_version,
             .identity = .{ .stream = config.session, .sequence = self.next_event_sequence },
-            .source_fact_identity = std.mem.readInt(u128, envelope.source_fact_identity[0..16], .little),
+            .source_fact_identity = std.mem.readInt(u128, fact_identity[0..16], .little),
             .scope = .instrument,
             .venue = config.venue,
             .instrument = instrument,
@@ -278,26 +327,18 @@ pub const OkxMarketFeed = struct {
     }
 };
 
-fn instrumentIdentity(instrument: okx.Instrument) canonical.InstrumentIdentity {
-    return switch (instrument) {
-        .btc_usdt_spot => btc_usdt_spot,
-        .btc_usdt_swap => btc_usdt_swap,
-        .btc_usdc_spot => btc_usdc_spot,
-    };
-}
-
 fn canonicalDecimal(value: okx.Decimal) canonical.Decimal {
     return .{ .coefficient = value.coefficient, .scale = value.scale };
 }
 
-fn price(instrument: okx.Instrument, rules: Rules, value: okx.Decimal) !canonical.InstrumentPrice {
+fn price(_: okx.FeedInstrument, rules: Rules, value: okx.Decimal) !canonical.InstrumentPrice {
     const tick_atoms = try canonicalDecimal(rules.tick_size).exactAtoms(rules.tick_size.scale);
-    return canonical.InstrumentPrice.fromDecimal(instrumentIdentity(instrument), rules.version, canonicalDecimal(value), rules.tick_size.scale, tick_atoms);
+    return canonical.InstrumentPrice.fromDecimal(rules.identity, rules.version, canonicalDecimal(value), rules.tick_size.scale, tick_atoms);
 }
 
-fn quantity(instrument: okx.Instrument, rules: Rules, value: okx.Decimal) !canonical.InstrumentQuantity {
+fn quantity(_: okx.FeedInstrument, rules: Rules, value: okx.Decimal) !canonical.InstrumentQuantity {
     const lot_atoms = try canonicalDecimal(rules.lot_size).exactAtoms(rules.lot_size.scale);
-    return canonical.InstrumentQuantity.fromDecimal(instrumentIdentity(instrument), rules.version, canonicalDecimal(value), rules.lot_size.scale, lot_atoms);
+    return canonical.InstrumentQuantity.fromDecimal(rules.identity, rules.version, canonicalDecimal(value), rules.lot_size.scale, lot_atoms);
 }
 
 fn sourceSequence(value: i64) !u64 {
@@ -314,7 +355,7 @@ fn health(value: okx.MarketDataHealth) canonical.MarketDataHealth {
 }
 
 // Apply all updates to a candidate; a failed side never publishes partial depth.
-fn updateSide(levels: *[canonical.max_depth_levels]canonical.DepthLevel, count: *u8, updates: []const okx.BookLevel, instrument: okx.Instrument, rules: Rules, bids: bool) !void {
+fn updateSide(levels: *[canonical.max_depth_levels]canonical.DepthLevel, count: *u8, updates: []const okx.BookLevel, instrument: okx.FeedInstrument, rules: Rules, bids: bool) !void {
     for (updates, 0..) |update, update_index| {
         const px = try price(instrument, rules, update.price);
         const qty = try quantity(instrument, rules, update.quantity);
@@ -368,7 +409,7 @@ const test_times: okx.Times = .{ .receive_time_utc_ns = 1_800_000_000_000_000_00
 
 fn startTest(feed: *OkxMarketFeed) !market.MarketFeedAdapter {
     const adapter = feed.adapter();
-    try adapter.start(.{ .venue = 9, .environment = .demo, .subscription_set = 8, .config_version = 7, .session = 6, .output_capacity = 2 });
+    try adapter.start(.{ .venue = 9, .environment = .demo, .subscription_set = 8, .config_version = 7, .session = 6, .output_capacity = okx.max_events_per_ingress });
     return adapter;
 }
 
@@ -453,7 +494,7 @@ test "OKX implementation obeys the shared lifecycle and output backpressure cont
     var feed = OkxMarketFeed.init(sink.sink());
     const adapter = feed.adapter();
     try std.testing.expectError(error.InvalidConfig, adapter.start(.{ .venue = 9, .environment = .demo, .subscription_set = 8, .config_version = 7, .session = 6, .output_capacity = 1 }));
-    try market.testStartupContract(adapter, .{ .venue = 9, .environment = .demo, .subscription_set = 8, .config_version = 7, .session = 6, .output_capacity = 2 });
+    try market.testStartupContract(adapter, .{ .venue = 9, .environment = .demo, .subscription_set = 8, .config_version = 7, .session = 6, .output_capacity = okx.max_events_per_ingress });
     try feed.beginSubscription(.btc_usdt_spot, test_times, "{\"event\":\"subscribe\"}");
     try std.testing.expectError(error.OutputPending, adapter.stop(.{ .monotonic_ns = 1 }));
     _ = try adapter.tryDrain();
@@ -835,4 +876,58 @@ test "03 oversized captured frames revoke depth and replay before fresh recovery
         } else if (cut != 0) _ = try host.depthSnapshotInput(&projection, btc_usdt_spot, cut + 1, &wire, 10, 12);
         try std.testing.expectEqualDeep(projection.get(btc_usdt_spot), replayed.get(btc_usdt_spot));
     }
+}
+
+test "dynamic OKX bindings isolate identities and invalidate the entire bounded registry" {
+    const allocator = std.testing.allocator;
+    var sink = TestRawSink{};
+    const feed = try allocator.create(OkxMarketFeed);
+    defer allocator.destroy(feed);
+    feed.* = OkxMarketFeed.init(sink.sink());
+    var symbols: [13][]u8 = undefined;
+    var slots: [13]okx.FeedInstrument = undefined;
+    for (&symbols, &slots, 0..) |*symbol, *slot, index| {
+        symbol.* = try std.fmt.allocPrint(allocator, "TOKEN{d}-USDT", .{index});
+        slot.* = try feed.bind(.{ .symbol = symbol.*, .base = symbol.*[0 .. symbol.len - 5], .quote = "USDT", .product = .spot, .instrument = 100 + index });
+    }
+    defer for (symbols) |symbol| allocator.free(symbol);
+    try std.testing.expectError(error.DuplicateBinding, feed.bind(.{ .symbol = symbols[0], .base = "TOKEN0", .quote = "USDT", .product = .spot, .instrument = 999 }));
+    try std.testing.expectError(error.BindingCapacity, feed.bind(.{ .symbol = "EXTRA-USDT", .base = "EXTRA", .quote = "USDT", .product = .spot, .instrument = 999 }));
+    const adapter = try startTest(feed);
+    try feed.beginSubscription(slots[0], test_times, "{}");
+    const first = (try adapter.tryDrain()).?.events[0].envelope;
+    try feed.beginSubscription(slots[1], test_times, "{}");
+    const second = (try adapter.tryDrain()).?.events[0].envelope;
+    try std.testing.expect(first.source_fact_identity != second.source_fact_identity);
+    try std.testing.expectEqual(@as(u128, 100), first.instrument.?);
+    try std.testing.expectEqual(@as(u128, 101), second.instrument.?);
+    for (symbols, 0..) |symbol, index| {
+        const raw = try std.fmt.allocPrint(allocator,
+            \\{{"code":"0","data":[{{"instType":"SPOT","instId":"{s}","baseCcy":"TOKEN{d}","quoteCcy":"USDT","state":"live","ruleType":"normal","tickSz":"0.01","lotSz":"1","minSz":"1"}}]}}
+        , .{ symbol, index });
+        defer allocator.free(raw);
+        try feed.ingest(allocator, test_times, raw);
+        const batch = (try adapter.tryDrain()).?;
+        try std.testing.expectEqual(@as(u128, 100 + index), batch.events[0].event.instrument_definition_observed.instrument);
+    }
+    try feed.ingest(allocator, test_times, "{");
+    const invalidated = (try adapter.tryDrain()).?;
+    try std.testing.expectEqual(@as(u8, 13), invalidated.len);
+    for (invalidated.slice()) |event| try std.testing.expectEqual(canonical.MarketDataHealth.gap, event.event.market_data_health_changed.health);
+    feed.decoder.rest_book_instrument = slots[0];
+    const book =
+        \\{"code":"0","data":[{"ts":"1800000000000","seqId":1,"bids":[["1","1","0","1"]],"asks":[["2","1","0","1"]]}]}
+    ;
+    try std.testing.expectError(error.MissingInstrumentRules, feed.ingest(allocator, test_times, book));
+    const blocked = (try adapter.tryDrain()).?;
+    try std.testing.expectEqual(canonical.MarketDataHealth.gap, blocked.events[0].event.market_data_health_changed.health);
+    try feed.ingest(allocator, test_times,
+        \\{"code":"0","data":[{"instType":"SPOT","instId":"TOKEN0-USDT","baseCcy":"TOKEN0","quoteCcy":"USDT","state":"live","ruleType":"normal","tickSz":"0.01","lotSz":"1","minSz":"1"}]}
+    );
+    _ = try adapter.tryDrain();
+    try feed.beginSubscription(slots[0], test_times, "{}");
+    _ = try adapter.tryDrain();
+    try feed.ingest(allocator, test_times, book);
+    const recovered = (try adapter.tryDrain()).?;
+    try std.testing.expectEqual(canonical.MarketDataHealth.healthy, recovered.events[1].event.market_data_health_changed.health);
 }

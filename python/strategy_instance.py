@@ -125,7 +125,9 @@ class NativeAuthority:
     durable Writer. Neither a package nor HTTP can choose this connection.
     """
 
-    def __init__(self, process, *, timeout=3):
+    def __init__(self, process, *, timeout=3, max_frame_bytes=256 * 1024):
+        package.require(1 <= max_frame_bytes <= 5 * 1024 * 1024, "node frame capacity")
+        self.max_frame_bytes = max_frame_bytes
         self.process, self.timeout = process, timeout
         self.pipes = CandidatePipes(process, process.kill)
         self.lock = threading.Lock()
@@ -148,7 +150,7 @@ class NativeAuthority:
 
     def _exchange(self, request):
         data = package.canonical(request)
-        package.require(len(data) <= 256 * 1024, "node request capacity exceeded")
+        package.require(len(data) <= self.max_frame_bytes, "node request capacity exceeded")
         pending = b""
         deadline = time.monotonic() + self.timeout
         self.pipes.write(struct.pack("<I", len(data)) + data, self.timeout)
@@ -160,7 +162,7 @@ class NativeAuthority:
                 self.pipes.threads[1].join(timeout=0.1)
                 raise package.PackageError("native node disconnected: " + self.pipes.errors.decode("utf-8", "replace"))
             pending += chunk
-            package.require(len(pending) <= 256 * 1024, "node response capacity exceeded")
+            package.require(len(pending) <= self.max_frame_bytes, "node response capacity exceeded")
         package.require(pending.endswith(b"\n") and pending.count(b"\n") == 1, "invalid node response framing")
         result = json.loads(pending[:-1])
         package.require(type(result) is dict, "invalid native response")

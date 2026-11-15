@@ -211,15 +211,12 @@ class ControlPlaneApp:
         self.exchange_settings_store = ExchangeSettings(Path(directory)/"exchange-settings.json")
         self.scanner_runtime = None
         market_config = Path(directory)/"scanner-market.json"
-        if scanner_console is None and market_config.is_file():
-            from opportunity_scanner.scanner_runtime import ScannerRuntime
-            if market_config.stat().st_size > 65536:
-                raise ValueError("scanner market configuration capacity")
-            self.scanner_runtime = ScannerRuntime(directory, json.loads(market_config.read_text(encoding="utf-8")))
-            scanner_console = self.scanner_runtime.console
         if scanner_console is None:
-            from opportunity_scanner.scanner_console import CanonicalSource, ScannerConsole, History
-            scanner_console = ScannerConsole(CanonicalSource(), History(), config_path=Path(directory)/"scanner-config.json")
+            from opportunity_scanner.scanner_runtime import ScannerRuntime
+            if market_config.is_file() and market_config.stat().st_size > 65536:
+                raise ValueError("scanner market configuration capacity")
+            self.scanner_runtime = ScannerRuntime(directory, json.loads(market_config.read_text(encoding="utf-8")) if market_config.is_file() else dict(schema=1, assets=[], bindings=[]))
+            scanner_console = self.scanner_runtime.console
         self.scanner_console = scanner_console
         if scanner_console is not None and scanner_console.config_store is None:
             scanner_console.bind_config(Path(directory)/"scanner-config.json")
@@ -531,6 +528,11 @@ class ControlPlaneApp:
             return status, body
         try:
             result = self.exchange_settings_store.view() if request is None else self.exchange_settings_store.save(request)
+            if request is not None:
+                runtime = self.scanner_runtime
+                if runtime is not None:
+                    for setting in result["exchanges"]:
+                        runtime.request_discovery(setting)
             return 200, {"ok": True, "result": result}
         except (ValueError, KeyError, TypeError) as error:
             return 409 if "conflict" in str(error) else 400, {"ok": False, "error": str(error)}
