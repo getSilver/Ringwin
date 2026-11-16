@@ -9,8 +9,8 @@ import time
 import control_plane
 import control_plane_web
 import owner_session
-from opportunity_scanner.scanner_runtime import ScannerRuntime
-from test_scanner_integration import ProtocolTransport, DynamicOkxTransport, DynamicHyperliquidTransport, RefreshTransport, configuration
+from test_scanner_integration import ProtocolTransport, DynamicOkxTransport, DynamicHyperliquidTransport, RefreshTransport
+from unittest.mock import patch
 
 
 def main():
@@ -19,26 +19,29 @@ def main():
     parser.add_argument("--dynamic-okx", action="store_true")
     parser.add_argument("--dynamic-hyperliquid", action="store_true")
     parser.add_argument("--refresh", action="store_true")
-    parser.add_argument("--settings-lifecycle", action="store_true")
     args=parser.parse_args()
-    dynamic = args.dynamic_okx or args.dynamic_hyperliquid
     with tempfile.TemporaryDirectory(prefix="ringwin-scanner-internal-") as directory:
         now=[2_000_000_000,1_800_000_000_000_000_000]
         transport=DynamicHyperliquidTransport(now) if args.dynamic_hyperliquid else DynamicOkxTransport(now) if args.dynamic_okx else ProtocolTransport(now)
         if args.refresh:
-            transport = RefreshTransport(now, args.dynamic_hyperliquid)
-        config = dict(schema=1, assets=[], bindings=[]) if dynamic else configuration()
-        if args.settings_lifecycle:
-            alternative = configuration("demo")["bindings"][0]
-            alternative["observation_identity"] = "1101"
-            config["bindings"].append(alternative)
-        runtime=ScannerRuntime(directory,config,transport=transport,
-            clock=lambda:now[0],utc_clock=lambda:now[1],automatic=False)
+            if args.dynamic_okx or args.dynamic_hyperliquid:
+                transport = RefreshTransport(now, args.dynamic_hyperliquid)
+            else:
+                transport.okx, transport.hl = RefreshTransport(now), RefreshTransport(now, True)
         channel=control_plane.CommandServer(b"f"*32)
         owner_time=int(time.time())
-        app=control_plane_web.ControlPlaneApp(directory,channel,scanner_console=runtime.console,ui_path=args.ui,clock=lambda:owner_time)
-        if dynamic:
-            app.scanner_runtime = runtime
+        def assemble():
+            with patch("opportunity_scanner.scanner_runtime.PublicTransport", return_value=transport):
+                application=control_plane_web.ControlPlaneApp(directory,channel,ui_path=args.ui,clock=lambda:owner_time)
+            feeds=application.scanner_runtime
+            feeds.closing.set()
+            feeds.thread.join(timeout=15)
+            feeds.clock=lambda:now[0]
+            feeds.utc_clock=lambda:now[1]
+            feeds.console.clock=feeds.clock
+            feeds.closing.clear()
+            return application, feeds
+        app, runtime=assemble()
         passphrase="synthetic-internal-integration-only"
         app.setup(passphrase)
         server=control_plane_web.serve(app)
@@ -60,9 +63,32 @@ def main():
                 if command == "disconnect": transport.fail.add(21)
                 if command == "reconnect": transport.fail.clear()
                 if command == "expire": now[0]+=6_000_000_000
+                if command == "restart":
+                    closing.set(); publisher.join(timeout=15)
+                    port=server.server_port
+                    server.shutdown(); server.server_close(); thread.join()
+                    runtime.close(); channel.close()
+                    channel=control_plane.CommandServer(b"f"*32)
+                    owner_time+=60
+                    requests=len(transport.requests)
+                    app,runtime=assemble()
+                    server=type(server)(("127.0.0.1",port),control_plane_web.make_handler(app))
+                    thread=threading.Thread(target=server.serve_forever,daemon=True); thread.start()
+                    closing.clear()
+                    publisher=threading.Thread(target=publish,daemon=True); publisher.start()
+                    print(json.dumps(dict(command=command,requests=requests,after=len(transport.requests),
+                        totp=owner_session.totp_at(app.totp.read_secret(),app.clock()))),flush=True)
+                if command == "requests":
+                    print(json.dumps(dict(command=command,requests=len(transport.requests))),flush=True)
                 if command.startswith("catalogue-") and args.refresh:
-                    transport.mode = command.removeprefix("catalogue-")
-                    setting = app.exchange_settings_store.view()["exchanges"][0]
+                    parts=command.split("-",2)
+                    if len(parts)==3:
+                        kind,mode=parts[1:]
+                        (transport.okx if kind=="okx" else transport.hl).mode=mode
+                        setting=next(s for s in app.exchange_settings_store.view()["exchanges"] if s["type"]==kind)
+                    else:
+                        transport.mode=parts[1]
+                        setting=app.exchange_settings_store.view()["exchanges"][0]
                     runtime.discover(setting)
         finally:
             closing.set(); publisher.join(timeout=15)

@@ -7,9 +7,9 @@ Python 跨场所策略实现位于 `python/strategies/cross_venue/`，机会扫�
 ## 启动
 
 ```powershell
-zig build -Doptimize=ReleaseSafe
-npm.cmd --prefix D:/github/RingwinUi-scanner-integration run build
-python python/control_plane_node.py --directory .scratch/run/scanner --ui D:/github/RingwinUi-scanner-integration/dist/index.html --port 8765
+python tools/zig-entry.py build-exe src/runtime/scanner_market_node.zig -O ReleaseSafe --stack 536870912 "-femit-bin=zig-out/bin/ringwin-scanner-market.exe"
+npm.cmd --prefix D:/github/RingwinUi run build
+python python/control_plane_node.py --directory .scratch/run/scanner --ui D:/github/RingwinUi/dist/index.html --port 8765
 ```
 
 首次启动在本机终端设置 Owner 口令，并按现有 setup 结果保存 TOTP 信息。访问 `http://127.0.0.1:8765`，复用正常登录、内存 CSRF 和扫描 API。刷新需要重新认证，已有服务端历史仍可查询。
@@ -20,9 +20,9 @@ python python/control_plane_node.py --directory .scratch/run/scanner --ui D:/git
 
 `scanner-config.json` 继续独立版本化保存范围；控制面写入的每条范围携带 `setting_id`，并校验它对应的 Venue／环境。重启恢复设置和范围，默认 Stopped，不自动请求行情。
 
-保存 OKX 设置会异步请求公共 SPOT／SWAP 目录，已有静态来源也会发现新增品种，无需 `scanner-market.json`。发现只登记目录；应用范围并启动扫描才创建行情订阅，单来源也可观察盘口。完整动态目录、精确规则与来源证据原子保存到 `scanner-discovery.json`；重启从缓存恢复身份和范围，仍默认停止且不请求网络。发现失败保留原目录，设置仍可见并展示原因；再次保存失败的来源可重试。自动刷新／退市由 04 交付。`scanner-market.json` 目前仅是旧来源的内部过渡，06 移除旧文件。
+保存交易所设置会异步发现对应公共目录：OKX SPOT／SWAP，Hyperliquid 默认标准永续 meta。发现只登记目录；应用范围并启动扫描才订阅盘口。目录、规则和证据原子缓存到 `scanner-discovery.json`；重启恢复身份与范围，仍默认停止、不请求网络。失败保留命名选项和原因，显式重新保存可重试。正常入口完全忽略退役的 `scanner-market.json`；无该文件或遗留文件损坏均不影响启动，不再接收手工品种清单。
 
-扫描视图的 `exchanges` 独立于 `catalogue`，包含设置字段及 `source_id`（Venue／环境）、`products`、`catalogue_state`、`catalogue_error`；状态为 unloaded／registered／loading／ready／failed。目录行携带 `setting_id`。未加载、加载中和失败不移除设置选项；未保存的来源不可经控制面加入范围。交易所账户预览与这份设置分别管理；环境切换和删除的订阅协调由 05 实施。
+扫描视图的 `exchanges` 独立于 `catalogue`，包含设置字段及 `source_id`（Venue／环境）、`products`、`catalogue_state`、`catalogue_error`；状态为 unloaded／registered／loading／ready／failed。目录行携带 `setting_id`。未加载、加载中和失败不移除设置选项；未保存的来源不可经控制面加入范围。交易所账户预览与设置分别管理；环境切换和删除协调对应范围和订阅。
 
 ## 支持范围
 
@@ -33,28 +33,17 @@ python python/control_plane_node.py --directory .scratch/run/scanner --ui D:/git
 | Hyperliquid (21) | production | 主网公共 info REST | 默认标准永续 meta 动态目录（collateralToken=0） |
 | Hyperliquid (21) | testnet | Testnet 公共 info REST | 默认标准永续 meta 动态目录（collateralToken=0） |
 
-其他 Venue／环境／产品拒绝。Hyperliquid 没有 demo 别名，不支持现货包装资产、HIP-3 或跨报价币换算。动态观察资产按 Venue／环境／协议角色隔离，不凭同名与 OKX 配对；旧显式批准的共同资产配置仍用于原内部验收。规范 AssetIdentity 和 InstrumentRules 是配对依据。
+其他 Venue／环境／产品拒绝。Hyperliquid 没有 demo 别名，不支持现货包装资产、HIP-3 或跨报价币换算。市场与观察来源身份保持 Venue／环境隔离。内部已核对主网 BTC／ETH 标准永续基础资产关联，采用与 OKX 对应观察资产相同的 18 位观察单位；USDT 价格与 USDC 结算分别处理。未知、包装或缩放标签不因同名配对，Testnet 保留独立资产空间。两个已确认基础资产限制的是关联覆盖，而非市场发现；用户无需维护文件。依据与剩余边界见[观察资产关联核对](research/2026-11-16-scanner-observation-asset-pairing.md)。
 
 当前在线目录和区域端点可用性没有验收，不能因本表列出协议能力就假定某个市场仍在线。实际元数据不匹配时失败关闭，不改名、回退或替换资产。
 
-旧内部配置顶层仅含 `schema: 1`、`assets`、`bindings`。`assets` 复用扫描资产合同：`identity` 十进制字符串、`code`、`atomic_scale`。每个 binding 包含：
-
-| 字段 | 语义 |
-|---|---|
-| venue / environment / symbol / product | Venue 整数、上述环境、协议品种、spot 或 linear |
-| instrument / observation_identity | 规范 InstrumentIdentity 十进制字符串／可信观察命名空间；后者不是 ExchangeAccount 授权 |
-| base_asset / quote_asset | 资产目录身份及真实单位，USDT 与 USDC 独立 |
-| rules_version | 正整数，绑定受批准的不可变规则 |
-| tick / lot_wire / lot_base | 精确十进制：报价币每基础币的价格 tick、协议数量 lot、基础币每 lot |
-| contract_value | OKX 永续额外要求：每张合约的基础币数量；lot_base = lot_wire × contract_value |
-| binding | Hyperliquid 正式 `HyperliquidMarketFeed.Binding` JSON：coin、universe_index、instrument、product=isolated_linear、size_decimals、rules_version、expected_metadata_digest（32 字节数组）、price_scale/tick_atoms、quantity_scale/lot_atoms 及必要代币身份 |
-| raw_budget_bytes（可选） | 每来源会话 RawIngress 上限，2048 到 4194304，默认 4 MiB |
+`scanner-discovery.json` 是程序管理的目录缓存，包含 schema、观察资产、动态绑定与来源证据，不是配置入口。盘口 worker 只接受发现的绑定与规则，OKX 不再接受三个 BTC 枚举作为扫描配置。资产、tick、协议 lot、基础币 lot 和合约乘数均由发现结果校验；用户只保存交易所及扫描范围。
 
 OKX 动态目录的 `specification` 返回产品、资产、状态、tick、lot、最小／最大数量和名义约束及合约面值／乘数；其规范内容摘要决定规则版本。线性合约必须明确 `ctValCcy` 为基础币、`settleCcy` 为符号报价币、`ctMult=1`，基础币 lot = 协议 lot × ctVal。其他单位返回实际拒绝原因。新增资产使用固定 18 位的小数观察表示与稳定身份，不从 lot 推导核心 AssetDefinition，也不激活核心规则或交易权限。重复发现及重启不改变品种身份；现有三个兼容品种保留原 InstrumentIdentity。
 
-保存 Hyperliquid 设置会异步发现默认标准永续，不依赖 OKX 或手工资产／绑定清单。动态目录明确区分 USDT 价格计量和 USDC 结算（collateralToken=0），依据[官方合约规格](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/contract-specifications)。数量 lot 为 10^-szDecimals，价格坐标为 10^-(6-szDecimals)，实际盘口仍逐档校验最多五位有效数字／整数例外，依据[官方 tick／lot 合同](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/tick-and-lot-size)。观察资产固定 18 位表示，不从 lot 推导核心资产。InstrumentIdentity 绑定环境及 coin；universe 下标和所选记录／margin table 摘要进入规则版本。无效 collateral、精度、退市或缺表返回具体拒绝原因。
+保存 Hyperliquid 设置会异步发现默认标准永续，不依赖 OKX 或手工绑定清单。价格通常以 USDT 计量、USDC 结算（collateralToken=0）；HYPE／PURR 按[官方合约规格](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/contract-specifications)以 USDC 计价。数量 lot 为 10^-szDecimals，价格坐标为 10^-(6-szDecimals)，实际盘口逐档校验最多五位有效数字／整数例外，依据[官方 tick／lot 合同](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api/tick-and-lot-size)。观察资产固定 18 位表示，不从 lot 推导核心资产。InstrumentIdentity 绑定环境及 coin；universe 下标和所选记录／margin table 摘要进入规则版本。无效 collateral、精度、退市或缺表返回具体拒绝原因。
 
-动态发现摘要只建立扫描观察基线；订阅和周期元数据必须重验，变化撤销健康状态，不批准核心规则或交易授权。旧显式配置仍使用原批准摘要，算法见[公共行情合同](research/2026-11-02-hyperliquid-public-market.md)。正常启动不生成研究计划、模型、校准或费率；缺项返回 pending。即时观察价差不是完整周期净收益。
+动态发现摘要只建立扫描观察基线；订阅和周期元数据必须重验，变化撤销健康状态，不批准核心规则或交易授权。元数据摘要算法见[公共行情合同](research/2026-11-02-hyperliquid-public-market.md)。正常启动不生成研究计划、模型、校准或费率；缺项返回 pending。即时观察价差不是完整周期净收益。
 
 ## 数据与生命周期
 
@@ -74,7 +63,7 @@ OKX 动态目录的 `specification` 返回产品、资产、状态、tick、lot�
 
 ```powershell
 python -m unittest discover -s python -p test_scanner_integration.py
-node tools/verify-scanner-integration-browser.mjs --ui-root D:/github/RingwinUi-scanner-integration --playwright-module D:/github/RingwinUi/.scratch/build/scanner-qa/node_modules/playwright-core/index.mjs --browser C:/Users/X/AppData/Local/ms-playwright/chromium-1217/chrome-win64/chrome.exe
+node tools/verify-scanner-integration-browser.mjs --ui-root D:/github/RingwinUi --playwright-module D:/github/RingwinUi/.scratch/build/scanner-qa/node_modules/playwright-core/index.mjs --browser C:/Users/X/AppData/Local/ms-playwright/chromium-1217/chrome-win64/chrome.exe
 ```
 
 浏览器 runner 只在公共 transport 返回标记为 `synthetic_protocol_fixture` 的两家协议输入。HTTP 不接受行情、候选或批准回执；内部适配器、规范投影、扫描器和认证均为正式实现。
@@ -89,7 +78,7 @@ Hyperliquid 动态发现复用同一浏览器 runner：`node tools/verify-okx-di
 
 已应用扫描范围内的动态来源每 30 秒后台刷新完整目录；失败同周期重试，目录 TTL 为 90 秒（进程内单调时间，重启不继承新鲜度）。刷新不阻塞其他来源的盘口轮询。加载和失败保留命名设置选项；`market.discovery` 提供状态、错误、拒绝原因、完整性及成功目录数量。TTL 到期或刷新失败即撤销该来源的有效输入和候选，恢复后重验元数据并取得新盘口。
 
-周期刷新仅由运行中的扫描范围或其他消费者实际持有的订阅驱动。服务重启恢复设置和范围后默认停止，不自动请求目录；暂停或停止后若无其他消费者，也不继续周期请求。保存设置等显式加载动作仍可发现目录。兼容旧配置的观察登记不能覆盖完整目录：缺失或被拒绝的旧品种即使暂时保留登记，其输入、候选及扫描订阅仍立即失效；其他消费者的所有权保留，但不能继续取得该品种的有效输入，恢复后重新预热。
+周期刷新仅由运行中的扫描范围或其他消费者实际持有的订阅驱动。服务重启恢复设置和范围后默认停止、不自动请求目录；暂停或停止后若无其他消费者，也不继续周期请求。保存设置等显式加载动作仍可发现目录。完整目录按来源替换登记：缺失或被拒绝品种的输入、候选和扫描订阅立即失效；其他消费者的所有权保留，但不再取得该品种的有效输入，重新出现后预热。
 
 成功刷新按来源替换动态目录，删除消失、暂停或退市的品种；规则变化关闭旧 worker／session，清空旧盘口后按新规则重新预热。新增品种受已保存的 `new_instruments`、产品及资产纳入／排除控制；关闭开关只保留配置保存时的登记身份。深度门槛仍在每次新盘口发布时以报价资产单位判定。超过 16 个活跃订阅时明确失败并要求缩小范围，不把部分订阅当作完整覆盖。其他消费者持有的未变订阅独立保留。
 
@@ -110,3 +99,7 @@ Hyperliquid 动态发现复用同一浏览器 runner：`node tools/verify-okx-di
 重启默认停止，按设置文件修复已保存范围；显式重新保存设置可重试未完成目录加载，不因普通读取或停止状态自动联网。
 定向页面验收：`node tools/verify-scanner-integration-browser.mjs --dev --settings-lifecycle`。
 改名只更新草稿名称，不提升草稿基线版本；配置已变化时应用旧草稿返回版本冲突，需要重新加载范围后再应用。定向冲突回归追加 `--draft-conflict`（单独运行该模式）。
+
+06 组合验收：`node tools/verify-scanner-integration-browser.mjs --dev --settings-lifecycle --restart --refresh --output .scratch/build/settings-06-browser-full`。从空目录经过正常 ControlPlaneApp 构造、Owner 登录、两家设置、ETH 范围、实际 Zig 解码／证据和扫描，覆盖双来源刷新故障与恢复、重启停止且公共请求计数不增、名称及环境生命周期。
+
+报价下拉按代码去重；添加范围时，资产和报价条件逐来源解析，金额按该来源精度转换，不把同名显示项当作共同资产授权。资产关联升级或环境切换重绑范围后持久化；写入失败撤销输入并显示错误，重启显式发现可恢复。合成协议仅替换公共 transport，无账户凭证、下单或生产资格。

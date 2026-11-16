@@ -22,7 +22,6 @@ const Configuration = struct {
     environment: market.Environment,
     instrument: u128,
     rules_version: u64,
-    okx_instrument: protocol.FeedInstrument = .btc_usdc_spot,
     okx_binding: ?protocol.Binding = null,
     okx_specification: ?protocol.CatalogueItem = null,
     tick: []const u8,
@@ -118,10 +117,13 @@ pub fn main(init: std.process.Init) !void {
     defer store.close(init.io);
     var raw: Raw = .{ .allocator = init.gpa, .configuration = cfg, .sink = .{ .durable_sink = try raw_ingress.DurableSink.init(store.interface(), init.io, .{ .domain = .raw_ingress, .id = cfg.session }), .budget = cfg.raw_budget_bytes, .max_bytes = if (cfg.discovery) 4 * 1024 * 1024 else if (cfg.venue == 21) hl.max_frame_bytes else 120 * 1024 } };
     var ofeed = okx.OkxMarketFeed.init(.{ .ptr = &raw, .append_fn = Raw.ok });
-    if (cfg.venue == 1 and cfg.okx_binding == null and @intFromEnum(cfg.okx_instrument) > 2) return error.InvalidConfiguration;
-    const okx_instrument = if (cfg.okx_binding) |b| try ofeed.bind(b) else cfg.okx_instrument;
-    if (cfg.venue == 1 and ofeed.instrumentIdentity(okx_instrument) != cfg.instrument) return error.InstrumentIdentityMismatch;
-    ofeed.decoder.rest_book_instrument = okx_instrument;
+    var okx_instrument: protocol.FeedInstrument = undefined;
+    if (cfg.venue == 1 and !cfg.discovery) {
+        const binding = cfg.okx_binding orelse return error.MissingBinding;
+        if (binding.instrument != cfg.instrument or cfg.okx_specification == null) return error.InstrumentIdentityMismatch;
+        okx_instrument = try ofeed.bind(binding);
+        ofeed.decoder.rest_book_instrument = okx_instrument;
+    }
     var hfeed: hl.HyperliquidMarketFeed = undefined;
     if (cfg.venue == 21 and !cfg.discovery) {
         const binding = cfg.binding orelse return error.MissingBinding;
@@ -236,7 +238,7 @@ pub fn main(init: std.process.Init) !void {
                     failure = @errorName(err);
                 };
                 if (ofeed.rejected) failure = "InvalidPublicFrame";
-                if (r.operation == .metadata and cfg.okx_binding != null) validateMetadata(cfg, init.gpa, r.payload) catch |err| {
+                if (r.operation == .metadata) validateMetadata(cfg, init.gpa, r.payload) catch |err| {
                     failure = @errorName(err);
                 };
             }

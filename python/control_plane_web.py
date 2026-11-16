@@ -210,12 +210,9 @@ class ControlPlaneApp:
         from opportunity_scanner.exchange_settings import ExchangeSettings
         self.exchange_settings_store = ExchangeSettings(Path(directory)/"exchange-settings.json")
         self.scanner_runtime = None
-        market_config = Path(directory)/"scanner-market.json"
         if scanner_console is None:
             from opportunity_scanner.scanner_runtime import ScannerRuntime
-            if market_config.is_file() and market_config.stat().st_size > 65536:
-                raise ValueError("scanner market configuration capacity")
-            self.scanner_runtime = ScannerRuntime(directory, json.loads(market_config.read_text(encoding="utf-8")) if market_config.is_file() else dict(schema=1, assets=[], bindings=[]))
+            self.scanner_runtime = ScannerRuntime(directory)
             scanner_console = self.scanner_runtime.console
         self.scanner_console = scanner_console
         if scanner_console is not None and scanner_console.config_store is None:
@@ -759,7 +756,7 @@ def make_handler(app: ControlPlaneApp):
             handler()
 
         def do_GET(self):
-            if self.path.split("?", 1)[0] in ("/", "/index.html") or self.path.startswith("/assets/"):
+            if self.path.split("?", 1)[0] in ("/", "/index.html") or self.path.startswith(("/app/", "/assets/")):
                 status, body, content_type = app.ui_asset(self.path) if self.path.startswith("/assets/") else app.ui_page()
                 self.send_response(status)
                 self.send_header("Content-Type", content_type)

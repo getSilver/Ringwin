@@ -47,6 +47,7 @@ pub const RawSink = struct {
 pub const Evidence = struct { sequence: u64, digest: [32]u8 };
 pub const PerpetualSpecification = struct {
     coin: []const u8,
+    price_quote: enum { USDT, USDC },
     universe_index: u32,
     size_decimals: u8,
     metadata_digest: [32]u8,
@@ -81,7 +82,9 @@ pub fn perpetualSpecification(allocator: std.mem.Allocator, value: std.json.Valu
         }
     }
     if (!found) return error.MissingMarginTable;
-    return .{ .coin = coin, .universe_index = index, .size_decimals = @intCast(size), .metadata_digest = hash.finalResult() };
+    // Official standard-perp contract specifications distinguish these USDC price indices.
+    const price_quote: @FieldType(PerpetualSpecification, "price_quote") = if (std.mem.eql(u8, coin, "HYPE") or std.mem.eql(u8, coin, "PURR")) .USDC else .USDT;
+    return .{ .coin = coin, .price_quote = price_quote, .universe_index = index, .size_decimals = @intCast(size), .metadata_digest = hash.finalResult() };
 }
 const TradeKey = struct { time: u64, tid: u64, trade: c.MarketTrade };
 

@@ -18,7 +18,7 @@ const click=name=>page.getByRole('button',{name,exact:true}).click();
 const tab=name=>page.getByRole('tab',{name,exact:true}).click();
 const choose=async(name,value)=>{await page.getByRole('combobox',{name,exact:true}).click();await page.getByRole('option',{name:value,exact:true}).click();};
 try {
- fixture=spawn('python',['-u','python/verify_scanner_integration.py','--ui',join(ui,'dist/index.html'),...(args.includes('--settings-lifecycle')?['--settings-lifecycle']:[])],{cwd:root,stdio:['pipe','pipe','pipe']});
+ fixture=spawn('python',['-u','python/verify_scanner_integration.py','--ui',join(ui,'dist/index.html'),...(args.includes('--refresh')?['--refresh']:[])],{cwd:root,stdio:['pipe','pipe','pipe']});
  fixture.stderr.on('data',data=>{diagnostics+=data;});
  const ready=await new Promise((resolve,reject)=>{
   let buffer='';const timeout=setTimeout(()=>reject(new Error('fixture startup timeout '+diagnostics)),45000);
@@ -38,9 +38,13 @@ try {
   base='http://127.0.0.1:5187';
  }
  browser=await chromium.launch({headless:true,executablePath:option('--browser','C:/Users/X/AppData/Local/ms-playwright/chromium-1217/chrome-win64/chrome.exe')});
- const context=await browser.newContext({viewport:{width:1600,height:1100}});
- await context.route('**/*',route=>{if(!route.request().url().startsWith(base+'/')){external.push(route.request().url());return route.abort();}return route.continue();});
- page=await context.newPage();page.setDefaultTimeout(15000);page.on('pageerror',error=>errors.push(error.message));
+ const newSession=async()=>{
+  const session=await browser.newContext({viewport:{width:1600,height:1100}});
+  await session.route('**/*',route=>{if(!route.request().url().startsWith(base+'/')){external.push(route.request().url());return route.abort();}return route.continue();});
+  page=await session.newPage();page.setDefaultTimeout(15000);page.on('pageerror',error=>errors.push(error.message));
+  return session;
+ };
+ let context=await newSession();
  await check('normal owner login',async()=>{
   await page.goto(base+'/#opportunities');
   await page.getByRole('textbox',{name:'口令',exact:true}).fill(ready.passphrase);
@@ -77,7 +81,8 @@ try {
   await page.getByText(/请求 production → 来源 production/).first().waitFor();
   await page.getByRole('checkbox',{name:'我的现货',exact:true}).check();
   await page.getByRole('checkbox',{name:'现货',exact:true}).check();
-  await choose('深度报价资产','USDC');await click('添加到草稿');
+  await page.getByRole('textbox',{name:'纳入资产（可空）',exact:true}).fill('ETH');
+  await choose('深度报价资产','USDT');await click('添加到草稿');
   await page.getByRole('checkbox',{name:'我的现货',exact:true}).uncheck();
   await page.getByRole('checkbox',{name:'现货',exact:true}).uncheck();
   await page.getByRole('checkbox',{name:'我的永续',exact:true}).check();
@@ -88,12 +93,23 @@ try {
   const started=page.waitForResponse(r=>r.url().endsWith('/api/scanner')&&r.request().postData()?.includes('"start"'));
   await click('启动扫描');assert.equal((await(await started).json()).result.phase,'Warming');
   await page.getByRole('heading',{name:'当前跨所机会 · 3',exact:true}).waitFor();
-  await page.getByRole('table',{name:'规范行情观察',exact:true}).getByText('50000 USDC',{exact:true}).waitFor();
-  await page.getByText('missing_evidence',{exact:true}).first().waitFor();
+  await page.getByRole('table',{name:'规范行情观察',exact:true}).getByText('3000.01 USDT',{exact:true}).waitFor();
+  await page.getByText('价格与盘口范围来自规范输入。缺少研究计划、模型、校准或费用时，完整周期收益待验证。',{exact:true}).waitFor();
   await page.getByText('1 / 1 档 · 来源有限快照',{exact:true}).first().waitFor();
   await page.screenshot({path:join(output,'running.png'),fullPage:true});
  });
- await check('inspect raw identity and rules evidence',async()=>{
+ await check('inspect actual native observation and RawIngress evidence',async()=>{
+  const authenticated=await page.waitForResponse(r=>r.url().endsWith('/api/scanner')&&r.request().method()==='GET');
+  const view=(await authenticated.json()).result;
+  assert.equal(view.market.observations.length,2);
+  assert(view.market.observations.every(row=>row.continuous));
+  assert.equal(view.market.evidence.length,2);
+  assert(view.market.evidence.every(row=>row.input_kind==='synthetic_protocol_fixture'&&row.raw_sha256&&row.raw_sequence));
+  assert.deepEqual(view.market.missing_evaluation,['research_plan','model','calibration','fees']);
+  assert.equal(view.snapshot.candidates.length,3);
+  assert(view.snapshot.candidates.every(row=>row.reason==='missing_evidence'&&!row.recommended));
+ });
+ await check('candidate evidence preserves native raw proof',async()=>{
   await page.getByRole('button',{name:/^查看证据 /}).first().click();
   await page.getByRole('dialog',{name:'候选证据详情'}).getByText(/synthetic_protocol_fixture/).waitFor();
   await click('关闭证据详情');
@@ -122,11 +138,60 @@ try {
   await page.getByRole('button',{name:'暂停扫描',exact:true}).scrollIntoViewIfNeeded();
   await page.screenshot({path:join(output,'narrow.png'),fullPage:true});
  });
+ if(args.includes('--refresh')) await check('both dynamic sources refresh rules, retire markets and recover independently',async()=>{
+  const view=async()=>(await(await page.waitForResponse(r=>r.url().endsWith('/api/scanner')&&r.request().method()==='GET'&&r.status()===200)).json()).result;
+  const until=async predicate=>{let last;for(let n=0;n<35;n++){last=await view();if(predicate(last))return last;}await writeFile(join(output,'transition-timeout.json'),JSON.stringify(last,null,2));throw new Error('combined catalogue transition timeout');};
+  for(const [kind,venue] of [['okx','1'],['hyperliquid','21']]){
+   const key=venue+':production';
+   const before=await view();
+   const other=before.market.evidence.find(row=>row.venue!==venue).session;
+   const rules=before.market.observations.find(row=>row.venue===venue).rules_version;
+   fixture.stdin.write('catalogue-'+kind+'-added\n');
+   await until(v=>v.catalogue.some(row=>row.venue===venue&&(row.specification?.coin==='SOL'||row.specification?.base==='SOL')));
+   assert.equal((await view()).market.active_subscriptions,2);
+   fixture.stdin.write('catalogue-'+kind+'-rules\n');
+   await until(v=>v.market.observations.some(row=>row.venue===venue&&row.continuous&&row.rules_version!==rules));
+   for(const mode of ['failed','capacity','gone']){
+    console.log('refresh: '+kind+' '+mode);
+    fixture.stdin.write('catalogue-'+kind+'-'+mode+'\n');
+    const failed=await until(v=>v.market.discovery[key].state===(mode==='gone'?'ready':'failed')&&!v.market.observations.some(row=>row.venue===venue));
+    assert.equal(failed.snapshot.candidates.length,0);
+    assert.equal(failed.market.evidence.find(row=>row.venue!==venue).session,other);
+    fixture.stdin.write('catalogue-'+kind+'-initial\n');
+    await until(v=>v.market.observations.some(row=>row.venue===venue&&row.continuous)&&v.snapshot.candidates.length===3);
+   }
+  }
+  await page.screenshot({path:join(output,'refreshed.png'),fullPage:true});
+ });
  await check('pause, resume and stop release scanner subscriptions',async()=>{
   await click('暂停扫描');await page.getByText('已暂停 · 配置 v1',{exact:true}).waitFor();
   await click('启动扫描');await page.getByRole('heading',{name:'当前跨所机会 · 3',exact:true}).waitFor();
   await click('停止扫描');await page.getByText('已停止 · 配置 v1',{exact:true}).waitFor();
   await page.getByRole('heading',{name:'当前跨所机会 · 0',exact:true}).waitFor();
+ });
+ if(args.includes('--restart')) await check('service restart recovers settings, scopes and identities without public requests',async()=>{
+  await page.setViewportSize({width:1600,height:1100});
+  const command=async value=>{
+   const reply=new Promise((resolve,reject)=>{const timeout=setTimeout(()=>reject(new Error('fixture command timeout')),30000);fixture.stdout.once('data',data=>{clearTimeout(timeout);resolve(JSON.parse(String(data).trim()));});});
+   fixture.stdin.write(value+'\n');return reply;
+  };
+  const response=await page.waitForResponse(r=>r.url().endsWith('/api/scanner')&&r.request().method()==='GET');
+  const before=(await response.json()).result;
+  await context.close();
+  const restarted=await command('restart');assert.equal(restarted.after,restarted.requests);
+  context=await newSession();await page.goto(base+'/app/scanner/opportunities');
+  await page.getByRole('textbox',{name:'口令',exact:true}).fill(ready.passphrase);
+  await page.getByRole('textbox',{name:'TOTP 验证码',exact:true}).fill(restarted.totp);
+  await click('登录');await page.getByText('已停止 · 配置 v1',{exact:true}).waitFor();
+  const current=(await(await page.waitForResponse(r=>r.url().endsWith('/api/scanner')&&r.request().method()==='GET')).json()).result;
+  assert.deepEqual(current.config,before.config);
+  assert.deepEqual(current.catalogue,before.catalogue);
+  assert.deepEqual(current.exchanges,before.exchanges);
+  assert.equal(current.market.observations.length,0);assert.equal(current.market.active_subscriptions,0);
+  await page.waitForTimeout(1100);
+  assert.equal((await command('requests')).requests,restarted.requests);
+  await click('启动扫描');await page.getByRole('heading',{name:'当前跨所机会 · 3',exact:true}).waitFor();
+  await click('停止扫描');
  });
  if(args.includes('--draft-conflict')) {
   await page.setViewportSize({width:1600,height:1100});
@@ -161,7 +226,7 @@ try {
  }
  if(args.includes('--settings-lifecycle')) {
   await page.setViewportSize({width:1600,height:1100});
-  await check('rename updates names, search, draft, history and preserves candidate identity',async()=>{
+  await check('rename updates dynamic source names, search, draft and history',async()=>{
    await click('启动扫描');await page.getByRole('heading',{name:'当前跨所机会 · 3',exact:true}).waitFor();
    const before=await page.getByRole('button',{name:/^查看证据 /}).allTextContents();
    await tab('扫描范围');

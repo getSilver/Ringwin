@@ -18,61 +18,6 @@ import owner_session
 from opportunity_scanner.scanner_runtime import ScannerRuntime, PublicTransport
 
 
-def configuration(environment="production"):
-    return dict(schema=1, assets=[dict(identity="1", code="USDT", atomic_scale=6),
-        dict(identity="3", code="USDC", atomic_scale=6), dict(identity="2", code="BTC", atomic_scale=8)], bindings=[
-        dict(venue=1, environment=environment, symbol="BTC-USDC", product="spot", instrument=str(0x4f4b5800000003),
-             observation_identity="1001", base_asset="2", quote_asset="3", rules_version=1,
-             tick="0.1", lot_wire="0.00000001", lot_base="0.00000001"),
-        dict(venue=21, environment="testnet" if environment == "demo" else "production", symbol="BTC", product="linear", instrument="2101",
-             observation_identity="1021", base_asset="2", quote_asset="3", rules_version=1,
-             tick="0.000001", lot_wire="0.0001", lot_base="0.0001",
-             binding=dict(instrument=2101, coin="BTC", product="isolated_linear", universe_index=0, size_decimals=0,
-                 rules_version=1, expected_metadata_digest=list(bytes.fromhex("57ad35cf0cdae7c2f454b350c9a2b05e89e21bebd3c37b3ab99c8077b843c209")),
-                 price_scale=6, tick_atoms=1, quantity_scale=4, lot_atoms=1))])
-
-
-class ProtocolTransport:
-    """Synthetic bytes, never a final candidate or canonical snapshot."""
-    input_kind = "synthetic_protocol_fixture"
-
-    def __init__(self, clock):
-        self.clock = clock
-        self.sequence = 0
-        self.fail = set()
-        self.bad_rules = False
-        self.stale = False
-        self.oversize = False
-        self.replay = False
-        self.captured = {}
-
-    def metadata(self, binding):
-        if binding["venue"] == 21:
-            return '{"collateralToken":0,"universe":[{"name":"BTC","szDecimals":0,"maxLeverage":40,"marginTableId":54}],"marginTables":[[54,{"marginTiers":[{"lowerBound":"0","maxLeverage":40}]}]]}'
-        row=dict(instType="SPOT",instId=binding["symbol"],state="live",ruleType="normal",
-            tickSz="0.2" if self.bad_rules else binding["tick"],lotSz=binding["lot_wire"],minSz="0.00001",tradeQuoteCcyList=[],upcChg=[])
-        if binding["product"]=="linear":
-            row.update(instType="SWAP",ctType="linear",ctVal=binding["contract_value"],ctValCcy="BTC",settleCcy="USDT")
-        return json.dumps(dict(code="0",data=[row]))
-
-    def book(self, binding):
-        if self.replay: return self.captured[binding["venue"]]
-        if binding["venue"] in self.fail:
-            raise OSError("synthetic transport disconnected")
-        if self.oversize: return "x" * (130*1024)
-        self.sequence += 1
-        milliseconds = self.clock[1]//1_000_000 - (60_000 if self.stale else 0)
-        if binding["venue"] == 21:
-            payload=json.dumps(dict(coin="BTC", time=milliseconds,
-                levels=[[dict(px="50100",sz="2",n=1)],[dict(px="50101",sz="3",n=1)]]))
-            self.captured[21]=payload
-            return payload
-        payload=json.dumps(dict(code="0",data=[dict(ts=str(milliseconds),seqId=self.sequence,
-            bids=[["49999","2","0","1"]], asks=[["50000","3","0","1"]])]))
-        self.captured[1]=payload
-        return payload
-
-
 class DynamicOkxTransport(PublicTransport):
     input_kind = "synthetic_protocol_fixture"
 
@@ -110,9 +55,57 @@ class DynamicHyperliquidTransport(PublicTransport):
         raise ValueError("unexpected public request")
 
 
+class ProtocolTransport(PublicTransport):
+    """Two dynamic sources; faults change only public protocol input."""
+    input_kind = "synthetic_protocol_fixture"
+
+    def __init__(self, clock):
+        self.clock = clock
+        self.coin = "ETH"
+        self.requests = []
+        self.okx = DynamicOkxTransport(clock)
+        self.hl = DynamicHyperliquidTransport(clock)
+        self.fail, self.captured = set(), {}
+        self.bad_rules = self.stale = self.oversize = self.replay = False
+
+    def request(self, url, body=None, **kwargs):
+        venue = 21 if body else 1
+        self.requests.append((url, body))
+        if venue in self.fail:
+            raise OSError("synthetic transport disconnected")
+        if body and body.get("coin") == self.coin:
+            body = dict(body, coin="ETH")
+        return (self.hl if venue == 21 else self.okx).request(url.replace(self.coin, "ETH"), body, **kwargs).replace("ETH", self.coin)
+
+    def metadata(self, binding):
+        value = json.loads(super().metadata(binding))
+        if self.bad_rules and binding["venue"] == 1:
+            value["data"][0]["tickSz"] = "0.2"
+        return json.dumps(value)
+
+    def book(self, binding):
+        venue = binding["venue"]
+        if venue in self.fail:
+            raise OSError("synthetic transport disconnected")
+        if self.replay:
+            return self.captured[venue]
+        if self.oversize:
+            return "x" * (130*1024 if venue == 1 else 1024*1024+1)
+        value = json.loads(super().book(binding))
+        if self.stale:
+            if venue == 1:
+                value["data"][0]["ts"] = str(int(value["data"][0]["ts"]) - 60000)
+            else:
+                value["time"] -= 60000
+        payload = json.dumps(value)
+        self.captured[venue] = payload
+        return payload
+
+
+
 def scope(venue, environment="production"):
     return dict(venue=str(venue), product="spot" if venue == 1 else "linear", environment=environment,
-        include_assets=[], exclude_assets=[], quote_asset="3", min_depth_atoms=None,max_depth_atoms=None,new_instruments=False)
+        include_assets=[], exclude_assets=[], quote_asset=None, min_depth_atoms=None,max_depth_atoms=None,new_instruments=False)
 
 
 class RefreshTransport(PublicTransport):
@@ -162,7 +155,7 @@ class DynamicCatalogueTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.now = [2_000_000_000, 1_800_000_000_000_000_000]
         self.transport = DynamicOkxTransport(self.now)
-        self.runtime = ScannerRuntime(self.temp.name, dict(schema=1, assets=[], bindings=[]), transport=self.transport,
+        self.runtime = ScannerRuntime(self.temp.name, transport=self.transport,
             clock=lambda:self.now[0], utc_clock=lambda:self.now[1], automatic=False)
         self.addCleanup(self.runtime.close)
         self.setting = dict(identity="a"*32, venue="1", type="okx", name="我的 OKX", environment="demo")
@@ -294,6 +287,36 @@ class DynamicCatalogueTests(unittest.TestCase):
         self.assertEqual(self.runtime.workers, {})
         self.assertEqual(self.runtime.source.owners[console.session], set())
 
+    def test_returning_other_consumer_subscription_cannot_bypass_active_capacity(self):
+        self.runtime.discover(self.setting)
+        source = self.runtime.source
+        original_identity = next(i for i,e in source.registered.items() if e.kind == "spot")
+        source.acquire("retained", {original_identity})
+        request = self.transport.request
+        returning = [False]
+        def directory(url, *args, **kwargs):
+            value = json.loads(request(url, *args, **kwargs))
+            if "/instruments?" in url and "&instId=" not in url:
+                template = value["data"][0]
+                value["data"] = [] if "SWAP" in url else [dict(template, instId="TOKEN"+str(i)+"-USDT", baseCcy="TOKEN"+str(i)) for i in range(16)]
+                if returning[0] and "SPOT" in url:
+                    value["data"].append(template)
+            return json.dumps(value)
+        self.transport.request = directory
+        self.runtime.discover(self.setting)
+        source.acquire("full", set(source.registered))
+        self.assertEqual(len(self.runtime.workers), 16)
+        returning[0] = True
+        self.runtime.discover(self.setting)
+        state = self.runtime.status()["discovery"]["1:demo"]
+        self.assertEqual(state["state"], "failed")
+        self.assertIn("subscription capacity", state["error"])
+        self.assertLessEqual(len(self.runtime.workers), 16)
+        self.assertEqual(source.owners["retained"], {original_identity})
+        source.release("full")
+        self.runtime.discover(self.setting)
+        self.assertEqual(set(self.runtime.workers), {original_identity})
+
     def test_restart_refreshes_cached_bindings_even_without_saved_ready_state(self):
         self.runtime.discover(self.setting)
         cache = Path(self.temp.name, "scanner-discovery.json")
@@ -301,7 +324,7 @@ class DynamicCatalogueTests(unittest.TestCase):
         value["sources"] = {}  # Another source committed while this source was loading/failed.
         cache.write_bytes(json.dumps(value).encode())
         self.runtime.close()
-        self.runtime = ScannerRuntime(self.temp.name, dict(schema=1, assets=[], bindings=[]), transport=self.transport,
+        self.runtime = ScannerRuntime(self.temp.name, transport=self.transport,
             clock=lambda:self.now[0], utc_clock=lambda:self.now[1], automatic=False)
         self.addCleanup(self.runtime.close)
         self.assertEqual(self.runtime.status()["discovery"]["1:demo"]["state"], "unloaded")
@@ -316,7 +339,7 @@ class DynamicCatalogueTests(unittest.TestCase):
         for thread in self.runtime.discovery_threads:
             thread.join(timeout=20)
             self.assertFalse(thread.is_alive())
-        self.assertEqual(self.runtime.status()["discovery"]["1:demo"]["state"], "ready")
+        self.assertEqual(self.runtime.status()["discovery"]["1:demo"]["state"], "ready", self.runtime.status()["discovery"])
 
     def test_stopped_restart_and_pause_do_not_refresh_until_start_or_explicit_load(self):
         from opportunity_scanner.exchange_settings import ExchangeSettings
@@ -326,7 +349,7 @@ class DynamicCatalogueTests(unittest.TestCase):
         self.runtime.console.exchange_settings = settings
         self.runtime.console.configure(dict(expected_version="0", scopes=[dict(scope(1, "demo"), quote_asset=None)]))
         self.runtime.close()
-        self.runtime = ScannerRuntime(self.temp.name, dict(schema=1, assets=[], bindings=[]), transport=self.transport,
+        self.runtime = ScannerRuntime(self.temp.name, transport=self.transport,
             clock=lambda:self.now[0], utc_clock=lambda:self.now[1], automatic=False)
         self.addCleanup(self.runtime.close)
         self.runtime.console.exchange_settings = settings
@@ -360,30 +383,6 @@ class DynamicCatalogueTests(unittest.TestCase):
         self.assertEqual(self.runtime.console.desired, "paused")
         self.assertEqual(self.runtime.source.owners["other-consumer"], {identity})
         self.runtime.source.release("other-consumer")
-
-    def test_legacy_assembly_does_not_skip_settings_driven_discovery(self):
-        self.runtime.close()
-        self.runtime = ScannerRuntime(self.temp.name, configuration(), transport=self.transport, automatic=False)
-        self.addCleanup(self.runtime.close)
-        before = set(self.runtime.source.registered)
-        original = self.transport.request
-        def with_legacy(url, *args, **kwargs):
-            value = json.loads(original(url, *args, **kwargs))
-            if "instType=SPOT" in url:
-                legacy = json.loads(json.dumps(value["data"][0]))
-                legacy.update(instId="BTC-USDC", baseCcy="BTC", quoteCcy="USDC")
-                value["data"].append(legacy)
-            return json.dumps(value)
-        self.transport.request = with_legacy
-        self.setting["environment"] = "production"
-        self.runtime.request_discovery(self.setting)
-        for thread in self.runtime.discovery_threads:
-            thread.join(timeout=20)
-            self.assertFalse(thread.is_alive())
-        self.assertEqual(self.runtime.status()["discovery"]["1:production"]["state"], "ready")
-        self.assertTrue(before <= set(self.runtime.source.registered))
-        self.assertTrue(any(r["symbol"] == "ETH-USDT" for r in self.runtime.bindings.values()))
-        self.assertEqual(self.runtime.status()["active_subscriptions"], 0)
 
     def test_unverifiable_contract_units_are_visible_and_never_subscribed(self):
         original = self.transport.request
@@ -429,7 +428,7 @@ class DynamicCatalogueTests(unittest.TestCase):
             self.assertEqual(set(self.runtime.source.registered), before)
         # Failed discovery does not persist a partial catalogue.
         self.assertEqual(set(json.loads(cache)["sources"]), {"1:demo"})
-        restored = ScannerRuntime(self.temp.name, dict(schema=1, assets=[], bindings=[]), transport=self.transport, automatic=False)
+        restored = ScannerRuntime(self.temp.name, transport=self.transport, automatic=False)
         self.addCleanup(restored.close)
         self.assertEqual(set(restored.source.registered), before)
         self.assertEqual(restored.status()["active_subscriptions"], 0)
@@ -441,7 +440,7 @@ class HyperliquidCatalogueTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.now = [2_000_000_000, 1_800_000_000_000_000_000]
         self.transport = DynamicHyperliquidTransport(self.now)
-        self.runtime = ScannerRuntime(self.temp.name, dict(schema=1, assets=[], bindings=[]), transport=self.transport,
+        self.runtime = ScannerRuntime(self.temp.name, transport=self.transport,
             clock=lambda:self.now[0], utc_clock=lambda:self.now[1], automatic=False)
         self.addCleanup(self.runtime.close)
         self.setting = dict(identity="b"*32, venue="21", type="hyperliquid", name="永续", environment="production")
@@ -465,7 +464,7 @@ class HyperliquidCatalogueTests(unittest.TestCase):
         self.runtime.discover(setting)
         excluded = self.runtime.console.config["scopes"][0]["exclude_assets"][0]
         self.runtime.close()
-        self.runtime = ScannerRuntime(self.temp.name, dict(schema=1, assets=[], bindings=[]), transport=self.transport,
+        self.runtime = ScannerRuntime(self.temp.name, transport=self.transport,
             clock=lambda:self.now[0], utc_clock=lambda:self.now[1], automatic=False)
         self.addCleanup(self.runtime.close)
         self.runtime.console.exchange_settings = store
@@ -539,6 +538,51 @@ class HyperliquidCatalogueTests(unittest.TestCase):
         self.assertTrue(self.runtime.status()["observations"][0]["continuous"])
         self.assertEqual(next(iter(self.runtime.audit().values()))["captures"], 3)
 
+    def test_previous_isolated_asset_cache_rebinds_saved_filters_after_explicit_discovery(self):
+        self.runtime.discover(self.setting)
+        row = next(iter(self.runtime.bindings.values()))
+        self.runtime.console.configure(dict(expected_version="0", scopes=[dict(scope(21),
+            include_assets=[row["base_asset"]], quote_asset=row["quote_asset"])]))
+        self.runtime.close()
+        # Persisted v1 values from the predecessor's source-local ETH/USDT namespace.
+        previous_base = "325296720532232951174307413933328207"
+        previous_quote = "235876055870610484460362939402242130"
+        cache = Path(self.temp.name, "scanner-discovery.json")
+        document = json.loads(cache.read_bytes())
+        document["bindings"][0].update(base_asset=previous_base, quote_asset=previous_quote)
+        document["assets"] += [dict(identity=previous_base, code="ETH", atomic_scale=18),
+                               dict(identity=previous_quote, code="USDT", atomic_scale=18)]
+        cache.write_bytes(json.dumps(document).encode())
+        config = Path(self.temp.name, "scanner-config.json")
+        saved = json.loads(config.read_bytes())
+        saved["config"]["scopes"][0].update(include_assets=[previous_base], quote_asset=previous_quote)
+        config.write_bytes(json.dumps(saved).encode())
+        requests = len(self.transport.requests)
+        self.runtime = ScannerRuntime(self.temp.name, transport=self.transport,
+            clock=lambda:self.now[0], utc_clock=lambda:self.now[1], automatic=False)
+        self.addCleanup(self.runtime.close)
+        self.assertEqual(self.runtime.console.desired, "stopped")
+        self.assertEqual(len(self.transport.requests), requests)
+        with patch.object(self.runtime.console.config_store, "save", side_effect=OSError("scope disk unavailable")):
+            self.runtime.discover(self.setting)
+        self.assertEqual(self.runtime.status()["discovery"]["21:production"]["state"], "failed")
+        self.runtime.close()
+        self.runtime = ScannerRuntime(self.temp.name, transport=self.transport,
+            clock=lambda:self.now[0], utc_clock=lambda:self.now[1], automatic=False)
+        self.addCleanup(self.runtime.close)
+        self.runtime.discover(self.setting)
+        scope_row = self.runtime.console.config["scopes"][0]
+        self.assertEqual(scope_row["include_assets"], [row["base_asset"]])
+        self.assertEqual(scope_row["quote_asset"], row["quote_asset"])
+        self.assertEqual(self.runtime.console.config["version"], "2")
+        self.runtime.console.start(); self.runtime.step()
+        self.assertEqual(len(self.runtime.status()["observations"]), 1)
+        self.assertTrue(self.runtime.status()["observations"][0]["continuous"])
+        self.runtime.close()
+        restored = ScannerRuntime(self.temp.name, transport=self.transport, automatic=False)
+        self.addCleanup(restored.close)
+        self.assertEqual(restored.console.config["scopes"], self.runtime.console.config["scopes"])
+
     def test_environment_and_same_named_assets_are_isolated(self):
         self.runtime.discover(self.setting)
         self.runtime.discover(dict(self.setting, environment="testnet"))
@@ -552,10 +596,9 @@ class HyperliquidCatalogueTests(unittest.TestCase):
         with self.assertRaises(ValueError): self.runtime.discover(dict(self.setting, type="okx"))
         with self.assertRaises(ValueError): self.runtime.discover(dict(self.setting, environment="demo"))
 
-    def test_legacy_symbol_does_not_hide_saved_dynamic_identity_and_scope_after_restart(self):
+    def test_dynamic_identity_and_scope_survive_restart(self):
         self.runtime.close()
-        legacy = configuration()
-        self.runtime = ScannerRuntime(self.temp.name, legacy, transport=self.transport,
+        self.runtime = ScannerRuntime(self.temp.name, transport=self.transport,
             clock=lambda:self.now[0], utc_clock=lambda:self.now[1], automatic=False)
         self.addCleanup(self.runtime.close)
         self.transport.metadata_document["universe"][0]["name"] = "BTC"
@@ -574,12 +617,15 @@ class HyperliquidCatalogueTests(unittest.TestCase):
             include_assets=[row["base_asset"]], quote_asset=row["quote_asset"])]))
         self.runtime.console.start()
         self.runtime.step()
+        for thread in self.runtime.discovery_threads: thread.join(timeout=15)
+        self.now[0] += 100_000_000; self.now[1] += 100_000_000
+        self.runtime.step()
         self.assertEqual(set(self.runtime.workers), {identity})
         self.assertTrue(self.runtime.status()["observations"][0]["continuous"])
         saved_scope = self.runtime.console.view()["config"]
         self.runtime.close()
         requests = len(self.transport.requests)
-        self.runtime = ScannerRuntime(self.temp.name, legacy, transport=self.transport,
+        self.runtime = ScannerRuntime(self.temp.name, transport=self.transport,
             clock=lambda:self.now[0], utc_clock=lambda:self.now[1], automatic=False)
         self.addCleanup(self.runtime.close)
         self.assertEqual(set(self.runtime.source.registered), before)
@@ -589,6 +635,9 @@ class HyperliquidCatalogueTests(unittest.TestCase):
         self.runtime.request_discovery(self.setting)
         self.assertEqual(len(self.transport.requests), requests)
         self.runtime.console.start()
+        self.now[0] += 100_000_000; self.now[1] += 100_000_000
+        self.runtime.step()
+        for thread in self.runtime.discovery_threads: thread.join(timeout=15)
         self.now[0] += 100_000_000; self.now[1] += 100_000_000
         self.runtime.step()
         self.assertEqual(set(self.runtime.workers), {identity})
@@ -624,10 +673,11 @@ class IntegrationTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.now = [2_000_000_000, 1_800_000_000_000_000_000]
         self.transport = ProtocolTransport(self.now)
-        self.runtime = ScannerRuntime(self.temp.name, configuration(), transport=self.transport,
+        self.runtime = ScannerRuntime(self.temp.name, transport=self.transport,
             clock=lambda:self.now[0], utc_clock=lambda:self.now[1], automatic=False)
         self.app = control_plane_web.ControlPlaneApp(self.temp.name,control_plane.CommandServer(b"k"*32),
                                                    scanner_console=self.runtime.console)
+        self.app.scanner_runtime = self.runtime
         self.addCleanup(self.app.command_server.close)
         self.app.setup("internal-protocol-fixture-only")
         self.server = control_plane_web.serve(self.app)
@@ -665,6 +715,7 @@ class IntegrationTests(unittest.TestCase):
 
     def start(self):
         self.runtime.console.exchange_settings = self.app.exchange_settings_store
+        self.app.scanner_runtime = self.runtime
         self.save_settings()
         self.call("configure",dict(expected_version="0",scopes=[scope(1),scope(21)]))
         self.assertEqual(self.call("start")["phase"],"Warming")
@@ -679,6 +730,8 @@ class IntegrationTests(unittest.TestCase):
             status, body = self.http("/api/exchange-settings", dict(expected_version=body["result"]["version"],
                 type=kind, name=name, environment=environment), self.headers)
             self.assertEqual(status, 200, body)
+        for thread in self.runtime.discovery_threads:
+            thread.join(timeout=15)
         return body["result"]
 
     def test_settings_rename_delete_and_retained_history_through_http(self):
@@ -713,28 +766,20 @@ class IntegrationTests(unittest.TestCase):
     def test_settings_reconciliation_failure_stops_and_restart_repairs_saved_scope(self):
         self.start()
         saved = self.save_settings()
-        row = saved["exchanges"][0]
+        row = next(s for s in saved["exchanges"] if s["type"] == "okx")
         with patch.object(self.runtime.console.config_store, "save", side_effect=OSError("scope disk unavailable")):
             status, body = self.http("/api/exchange-settings", dict(expected_version=saved["version"],
                 identity=row["identity"], operation="delete"), self.headers)
         self.assertEqual(status, 503, body)
         self.assertEqual(self.runtime.console.desired, "stopped")
         self.assertEqual(self.runtime.console.snapshot["candidates"], [])
-        restarted = ScannerRuntime(self.temp.name, configuration(), transport=self.transport, automatic=False)
+        restarted = ScannerRuntime(self.temp.name, transport=self.transport, automatic=False)
         self.addCleanup(restarted.close)
         app = control_plane_web.ControlPlaneApp(self.temp.name, self.app.command_server, scanner_console=restarted.console)
         self.assertEqual([r["venue"] for r in restarted.console.config["scopes"]], ["21"])
         self.assertEqual(restarted.console.desired, "stopped")
 
     def test_settings_environment_switch_fences_late_poll_and_keeps_other_workers(self):
-        config = configuration()
-        alternative = configuration("demo")["bindings"][0]
-        alternative["observation_identity"] = "1101"
-        config["bindings"].append(alternative)
-        self.runtime.close()
-        self.runtime = ScannerRuntime(self.temp.name, config, transport=self.transport,
-            clock=lambda:self.now[0], utc_clock=lambda:self.now[1], automatic=False)
-        self.app.scanner_console = self.runtime.console
         self.start()
         saved = self.save_settings()
         setting = next(r for r in saved["exchanges"] if r["type"] == "okx")
@@ -759,11 +804,12 @@ class IntegrationTests(unittest.TestCase):
             status, body = self.http("/api/exchange-settings", dict(expected_version=saved["version"],
                 identity=setting["identity"], type="okx", name=setting["name"], environment="demo"), self.headers)
             self.assertEqual(status, 200, body)
-            self.assertEqual(self.runtime.console.view()["phase"], "Warming")
+            self.assertEqual(self.runtime.console.view()["phase"], "Warming", self.runtime.console.view())
             self.assertEqual(self.runtime.console.snapshot["candidates"], [])
         finally:
             released.set(); poller.join(timeout=10)
         self.assertFalse(poller.is_alive())
+        for thread in self.runtime.discovery_threads: thread.join(timeout=15)
         self.assertEqual(self.runtime.console.snapshot["candidates"], [])
         self.tick()
         view = self.runtime.console.view()
@@ -775,7 +821,7 @@ class IntegrationTests(unittest.TestCase):
 
     def test_settings_hyperliquid_environment_switch_rebinds_saved_asset_filters(self):
         self.runtime.close()
-        self.runtime = ScannerRuntime(self.temp.name, dict(schema=1, assets=[], bindings=[]),
+        self.runtime = ScannerRuntime(self.temp.name,
             transport=DynamicHyperliquidTransport(self.now), clock=lambda:self.now[0], utc_clock=lambda:self.now[1], automatic=False)
         self.app.scanner_console, self.app.scanner_runtime = self.runtime.console, self.runtime
         self.runtime.console.exchange_settings = self.app.exchange_settings_store
@@ -808,7 +854,7 @@ class IntegrationTests(unittest.TestCase):
             thread.join(timeout=10)
         self.assertIn("21:production", self.runtime.console.config["pending_catalogues"])
         self.runtime.close()
-        self.runtime = ScannerRuntime(self.temp.name, dict(schema=1, assets=[], bindings=[]),
+        self.runtime = ScannerRuntime(self.temp.name,
             transport=DynamicHyperliquidTransport(self.now), clock=lambda:self.now[0], utc_clock=lambda:self.now[1], automatic=False)
         recovered = control_plane_web.ControlPlaneApp(self.temp.name, self.app.command_server, scanner_console=self.runtime.console)
         recovered.scanner_runtime = self.runtime
@@ -831,7 +877,7 @@ class IntegrationTests(unittest.TestCase):
                 self.runtime.close()
                 venue = 21 if hyperliquid else 1
                 transport = RefreshTransport(self.now, hyperliquid)
-                self.runtime = ScannerRuntime(Path(self.temp.name)/str(venue), dict(schema=1, assets=[], bindings=[]),
+                self.runtime = ScannerRuntime(Path(self.temp.name)/str(venue),
                     transport=transport, clock=lambda:self.now[0], utc_clock=lambda:self.now[1], automatic=False)
                 self.app.scanner_console = self.runtime.console
                 self.runtime.console.exchange_settings = self.app.exchange_settings_store
@@ -874,7 +920,7 @@ class IntegrationTests(unittest.TestCase):
         okx, hl = RefreshTransport(self.now), RefreshTransport(self.now, True)
         transport = PublicTransport()
         transport.request = lambda url, body=None, **kw: (hl if body else okx).request(url, body, **kw)
-        self.runtime = ScannerRuntime(Path(self.temp.name)/"mixed", dict(schema=1, assets=[], bindings=[]),
+        self.runtime = ScannerRuntime(Path(self.temp.name)/"mixed",
             transport=transport, clock=lambda:self.now[0], utc_clock=lambda:self.now[1], automatic=False)
         self.app.scanner_console = self.runtime.console
         self.runtime.console.exchange_settings = self.app.exchange_settings_store
@@ -912,56 +958,46 @@ class IntegrationTests(unittest.TestCase):
         def disconnected(*args):
             raise OSError("synthetic catalogue disconnected")
         self.transport.catalogue = disconnected
-        self.runtime.discover(self.app.exchange_settings_store.view()["exchanges"][0])
+        self.runtime.discover(next(s for s in self.app.exchange_settings_store.view()["exchanges"] if s["type"] == "okx"))
         view = self.http("/api/scanner", headers=self.headers)[1]["result"]
         self.assertEqual(view["snapshot"]["candidates"], [])
         self.assertEqual([o["venue"] for o in view["market"]["observations"]], ["21"])
         self.assertIs(self.runtime.workers[identity], worker)
 
-    def test_complete_catalogue_revokes_missing_legacy_inputs_and_candidates(self):
+    def test_complete_catalogue_revokes_missing_dynamic_inputs_and_candidates(self):
         self.start()
         self.assertEqual(len(self.call("start")["snapshot"]["candidates"]), 3)
-        legacy = next(i for i in self.runtime.workers if i[0] == 1)
+        removed = next(i for i in self.runtime.workers if i[0] == 1)
         healthy = next(i for i in self.runtime.workers if i[0] == 21)
         worker = self.runtime.workers[healthy]
-        self.runtime.source.acquire("other-consumer", {legacy, healthy})
-        self.transport.catalogue = DynamicOkxTransport(self.now).catalogue
-        self.runtime.discover(self.app.exchange_settings_store.view()["exchanges"][0])
+        self.runtime.source.acquire("other-consumer", {removed, healthy})
+        catalogue = self.transport.catalogue
+        def gone(setting, product):
+            return json.dumps(dict(code="0", data=[]))
+        self.transport.catalogue = gone
+        self.runtime.discover(next(s for s in self.app.exchange_settings_store.view()["exchanges"] if s["type"] == "okx"))
         view = self.http("/api/scanner", headers=self.headers)[1]["result"]
         self.assertEqual(view["market"]["discovery"]["1:production"]["state"], "ready")
         self.assertEqual(view["snapshot"]["candidates"], [])
         self.assertEqual([o["venue"] for o in view["market"]["observations"]], ["21"])
         self.assertIs(self.runtime.workers[healthy], worker)
-        self.assertEqual(self.runtime.source.owners["other-consumer"], {legacy, healthy})
+        self.assertEqual(self.runtime.source.owners["other-consumer"], {removed, healthy})
         self.tick()
         self.assertEqual([o["venue"] for o in self.runtime.status()["observations"]], ["21"])
         self.assertIs(self.runtime.workers[healthy], worker)
-        catalogue = DynamicOkxTransport(self.now).catalogue
-        def restored(setting, product):
-            value = json.loads(catalogue(setting, product))
-            if product == "spot":
-                value["data"][0].update(instId="BTC-USDC", baseCcy="BTC", quoteCcy="USDC",
-                    tickSz="0.1", lotSz="0.00000001", minSz="0.00001")
-            return json.dumps(value)
-        metadata = self.transport.metadata
-        self.transport.catalogue = restored
-        def restored_metadata(row):
-            if row["venue"] == 1:
-                return restored(self.app.exchange_settings_store.view()["exchanges"][0], row["product"])
-            return metadata(row)
-        self.transport.metadata = restored_metadata
-        self.runtime.discover(self.app.exchange_settings_store.view()["exchanges"][0])
-        self.assertIn(list(map(str, legacy)), self.call("start")["warming"])
+        self.transport.catalogue = catalogue
+        self.runtime.discover(next(s for s in self.app.exchange_settings_store.view()["exchanges"] if s["type"] == "okx"))
+        self.assertIn(list(map(str, removed)), self.call("start")["warming"])
         self.tick()
         view = self.call("start")
-        self.assertEqual(len(view["snapshot"]["candidates"]), 3)
+        self.assertEqual(len(view["snapshot"]["candidates"]), 3, view)
         self.assertTrue(all(o["continuous"] for o in view["market"]["observations"]))
         self.assertIs(self.runtime.workers[healthy], worker)
 
     def test_dynamic_hyperliquid_settings_scope_native_scan_and_restart(self):
         self.runtime.close()
         transport = DynamicHyperliquidTransport(self.now)
-        self.runtime = ScannerRuntime(self.temp.name, dict(schema=1, assets=[], bindings=[]), transport=transport,
+        self.runtime = ScannerRuntime(self.temp.name, transport=transport,
             clock=lambda:self.now[0], utc_clock=lambda:self.now[1], automatic=False)
         self.app.scanner_console = self.runtime.console
         self.app.scanner_runtime = self.runtime
@@ -996,19 +1032,19 @@ class IntegrationTests(unittest.TestCase):
         self.runtime.discover(body["result"]["exchanges"][0])
         self.assertEqual(set(self.runtime.source.registered), identities)
         self.runtime.close()
-        self.runtime = ScannerRuntime(self.temp.name, dict(schema=1, assets=[], bindings=[]), transport=transport, automatic=False)
+        self.runtime = ScannerRuntime(self.temp.name, transport=transport, automatic=False)
         self.assertEqual(set(self.runtime.source.registered), identities)
         self.assertEqual(self.runtime.console.desired, "stopped")
         self.assertEqual(self.runtime.status()["active_subscriptions"], 0)
 
     def test_dynamic_okx_discovery_and_scan_outside_original_allowlist(self):
         self.runtime.close()
-        self.runtime = ScannerRuntime(self.temp.name, dict(schema=1, assets=[], bindings=[]),
+        self.runtime = ScannerRuntime(self.temp.name,
             transport=DynamicOkxTransport(self.now), clock=lambda:self.now[0], utc_clock=lambda:self.now[1], automatic=False)
         self.app.scanner_console = self.runtime.console
         self.app.scanner_runtime = self.runtime
         self.runtime.console.exchange_settings = self.app.exchange_settings_store
-        setting = self.save_settings()["exchanges"][0]
+        setting = next(s for s in self.save_settings()["exchanges"] if s["type"] == "okx")
         self.runtime.discover(setting)
         view = self.call("stop")
         self.assertEqual(view["market"]["active_subscriptions"], 0)
@@ -1029,7 +1065,7 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(len(self.runtime.audit()), 2)
         identities = {(r["product"], r["instrument"]) for r in view["catalogue"]}
         self.runtime.close()
-        self.runtime = ScannerRuntime(self.temp.name, dict(schema=1, assets=[], bindings=[]), transport=DynamicOkxTransport(self.now), automatic=False)
+        self.runtime = ScannerRuntime(self.temp.name, transport=DynamicOkxTransport(self.now), automatic=False)
         self.assertEqual({(r.kind, str(r.rules.instrument)) for r in self.runtime.source.registered.values()}, identities)
         self.assertEqual(self.runtime.console.desired, "stopped")
 
@@ -1055,28 +1091,119 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(status, 503, body)
         self.assertEqual(self.http("/api/exchange-settings", headers=self.headers)[1]["result"]["version"], "2")
         self.assertEqual([r["name"] for r in view["exchanges"]], ["我的现货", "我的永续"])
-        self.assertTrue(all(r["catalogue_state"] == "registered" for r in view["exchanges"]))
+        self.assertTrue(all(r["catalogue_state"] == "ready" for r in view["exchanges"]))
         forged = dict(scope(1), setting_id="0"*32)
         status, body = self.http("/api/scanner", dict(operation="configure", payload=dict(expected_version="0", scopes=[forged])), self.headers)
         self.assertEqual(status, 400, body)
         self.assertEqual(self.call("stop")["config_version"], "0")
         self.call("configure", dict(expected_version="0", scopes=[scope(1), scope(21)]))
         self.assertTrue(all(r["setting_id"] in {s["identity"] for s in view["exchanges"]} for r in self.call("stop")["config"]["scopes"]))
-        self.assertTrue(all(r["catalogue_state"] == "loading" for r in self.call("start")["exchanges"]))
+        self.call("start")
         self.tick()
         self.assertEqual(len(self.call("start")["snapshot"]["candidates"]), 3)
         self.transport.fail.add(21); self.tick()
         failed = self.call("start")
-        self.assertEqual(failed["exchanges"][1]["catalogue_state"], "failed")
-        self.assertIn("disconnected", failed["exchanges"][1]["catalogue_error"])
-        self.assertEqual(failed["exchanges"][1]["name"], "我的永续")
+        self.assertEqual(next(s for s in failed["exchanges"] if s["type"] == "hyperliquid")["catalogue_state"], "failed")
+        self.assertIn("disconnected", next(s for s in failed["exchanges"] if s["type"] == "hyperliquid")["catalogue_error"])
+        self.assertEqual(next(s for s in failed["exchanges"] if s["type"] == "hyperliquid")["name"], "我的永续")
         self.runtime.close()
-        self.runtime = ScannerRuntime(self.temp.name, configuration(), transport=self.transport, automatic=False)
+        self.runtime = ScannerRuntime(self.temp.name, transport=self.transport, automatic=False)
         restored = control_plane_web.ControlPlaneApp(self.temp.name, self.app.command_server, scanner_console=self.runtime.console)
         restored_view = restored.scanner_console.view()
-        self.assertEqual(restored_view["exchanges"], view["exchanges"])
+        self.assertEqual([r["name"] for r in restored_view["exchanges"]], [r["name"] for r in view["exchanges"]])
         self.assertEqual((restored_view["desired"], restored_view["config_version"]), ("stopped", "1"))
         self.assertEqual(self.runtime.status()["active_subscriptions"], 0)
+
+    def test_explicit_save_recovers_a_stopped_empty_source_without_recreating_settings(self):
+        self.start()
+        self.call("configure", dict(expected_version="1", scopes=[scope(1)]))
+        saved = self.app.exchange_settings_store.view()
+        setting = next(s for s in saved["exchanges"] if s["type"] == "okx")
+        catalogue = self.transport.catalogue
+        self.transport.catalogue = lambda setting, product: json.dumps(dict(code="0", data=[]))
+        self.runtime.discover(setting)
+        self.call("stop")
+        self.assertEqual(self.runtime.status()["discovery"]["1:production"]["count"], 0)
+        self.assertEqual(self.http("/api/scanner", dict(operation="start"), self.headers)[0], 400)
+        self.transport.catalogue = catalogue
+        status, body = self.http("/api/exchange-settings", dict(expected_version=saved["version"],
+            identity=setting["identity"], type=setting["type"], name=setting["name"], environment=setting["environment"]), self.headers)
+        self.assertEqual(status, 200, body)
+        for thread in self.runtime.discovery_threads: thread.join(timeout=15)
+        self.call("start"); self.tick()
+        self.assertEqual([o["venue"] for o in self.call("start")["market"]["observations"]], ["1"])
+
+    def test_restart_cannot_publish_cached_units_before_fresh_discovery(self):
+        self.start()
+        self.runtime.close()
+        self.runtime = ScannerRuntime(self.temp.name, transport=self.transport,
+            clock=lambda:self.now[0], utc_clock=lambda:self.now[1], automatic=False)
+        self.app.scanner_runtime, self.app.scanner_console = self.runtime, self.runtime.console
+        self.runtime.console.exchange_settings = self.app.exchange_settings_store
+        entered, released = threading.Event(), threading.Event()
+        catalogue = self.transport.catalogue
+        def delayed(setting, product):
+            entered.set()
+            if not released.wait(10): raise TimeoutError("catalogue release missing")
+            return catalogue(setting, product)
+        self.transport.catalogue = delayed
+        try:
+            self.call("start"); self.tick()
+            self.assertTrue(entered.wait(5))
+            view = self.call("start")
+            self.assertEqual(view["market"]["observations"], [])
+            self.assertEqual(view["snapshot"]["candidates"], [])
+        finally:
+            released.set()
+            for thread in self.runtime.discovery_threads: thread.join(timeout=15)
+        self.tick()
+        self.assertEqual(len(self.call("start")["snapshot"]["candidates"]), 3)
+
+    def test_removed_unknown_source_assets_cannot_become_okx_asset_aliases(self):
+        self.transport.coin = "UNKNOWN"
+        self.start()
+        settings = self.app.exchange_settings_store.view()["exchanges"]
+        okx = next(s for s in settings if s["venue"] == "1")
+        hl = next(s for s in settings if s["venue"] == "21")
+        catalogue = self.transport.catalogue
+        self.transport.catalogue = lambda setting, product: (
+            json.dumps(dict(collateralToken=0, universe=[], marginTables=[]))
+            if setting["venue"] == "21" else catalogue(setting, product))
+        self.runtime.discover(hl)
+        self.runtime.discover(okx)
+        self.transport.catalogue = catalogue
+        self.runtime.discover(hl); self.tick()
+        view = self.call("start")
+        self.assertEqual(len(view["market"]["observations"]), 2)
+        self.assertEqual(view["snapshot"]["candidates"], [])
+
+    def test_verified_underlying_pairs_but_wrapped_or_unknown_labels_never_pair(self):
+        self.transport.coin = "BTC"
+        self.start()
+        view = self.call("start")
+        self.assertEqual(len(view["snapshot"]["candidates"]), 3)
+        self.assertTrue(all(c["reason"] == "missing_evidence" and not c["recommended"] for c in view["snapshot"]["candidates"]))
+        okx = next(r for r in self.runtime.bindings.values() if r["venue"] == 1)
+        hl = next(r for r in self.runtime.bindings.values() if r["venue"] == 21)
+        self.assertEqual(okx["base_asset"], hl["base_asset"])
+        self.assertEqual(okx["quote_asset"], hl["quote_asset"])
+        self.assertNotEqual(hl["quote_asset"], hl["settlement_asset"])
+        self.assertNotEqual(okx["instrument"], hl["instrument"])
+        for coin in ("WETH", "UNKNOWN", "HYPE", "PURR"):
+            with self.subTest(coin=coin):
+                self.call("stop")
+                self.transport.coin = coin
+                self.runtime.console.configure(dict(expected_version=self.runtime.console.config["version"], scopes=[]))
+                for setting in self.app.exchange_settings_store.view()["exchanges"]:
+                    self.runtime.discover(setting)
+                self.runtime.console.configure(dict(expected_version=self.runtime.console.config["version"], scopes=[scope(1), scope(21)]))
+                self.call("start"); self.tick()
+                view = self.call("start")
+                self.assertEqual(len(view["market"]["observations"]), 2, view["market"])
+                self.assertTrue(all(o["continuous"] for o in view["market"]["observations"]))
+                self.assertEqual(view["snapshot"]["candidates"], [])
+                row = next(r for r in self.runtime.bindings.values() if r["venue"] == 21)
+                self.assertEqual(row["specification"]["quote"], "USDC" if coin in ("HYPE", "PURR") else "USDT")
 
     def test_authenticated_full_chain_missing_evidence_history_and_restart(self):
         self.assertEqual(self.http("/api/scanner")[0],401)
@@ -1095,7 +1222,7 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(self.call("stop")["phase"],"Stopped")
         self.assertEqual(self.call("stop")["phase"],"Stopped")
         self.runtime.close()
-        self.runtime=ScannerRuntime(self.temp.name,configuration(),transport=self.transport,automatic=False)
+        self.runtime=ScannerRuntime(self.temp.name,transport=self.transport,automatic=False)
         self.assertEqual(self.runtime.console.view()["phase"],"Stopped")
         self.assertEqual(self.runtime.console.config["version"],"1")
         self.assertFalse(self.runtime.console.history.query(kind="batches",limit=10))
@@ -1136,7 +1263,7 @@ class IntegrationTests(unittest.TestCase):
         status,_=self.http("/api/scanner",dict(operation="configure",payload=dict(expected_version="0",scopes=[])),self.headers)
         self.assertEqual(status,409)
         rows=[scope(1),scope(21)]
-        for row in rows: row["exclude_assets"]=["2"]
+        for row in rows: row["exclude_assets"] = sorted({str(e.rules.base_asset) for e in self.runtime.source.registered.values() if str(e.venue) == row["venue"]})
         self.call("configure",dict(expected_version="1",scopes=rows)); self.tick()
         self.assertFalse(self.call("start")["snapshot"]["candidates"])
         self.assertEqual(self.runtime.status()["active_subscriptions"],0)
@@ -1163,14 +1290,16 @@ class IntegrationTests(unittest.TestCase):
 
     def test_declared_nonproduction_routes_keep_actual_source_identity(self):
         self.runtime.close()
-        self.runtime=ScannerRuntime(self.temp.name,configuration("demo"),transport=self.transport,
+        self.runtime=ScannerRuntime(self.temp.name,transport=self.transport,
             clock=lambda:self.now[0],utc_clock=lambda:self.now[1],automatic=False)
         self.app.scanner_console=self.runtime.console
+        self.app.scanner_runtime=self.runtime
         self.runtime.console.exchange_settings = self.app.exchange_settings_store
         for version, kind, environment in (("0", "okx", "demo"), ("1", "hyperliquid", "testnet")):
             status, body = self.http("/api/exchange-settings", dict(expected_version=version,
                 type=kind, name="测试 "+kind, environment=environment), self.headers)
             self.assertEqual(status, 200, body)
+        for thread in self.runtime.discovery_threads: thread.join(timeout=15)
         self.call("configure",dict(expected_version="0",scopes=[scope(1,"demo"),scope(21,"testnet")]))
         self.call("start"); self.tick()
         view=self.call("start")
@@ -1180,12 +1309,10 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(sources,{("demo","production"),("testnet","testnet")})
 
     def test_raw_write_capacity_revokes_input(self):
-        config=configuration()
-        config["bindings"][0]["raw_budget_bytes"]=8000
-        self.runtime.close()
-        self.runtime=ScannerRuntime(self.temp.name,config,transport=self.transport,
-            clock=lambda:self.now[0],utc_clock=lambda:self.now[1],automatic=False)
-        self.app.scanner_console=self.runtime.console
+        self.save_settings()
+        for row in self.runtime.bindings.values():
+            if row["venue"] == 1:
+                row["raw_budget_bytes"] = 8000
         self.start(); self.tick()
         view=self.call("start")
         self.assertEqual(view["phase"],"Degraded")
@@ -1211,17 +1338,6 @@ class IntegrationTests(unittest.TestCase):
         self.assertNotEqual(before["1"],after["1"])
 
     def test_environment_switch_discards_late_transport_and_rewarms_new_sources(self):
-        import copy
-        config=configuration()
-        alternative=copy.deepcopy(configuration("demo")["bindings"])
-        for row in alternative: row["observation_identity"]=str(int(row["observation_identity"])+100)
-        config["bindings"]+=alternative
-        self.runtime.close()
-        self.runtime=ScannerRuntime(self.temp.name,config,transport=self.transport,
-            clock=lambda:self.now[0],utc_clock=lambda:self.now[1],automatic=False)
-        self.app.scanner_console=self.runtime.console
-        # This test exercises direct scope changes across four saved sources.
-        self.runtime.console.exchange_settings = self.app.exchange_settings_store
         self.start()
         saved = self.save_settings()
         for kind, environment in (("okx", "demo"), ("hyperliquid", "testnet")):
@@ -1229,6 +1345,7 @@ class IntegrationTests(unittest.TestCase):
                 type=kind, name="备用 "+kind, environment=environment), self.headers)
             self.assertEqual(status, 200, body)
             saved = body["result"]
+        for thread in self.runtime.discovery_threads: thread.join(timeout=15)
         old_sessions={e["session"] for e in self.call("start")["market"]["evidence"]}
         entered,released=threading.Event(),threading.Event()
         original=self.transport.book
@@ -1261,6 +1378,7 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(status,503)
         self.assertIn("unavailable",body["error"])
         self.app.scanner_console=self.runtime.console
+        self.app.scanner_runtime=self.runtime
         self.transport.metadata=lambda binding: "{}"
         self.start()
         view=self.call("start")
@@ -1283,44 +1401,33 @@ class IntegrationTests(unittest.TestCase):
         self.assertFalse(any(o["continuous"] for o in view["market"]["observations"]))
         self.assertFalse(any(c["recommended"] for c in view["snapshot"]["candidates"]))
 
-    def test_other_declared_okx_products_keep_contract_and_quote_units(self):
-        import copy
-        for symbol,instrument,product,lot_wire,lot_base in (
-                ("BTC-USDT",0x4f4b5800000001,"spot","0.00000001","0.00000001"),
-                ("BTC-USDT-SWAP",0x4f4b5800000002,"linear","0.01","0.0001")):
-            self.runtime.close()
-            with tempfile.TemporaryDirectory() as directory:
-                config=configuration(); row=config["bindings"][0]
-                row.update(symbol=symbol,instrument=str(instrument),product=product,quote_asset="1",lot_wire=lot_wire,lot_base=lot_base)
-                if product=="linear": row["contract_value"]="0.01"
-                self.runtime=ScannerRuntime(directory,config,transport=self.transport,
-                    clock=lambda:self.now[0],utc_clock=lambda:self.now[1],automatic=False)
-                self.app.scanner_console=self.runtime.console
-                first=scope(1);first.update(product=product,quote_asset="1")
-                self.call("configure",dict(expected_version="0",scopes=[first,scope(21)]));self.call("start");self.tick()
-                view=self.call("start")
-                self.assertEqual(view["phase"],"Running",view)
-                self.assertEqual(len(view["market"]["observations"]),2)
-                self.assertFalse(view["snapshot"]["candidates"],"USDT and USDC cannot pair")
-                self.runtime.close()
-
-    def test_normal_app_loads_market_assembly_and_stays_stopped(self):
-        with tempfile.TemporaryDirectory() as directory:
-            Path(directory,"scanner-market.json").write_text(json.dumps(configuration()))
-            app=control_plane_web.ControlPlaneApp(directory,control_plane.CommandServer(b"k"*32))
-            try:
-                self.assertEqual(app.scanner_console.view()["phase"],"Stopped")
-            finally:
-                app.scanner_runtime.close()
-                app.command_server.close()
+    def test_normal_app_ignores_retired_market_file_and_stays_empty(self):
+        for legacy in (None, "not valid JSON", "x" * 70000):
+            with self.subTest(legacy_size=None if legacy is None else len(legacy)), tempfile.TemporaryDirectory() as directory:
+                if legacy is not None:
+                    Path(directory, "scanner-market.json").write_text(legacy)
+                channel = control_plane.CommandServer(b"k"*32)
+                app = None
+                try:
+                    app = control_plane_web.ControlPlaneApp(directory, channel)
+                    view = app.scanner_console.view()
+                    self.assertEqual(view["phase"], "Stopped")
+                    self.assertEqual(view["exchanges"], [])
+                    self.assertEqual(app.scanner_runtime.source.registered, {})
+                    self.assertEqual(app.scanner_runtime.status()["active_subscriptions"], 0)
+                finally:
+                    if app is not None:
+                        app.scanner_runtime.close()
+                    channel.close()
 
     def test_relative_run_directory_starts_the_normal_native_feed(self):
         import os
         self.runtime.close()
         with tempfile.TemporaryDirectory(dir=Path.cwd()/".scratch/build") as directory:
-            self.runtime=ScannerRuntime(os.path.relpath(directory),configuration(),transport=self.transport,
+            self.runtime=ScannerRuntime(os.path.relpath(directory),transport=self.transport,
                 clock=lambda:self.now[0],utc_clock=lambda:self.now[1],automatic=False)
             self.app.scanner_console=self.runtime.console
+            self.app.scanner_runtime=self.runtime
             self.start()
             self.assertEqual(self.call("start")["phase"],"Running")
             self.runtime.close()

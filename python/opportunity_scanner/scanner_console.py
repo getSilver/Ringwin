@@ -406,7 +406,7 @@ class ScannerConsole:
                 self.snapshot["scope"] = self._scope().display()
                 self.sequence += 1
                 self.history.interrupt(self.session, "config_changed")
-                self.phase = "Warming" if self.warming else "Running"
+                self.phase = "Warming" if self.warming or self.config.get("pending_catalogues") else "Running"
             self._record("operations", secrets.token_hex(16), dict(action="configure", config_version=candidate["version"]))
             return self.view()
 
@@ -532,8 +532,13 @@ class ScannerConsole:
             return
         bad = any(r["reason"] in ("data_gap", "stale_data", "data_skew", "expired", "rules_expired")
                   for r in self.snapshot["candidates"])
-        bad = bad or bool(self.source.runtime_status().get("failures"))
-        self.phase = "Degraded" if bad or self.pending_gap else "Warming" if self.warming else "Running"
+        market = self.source.runtime_status()
+        states = [market["discovery"][key]["state"] for key in {
+            row["venue"]+":"+row["environment"] for row in self.config["scopes"]}
+            if key in market.get("discovery", {})]
+        bad = bad or bool(market.get("failures")) or "failed" in states
+        warming = self.warming or self.config.get("pending_catalogues") or any(state in ("loading", "unloaded") for state in states)
+        self.phase = "Degraded" if bad or self.pending_gap else "Warming" if warming else "Running"
 
     def request_approval(self, selection):
         """Retain identity in process memory before invoking the core bridge."""
@@ -683,7 +688,7 @@ class ScannerConsole:
                     ) else "registered" if members else "unloaded"
                     discovery = market.get("discovery", {}).get(setting["venue"]+":"+setting["environment"])
                     if discovery:
-                        state = discovery["state"]
+                        state = "failed" if failures else discovery["state"]
                         failures += [discovery["error"]] if discovery["error"] else []
                         failures += [str(r["symbol"])+": "+r["reason"] for r in discovery.get("rejected", [])]
                     exchanges.append(dict(setting, source_id=setting["venue"]+":"+setting["environment"],
