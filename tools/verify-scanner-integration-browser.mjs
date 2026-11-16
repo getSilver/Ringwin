@@ -18,7 +18,7 @@ const click=name=>page.getByRole('button',{name,exact:true}).click();
 const tab=name=>page.getByRole('tab',{name,exact:true}).click();
 const choose=async(name,value)=>{await page.getByRole('combobox',{name,exact:true}).click();await page.getByRole('option',{name:value,exact:true}).click();};
 try {
- fixture=spawn('python',['-u','python/verify_scanner_integration.py','--ui',join(ui,'dist/index.html'),...(args.includes('--refresh')?['--refresh']:[])],{cwd:root,stdio:['pipe','pipe','pipe']});
+ fixture=spawn('python',['-u','python/verify_scanner_integration.py','--ui',join(ui,'dist/index.html'),...(args.includes('--refresh')?['--refresh']:[]),...(args.includes('--large-catalogue')?['--large-catalogue']:[])],{cwd:root,stdio:['pipe','pipe','pipe']});
  fixture.stderr.on('data',data=>{diagnostics+=data;});
  const ready=await new Promise((resolve,reject)=>{
   let buffer='';const timeout=setTimeout(()=>reject(new Error('fixture startup timeout '+diagnostics)),45000);
@@ -75,6 +75,14 @@ try {
   await click('Settings');
   await page.getByRole('table',{name:'已保存交易所'}).getByText('我的现货',{exact:true}).waitFor();
   await page.keyboard.press('Escape');
+ });
+ if(args.includes('--large-catalogue')) await check('native directory above 64 remains ready and usable on the scope page',async()=>{
+  const response=await page.waitForResponse(r=>r.url().endsWith('/api/scanner')&&r.request().method()==='GET'&&r.status()===200);
+  const view=(await response.json()).result;
+  assert.equal(view.catalogue.length,67);
+  assert.equal(view.exchanges.find(s=>s.type==='hyperliquid').catalogue_state,'ready');
+  assert.equal(await page.getByText('扫描响应格式无效',{exact:true}).count(),0);
+  await writeFile(join(output,'large-catalogue-view.json'),JSON.stringify(view,null,2));
  });
  await check('configure OKX spot and Hyperliquid perpetual through UI',async()=>{
   await tab('扫描范围');

@@ -538,7 +538,11 @@ class HyperliquidCatalogueTests(unittest.TestCase):
         self.assertTrue(self.runtime.status()["observations"][0]["continuous"])
         self.assertEqual(next(iter(self.runtime.audit().values()))["captures"], 3)
 
-    def test_previous_isolated_asset_cache_rebinds_saved_filters_after_explicit_discovery(self):
+    def previous_isolated_asset_cache(self, *, include_eth=True):
+        from opportunity_scanner.exchange_settings import ExchangeSettings
+        store = ExchangeSettings(Path(self.temp.name)/"exchange-settings.json")
+        self.setting = store.save(dict(expected_version="0", type="hyperliquid", name=self.setting["name"], environment="production"))["exchanges"][0]
+        self.runtime.console.exchange_settings = store
         self.runtime.discover(self.setting)
         row = next(iter(self.runtime.bindings.values()))
         self.runtime.console.configure(dict(expected_version="0", scopes=[dict(scope(21),
@@ -555,7 +559,7 @@ class HyperliquidCatalogueTests(unittest.TestCase):
         cache.write_bytes(json.dumps(document).encode())
         config = Path(self.temp.name, "scanner-config.json")
         saved = json.loads(config.read_bytes())
-        saved["config"]["scopes"][0].update(include_assets=[previous_base], quote_asset=previous_quote)
+        saved["config"]["scopes"][0].update(include_assets=[previous_base] if include_eth else [], quote_asset=previous_quote)
         config.write_bytes(json.dumps(saved).encode())
         requests = len(self.transport.requests)
         self.runtime = ScannerRuntime(self.temp.name, transport=self.transport,
@@ -563,6 +567,22 @@ class HyperliquidCatalogueTests(unittest.TestCase):
         self.addCleanup(self.runtime.close)
         self.assertEqual(self.runtime.console.desired, "stopped")
         self.assertEqual(len(self.transport.requests), requests)
+        return row
+
+    def test_asset_rebind_preserves_registration_when_new_instruments_disabled(self):
+        self.previous_isolated_asset_cache(include_eth=False)
+        self.runtime.console.start()
+        self.assertEqual(self.runtime.status()["active_subscriptions"], 1)
+        self.transport.metadata_document["universe"].append(dict(name="SOL", szDecimals=2, maxLeverage=25, marginTableId=53))
+        self.runtime.discover(self.setting)
+        self.assertEqual(len(self.runtime.console.config["registered"]), 1)
+        self.assertEqual(len(self.runtime.console.view()["catalogue"]), 2)
+        self.runtime.console.start()
+        self.assertEqual(self.runtime.status()["active_subscriptions"], 1)
+        self.assertEqual({self.runtime.bindings[i]["symbol"] for i in self.runtime.source.owners[self.runtime.console.session]}, {"ETH"})
+
+    def test_asset_rebind_write_failure_recovers_after_restart_by_saving_existing_settings(self):
+        row = self.previous_isolated_asset_cache()
         with patch.object(self.runtime.console.config_store, "save", side_effect=OSError("scope disk unavailable")):
             self.runtime.discover(self.setting)
         self.assertEqual(self.runtime.status()["discovery"]["21:production"]["state"], "failed")
@@ -570,7 +590,19 @@ class HyperliquidCatalogueTests(unittest.TestCase):
         self.runtime = ScannerRuntime(self.temp.name, transport=self.transport,
             clock=lambda:self.now[0], utc_clock=lambda:self.now[1], automatic=False)
         self.addCleanup(self.runtime.close)
-        self.runtime.discover(self.setting)
+        self.assertEqual(self.runtime.status()["discovery"]["21:production"]["state"], "ready")
+        app = control_plane_web.ControlPlaneApp(self.temp.name, control_plane.CommandServer(b"f"*32), scanner_console=self.runtime.console)
+        self.addCleanup(app.command_server.close)
+        app.scanner_runtime = self.runtime
+        app.authorize = lambda headers: (200, {})
+        # The persisted ready cache must not suppress recovery through Save Settings.
+        with self.assertRaisesRegex(ValueError, "registered instrument"):
+            self.runtime.console.start()
+        status, body = app.exchange_settings({}, dict(expected_version="1", identity=self.setting["identity"], type="hyperliquid",
+            name=self.setting["name"], environment="production"))
+        self.assertEqual(status, 200, body)
+        for thread in self.runtime.discovery_threads:
+            thread.join(timeout=15)
         scope_row = self.runtime.console.config["scopes"][0]
         self.assertEqual(scope_row["include_assets"], [row["base_asset"]])
         self.assertEqual(scope_row["quote_asset"], row["quote_asset"])

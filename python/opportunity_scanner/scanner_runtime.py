@@ -224,7 +224,9 @@ class ScannerRuntime:
             for setting in after:
                 changed = not any((s["identity"], s["venue"], s["environment"]) == (setting["identity"], setting["venue"], setting["environment"]) for s in before)
                 pending = setting["venue"]+":"+setting["environment"] in self.console.config.get("pending_catalogues", [])
-                self.request_discovery(setting, refresh=changed or pending)
+                # A persisted ready cache cannot prove this process reconciled its scopes.
+                self.request_discovery(setting, refresh=changed or pending or
+                    setting["venue"]+":"+setting["environment"] not in self.discovery_success)
 
     def discover(self, setting, *, generation=None):
         """Replace one source snapshot and reconcile its existing consumer scopes."""
@@ -342,10 +344,13 @@ class ScannerRuntime:
                                 exclude_assets=[rebind(i, base_ids, "perp") for i in scope["exclude_assets"]],
                                 quote_asset=rebind(scope["quote_asset"], quote_ids, "price-denomination"))
                         scopes.append(scope)
-                    if key in console.config.get("pending_catalogues", []) or scopes != console.config["scopes"]:
+                    pending = key in console.config.get("pending_catalogues", [])
+                    if pending or scopes != console.config["scopes"]:
                         candidate = dict(console.config, version=str(int(console.config["version"])+1),
-                            scopes=scopes,
-                            registered=[list(map(str, i)) for i in sorted({tuple(map(int, i)) for i in console.config["registered"]} | incoming)])
+                            scopes=scopes)
+                        if pending:
+                            candidate["registered"] = [list(map(str, i)) for i in sorted(
+                                {tuple(map(int, i)) for i in console.config["registered"]} | incoming)]
                         candidate["pending_catalogues"] = [k for k in console.config.get("pending_catalogues", []) if k != key]
                         if not candidate["pending_catalogues"]:
                             candidate.pop("pending_catalogues")

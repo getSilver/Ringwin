@@ -19,7 +19,10 @@ def main():
     parser.add_argument("--dynamic-okx", action="store_true")
     parser.add_argument("--dynamic-hyperliquid", action="store_true")
     parser.add_argument("--refresh", action="store_true")
+    parser.add_argument("--large-catalogue", action="store_true")
     args=parser.parse_args()
+    if args.large_catalogue and (args.dynamic_okx or args.dynamic_hyperliquid):
+        parser.error("--large-catalogue requires the combined sources")
     with tempfile.TemporaryDirectory(prefix="ringwin-scanner-internal-") as directory:
         now=[2_000_000_000,1_800_000_000_000_000_000]
         transport=DynamicHyperliquidTransport(now) if args.dynamic_hyperliquid else DynamicOkxTransport(now) if args.dynamic_okx else ProtocolTransport(now)
@@ -28,6 +31,9 @@ def main():
                 transport = RefreshTransport(now, args.dynamic_hyperliquid)
             else:
                 transport.okx, transport.hl = RefreshTransport(now), RefreshTransport(now, True)
+        if args.large_catalogue:
+            hl = transport.hl.base if args.refresh else transport.hl
+            hl.metadata_document["universe"] += [dict(name="COIN"+str(n), szDecimals=4, maxLeverage=25, marginTableId=53) for n in range(64)]
         channel=control_plane.CommandServer(b"f"*32)
         owner_time=int(time.time())
         def assemble():

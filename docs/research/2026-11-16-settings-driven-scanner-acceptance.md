@@ -2,6 +2,29 @@
 
 日期：2026-11-16。实施基线：Ringwin `65d68ab0b643e3d8f1b7499b884c0be8dcdb1867`，RingwinUi `04d5c5c`。对应本地 `.scratch/settings-driven-scanner/issues/06-integrate-and-retire-static-config.md`；启动方法见[扫描运行](../scanner-runtime.md)。
 
+## 复审更正及三项修复
+
+06 和实施地图已重新打开；本节更正下方历史“内部实施项已覆盖”和无剩余缺陷的结论，不重新认定整体验收完成。本轮基线为 Ringwin `c7120fb0`、RingwinUi `75f0043`，未使用子代理。
+
+原始复现位于 `.scratch/build/scanner-06-review/`：`probe.log` 记录实际 native 目录 ready 65，以及关闭新品种时登记 1→2／订阅 2；`recovery.log` 记录部分写入失败后重启启动 400、保存设置 200 但未发现、再次启动仍 400。上述场景未被旧检查覆盖。
+
+- 前端目录上限改为 8192，与 Python 注册、缓存和范围持久化合同一致，保留越界拒绝。API 回归接受 65／8192 项、拒绝 8193 项，修复前在 65 项失败。
+- 资产筛选重绑保持原 `registered` 集合；只有 `pending_catalogues` 标识的来源切换／首次目录接纳合并新目录。实际 native worker 回归从旧隔离资产缓存运行，发现 ETH+SOL 时登记与订阅均保持 1；修复前登记变成 2。
+- 保存已有设置在本进程尚无成功发现时强制重新发现，持久化 ready 缓存不再阻止协调。回归注入范围保存失败、重启确认缓存 ready 但无法启动，再通过 `ControlPlaneApp.exchange_settings` 保存同一设置恢复筛选、启动并产出规范盘口；恢复阶段不直接调用 `discover()`。修复前保存 200 后仍保留旧资产筛选。
+
+| 本轮检查 | 结果及证据 |
+|---|---|
+| 受影响 Python | 77/77 通过，153.792 秒；`PYTHONPATH=python python -m unittest test_scanner_integration test_scanner_console test_scanner_history test_exchange_settings test_control_plane_http_headers test_credential_scanner_coexistence`，`fix-affected.log`。 |
+| 最终两项 native 回归 | 2/2 通过；`test_asset_rebind_preserves_registration_when_new_instruments_disabled`、`test_asset_rebind_write_failure_recovers_after_restart_by_saving_existing_settings`，`fix-final-regressions.log`。资产重绑覆盖运行中订阅保持。 |
+| 大目录生产浏览器 | `node tools/verify-scanner-integration-browser.mjs --large-catalogue --settings-lifecycle --restart --refresh --output .scratch/build/scanner-06-review/fix-browser`，14 项通过，外部请求 0。实际 native worker 返回 65 项 HL，加上 OKX 共 67 项；页面配置 ETH、启动、RawIngress、双源刷新／退市／恢复、重启、改名／切环境／删除均通过。证据 `fix-browser/report.json`、`large-catalogue-view.json` 和截图。 |
+| 前端 | 类型检查、生产构建及全部现有 `*.check.mjs` 通过；controlLayout 使用已有 scanner-qa Playwright 路径及 Chromium，未安装依赖。构建保留既有包体积提示。 |
+| Python 全量 | `python -m unittest discover -s python`，431 项，1 失败、3 跳过，1493.324 秒，退出 1；`fix-full-python.log`。唯一失败为 `test_public_acceptance_contract_keeps_frozen_test_dependencies`，实际／预期摘要与此前 `scanner-06-baseline-contract.log` 一致，未修改冻结合同，不声明全量通过。 |
+| 静态检查 | Python 编译、浏览器脚本语法、两仓库差异检查通过。 |
+
+以上日志相对 `.scratch/build/scanner-06-review/`。Standards 自查：按两仓库 AGENTS、ADR 0001／0012 和现有目录组织核对，未发现确定的新违例。Spec 自查：按本轮三项发现核对容量、登记策略、正常保存入口及 native／页面证据，未发现确定的修复遗漏；没有执行独立子代理审查。本轮未修改 Zig 源码或重跑 Zig 全量测试，复用已有 native worker。未连接在线行情、Demo 或真实下单，未推送或部署。
+
+## 以下为历史验收记录
+
 ## 交付行为
 
 正常 ControlPlaneApp 从空目录组装 ScannerRuntime；不读取 `scanner-market.json`，遗留文件损坏或超容量也不影响新入口。所有品种由公共目录发现，OKX worker 必须携带动态绑定与规则。保留旧三个 InstrumentIdentity 的兼容别名仅用于身份稳定，不作为接纳列表或 worker 配置。
