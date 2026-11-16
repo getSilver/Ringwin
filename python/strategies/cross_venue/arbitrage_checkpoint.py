@@ -21,12 +21,32 @@ from strategies.cross_venue import arbitrage_evaluation as evaluation
 from strategies.cross_venue import arbitrage_probability as probability
 import strategy_state as s
 
+# V2 type namespaces are persisted identities, independent of package placement.
+_TYPE_NAMESPACES = {
+    "strategies.cross_venue." + name: name for name in (
+        "arbitrage_baseline", "arbitrage_economics", "arbitrage_state_space",
+        "arbitrage_signals", "arbitrage_admission", "arbitrage_cycle", "arbitrage_maker",
+        "arbitrage_evaluation", "arbitrage_probability", "arbitrage_research",
+        "arbitrage_maker_research", "arbitrage_shadow", "arbitrage_maker_shadow")
+}
+_TYPE_NAMESPACES["opportunity_scanner.arbitrage_scanner"] = "arbitrage_scanner"
+
 
 def content(value):
     """Hash frozen dependencies/input caches without putting them in checkpoints."""
+    return _content(value, packaged=False)
+
+
+def matches_content(value, digest):
+    """Read both V2 encodings emitted before and after the package move."""
+    return content(value) == digest or _content(value, packaged=True) == digest
+
+
+def _content(value, *, packaged):
     def tree(v):
         if is_dataclass(v):
-            return [type(v).__module__, type(v).__name__, [[f.name, tree(getattr(v, f.name))] for f in fields(v)
+            namespace = type(v).__module__ if packaged else _TYPE_NAMESPACES.get(type(v).__module__, type(v).__module__)
+            return [namespace, type(v).__name__, [[f.name, tree(getattr(v, f.name))] for f in fields(v)
                 if not (isinstance(v, b.InstrumentRules) and f.name == "approved_base_pair" and v.approved_base_pair is None)]]
         if type(v) is float:
             return ["binary64_bits_v1", s.encode_number(v)]
@@ -542,7 +562,7 @@ def restore(container, templates, *, expected=None):
     restored = copy.deepcopy(templates)
     for row in rows:
         obj, tag = restored[row["name"]], row["tag"]
-        if TYPES.get(type(obj)) != tag or content(dependency(obj)) != row["dependency"]:
+        if TYPES.get(type(obj)) != tag or not matches_content(dependency(obj), row["dependency"]):
             raise ValueError("frozen dependency mismatch")
         values = structure(SPECS[tag])[1](row["state"])
         validate_configured(obj, tag, values, metadata)

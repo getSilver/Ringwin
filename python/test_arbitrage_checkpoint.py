@@ -1,6 +1,6 @@
 """Actual strategy objects continue through the Host checkpoint boundary."""
 import unittest
-from dataclasses import replace
+from dataclasses import replace, fields, make_dataclass
 from fractions import Fraction as F
 import copy
 import math
@@ -8,6 +8,8 @@ import io
 import struct
 import subprocess
 import sys
+import json
+from pathlib import Path
 
 from strategies.cross_venue import arbitrage_baseline as b
 from strategies.cross_venue import arbitrage_checkpoint as recovery
@@ -35,6 +37,40 @@ def roundtrip(components, cursor=0, next_intent=1):
 
 
 class RecoveryTests(unittest.TestCase):
+    def test_running_checkpoints_from_both_package_layouts_resume_without_duplicate_repair(self):
+        saved = json.loads((Path(__file__).resolve().parents[1] /
+            "src/testing/fixtures/strategy_cycle_package_move_v2.json").read_text(encoding="utf-8"))
+        f = facts(orders=(done(1, 0, 10), done(2, 1, 6)), positions=(F(10), F(6)), safe_reduce_lots=(10, 6))
+        for name, row in saved.items():
+            with self.subTest(layout=name):
+                container = host.encode_checkpoint(row["metadata"], row["state"])
+                metadata_, restored = recovery.restore(container, {"cycle": cycle.Cycle(plan())})
+                current = restored["cycle"]
+                self.assertEqual((current.phase, current.repair_used, current.next_sequence), ("repairing", 1, 4))
+                before = recovery.checkpoint(metadata_, restored)
+                self.assertEqual(current.apply(f).reason, "duplicate_cursor")
+                self.assertEqual(recovery.checkpoint(metadata_, restored), before)
+                with self.assertRaisesRegex(ValueError, "cursor_content_conflict"):
+                    current.apply(replace(f, economic_ref="different-economic-fact"))
+                wrong = cycle.Cycle(replace(plan(), exit_deadline_ns=T+200))
+                with self.assertRaisesRegex(ValueError, "frozen dependency mismatch"):
+                    recovery.restore(container, {"cycle": wrong})
+                self.assertEqual(current.apply(replace(f, cursor=3)).queries, (3,))
+                self.assertEqual((current.repair_used, current.next_sequence), (1, 4))
+                canonical = recovery.checkpoint(meta(3, 4), restored)
+                canonical_state = host.decode_checkpoint(canonical)[1]
+                self.assertEqual(canonical_state["components"][0]["dependency"],
+                    saved["before_package_move"]["state"]["components"][0]["dependency"])
+                self.assertEqual(recovery.restore(canonical, {"cycle": cycle.Cycle(plan())})[1]["cycle"].cursor, 3)
+
+    def test_dependency_namespaces_do_not_alias_unrelated_types_with_the_same_name(self):
+        spec = b.WindowSpec(1, 3, 2, .001, 0.)
+        foreign = make_dataclass("WindowSpec", [(f.name, f.type) for f in fields(spec)], frozen=True)
+        foreign.__module__ = "unrelated.arbitrage_baseline"
+        value = foreign(**vars(spec))
+        self.assertNotEqual(recovery.content(value), recovery.content(spec))
+        self.assertFalse(recovery.matches_content(value, recovery.content(spec)))
+
     def test_rolling_continues_with_exact_state_and_statistics(self):
         from strategies.cross_venue import arbitrage_checkpoint as recovery
         window = b.RollingWindow(b.WindowSpec(1, 3, 2, .001, 0.))

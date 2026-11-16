@@ -358,8 +358,8 @@ class Cycle:
         if facts.cursor < self.cursor:
             return Action(self.plan, self.cursor, "stale_cursor")
         if facts.cursor == self.cursor:
-            from strategies.cross_venue.arbitrage_checkpoint import content
-            if self.last_facts_digest != content(facts):
+            from strategies.cross_venue.arbitrage_checkpoint import matches_content
+            if not matches_content(facts, self.last_facts_digest):
                 raise b.Rejected("cursor_content_conflict")
             return Action(self.plan, self.cursor, "duplicate_cursor")
         if facts.at_ns < self.last_at_ns:

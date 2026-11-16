@@ -1,0 +1,202 @@
+{
+  "before_package_move": {
+    "source_commit": "1ddd87873a6becb538ec829146ecfb3c1f0c2551",
+    "metadata": {
+      "schema_registry": 1339673755198158349044581307228491536,
+      "strategy": 9,
+      "definition": 2,
+      "state_schema": 89506503362804514197980617525950414849,
+      "state_schema_version": 2,
+      "config_version": 1,
+      "cursor": 2,
+      "next_intent": 4
+    },
+    "state": {
+      "numeric_codec": "binary64_bits_v1",
+      "algorithm_version": "strategy_components_v2",
+      "model_algorithms": {
+        "baseline": "baseline_binary64_v1",
+        "state_space": "state_space_joseph_binary64_v1"
+      },
+      "components": [
+        {
+          "name": "cycle",
+          "tag": "cycle",
+          "dependency": "39c204b916b6f1a251bce841b8d752c2a19656aa4915e0f6ad93a7f3089e0c4d",
+          "state": {
+            "phase": "repairing",
+            "next_sequence": 4,
+            "pending": [
+              3
+            ],
+            "issued": [
+              {
+                "sequence": 1,
+                "leg": 0,
+                "lots": 10,
+                "limit_ticks": 1001,
+                "reducing": false
+              },
+              {
+                "sequence": 2,
+                "leg": 1,
+                "lots": 10,
+                "limit_ticks": 1099,
+                "reducing": false
+              },
+              {
+                "sequence": 3,
+                "leg": 1,
+                "lots": 4,
+                "limit_ticks": 1099,
+                "reducing": false
+              }
+            ],
+            "cursor": 2,
+            "last_at_ns": 10002,
+            "cycle_ref": {
+              "tag": "present",
+              "value": "core-cycle"
+            },
+            "reservation_ref": {
+              "tag": "present",
+              "value": "core-reservation"
+            },
+            "repair_used": 1,
+            "exit_used": 0,
+            "target_atoms": {
+              "tag": "none"
+            },
+            "target_cursor": {
+              "tag": "none"
+            },
+            "first_exit": {
+              "tag": "none"
+            },
+            "reasons": [],
+            "before_reconciling": {
+              "tag": "none"
+            },
+            "last_economic_ref": {
+              "tag": "present",
+              "value": "economic:0"
+            },
+            "last_facts_digest": {
+              "tag": "present",
+              "value": "35421798f70fb2179774b772907450af06a86d831c58b7d9a234190220d19b71"
+            },
+            "matched_base": {
+              "tag": "none"
+            },
+            "entry_cursor": {
+              "tag": "none"
+            },
+            "entry_valid_until_ns": {
+              "tag": "none"
+            }
+          }
+        }
+      ]
+    }
+  },
+  "after_package_move": {
+    "source_commit": "7f21022bf87dc6a9ae2228710e26cb50f05188ea",
+    "metadata": {
+      "schema_registry": 1339673755198158349044581307228491536,
+      "strategy": 9,
+      "definition": 2,
+      "state_schema": 89506503362804514197980617525950414849,
+      "state_schema_version": 2,
+      "config_version": 1,
+      "cursor": 2,
+      "next_intent": 4
+    },
+    "state": {
+      "numeric_codec": "binary64_bits_v1",
+      "algorithm_version": "strategy_components_v2",
+      "model_algorithms": {
+        "baseline": "baseline_binary64_v1",
+        "state_space": "state_space_joseph_binary64_v1"
+      },
+      "components": [
+        {
+          "name": "cycle",
+          "tag": "cycle",
+          "dependency": "47fe57ed47adfd73bf999e996403b728c4f8e9aa83ef7a3ed17a1002f2381cbd",
+          "state": {
+            "phase": "repairing",
+            "next_sequence": 4,
+            "pending": [
+              3
+            ],
+            "issued": [
+              {
+                "sequence": 1,
+                "leg": 0,
+                "lots": 10,
+                "limit_ticks": 1001,
+                "reducing": false
+              },
+              {
+                "sequence": 2,
+                "leg": 1,
+                "lots": 10,
+                "limit_ticks": 1099,
+                "reducing": false
+              },
+              {
+                "sequence": 3,
+                "leg": 1,
+                "lots": 4,
+                "limit_ticks": 1099,
+                "reducing": false
+              }
+            ],
+            "cursor": 2,
+            "last_at_ns": 10002,
+            "cycle_ref": {
+              "tag": "present",
+              "value": "core-cycle"
+            },
+            "reservation_ref": {
+              "tag": "present",
+              "value": "core-reservation"
+            },
+            "repair_used": 1,
+            "exit_used": 0,
+            "target_atoms": {
+              "tag": "none"
+            },
+            "target_cursor": {
+              "tag": "none"
+            },
+            "first_exit": {
+              "tag": "none"
+            },
+            "reasons": [],
+            "before_reconciling": {
+              "tag": "none"
+            },
+            "last_economic_ref": {
+              "tag": "present",
+              "value": "economic:0"
+            },
+            "last_facts_digest": {
+              "tag": "present",
+              "value": "215a896cef7484605916794bb42008da7cc40da5fab2c7ad271e82d47bdb4520"
+            },
+            "matched_base": {
+              "tag": "none"
+            },
+            "entry_cursor": {
+              "tag": "none"
+            },
+            "entry_valid_until_ns": {
+              "tag": "none"
+            }
+          }
+        }
+      ]
+    }
+  }
+}

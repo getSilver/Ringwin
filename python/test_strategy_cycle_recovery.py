@@ -314,6 +314,20 @@ def exchange(saved, *, activation_digest=None, consume_activation=True, activati
 
 
 class CycleRecoveryTests(unittest.TestCase):
+    def test_frozen_v2_checkpoints_restore_without_changing_dependencies_or_progress(self):
+        root = Path(__file__).resolve().parents[1] / "src/testing/fixtures"
+        for maker_mode, name in ((False, "strategy_cycle_recovery_v2.json"), (True, "strategy_maker_recovery_v2.json")):
+            with self.subTest(maker_mode=maker_mode):
+                state = json.loads((root/name).read_text(encoding="utf-8"))
+                saved = host.encode_checkpoint(fixture.meta(), state)
+                metadata, restored = recovery.restore(saved, core_templates(maker_mode))
+                self.assertEqual(recovery.checkpoint(metadata, restored), saved)
+                self.assertEqual(restored["cycle"].phase, "idle")
+                wrong = core_templates(maker_mode)
+                wrong["cycle"].plan = replace(wrong["cycle"].plan, exit_deadline_ns=CORE_UTC+20_000_000_000)
+                with self.assertRaisesRegex(ValueError, "frozen dependency mismatch"):
+                    recovery.restore(saved, wrong)
+
     def test_public_acceptance_contract_keeps_frozen_test_dependencies(self):
         contract = json.loads((Path(__file__).resolve().parents[1] /
             "src/testing/fixtures/cross_venue_acceptance_contract.json").read_text(encoding="utf-8"))
