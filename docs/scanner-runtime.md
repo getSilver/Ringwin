@@ -51,6 +51,8 @@ OKX 动态目录的 `specification` 返回产品、资产、状态、tick、lot�
 
 正常 transport 使用有超时和容量限制的公共 HTTPS REST。OKX 调用 `/api/v5/public/instruments` 和 `/api/v5/market/books?sz=5`；Hyperliquid 调用 `/info` 的 `meta` 和 `l2Book`。依据 [OKX 官方接口](https://www.okx.com/docs-v5)及 [Hyperliquid 官方接口](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api)。元数据在来源启动及每 30 秒刷新，每轮轮询发布完整替换快照。
 
+公共 transport 不发送 `User-Agent`，通过请求私有的 urllib opener 禁用默认 `Python-urllib` 标识；不修改全局 opener、系统代理或 TLS 验证。该默认标识在本机网络对 OKX 触发 HTTP 403／Cloudflare 1010；省略字段后在线时间、永续目录和盘口返回业务码 0。HTTP 线上请求回归同时覆盖 GET 和 JSON POST。网络超时、目录解码与规则拒绝仍独立报告，接口可达不表示整个目录已被接纳。
+
 动态目录最多 8192 条；每个 OKX SPOT／SWAP 响应最多 4096 行、4 MiB，并受原有 4 MiB 捕获预算约束。实际同时订阅最多 16 个品种，超限要求缩小资产范围；每品种拥有独立 native worker／session／动态绑定，不共享注册槽位。OKX 普通行情及订阅元数据响应仍最多 120 KiB，超限明确失败，不截取部分目录。Zig 单个 OKX feed 有 16 个状态槽（3 个保留兼容、13 个动态）；畸形帧可同时撤销全部槽位的健康状态。
 
 每个公共来源使用独立只读 native worker。private pipe 复用现有有界请求实现，校验 schema、会话、连续序号、时间和深度 codec；不涉及 StrategyHost，不增加共享内存。来源终止后迟到结果被拒绝。停止／暂停先撤销候选，然后释放自身订阅；其他消费者的所有权保留。

@@ -48,7 +48,10 @@ class PublicTransport:
     def request(self, url, body=None, *, max_bytes=MAX_FRAME):
         data = None if body is None else json.dumps(body, separators=(",", ":")).encode()
         request = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(request, timeout=3) as response:
+        # urllib's default client signature is rejected by the OKX public gateway.
+        opener = urllib.request.build_opener()
+        opener.addheaders = []
+        with opener.open(request, timeout=3) as response:
             payload = response.read(max_bytes + 1)
         if len(payload) > max_bytes:
             raise ValueError("public transport capacity exceeded")

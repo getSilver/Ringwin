@@ -18,6 +18,39 @@ import owner_session
 from opportunity_scanner.scanner_runtime import ScannerRuntime, PublicTransport
 
 
+class PublicTransportTests(unittest.TestCase):
+    def test_public_requests_omit_user_agent_on_the_wire(self):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        captured = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                captured.append((self.command, self.headers.get("User-Agent"),
+                    self.rfile.read(int(self.headers.get("Content-Length", "0")))))
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b'{"code":"0"}')
+
+            do_POST = do_GET
+
+            def log_message(self, *args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            transport = PublicTransport()
+            url = f"http://127.0.0.1:{server.server_port}/public"
+            self.assertEqual(json.loads(transport.request(url)), {"code": "0"})
+            self.assertEqual(json.loads(transport.request(url, {"type": "meta"})), {"code": "0"})
+            self.assertEqual(captured, [("GET", None, b""), ("POST", None, b'{"type":"meta"}')])
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+
 class DynamicOkxTransport(PublicTransport):
     input_kind = "synthetic_protocol_fixture"
 
