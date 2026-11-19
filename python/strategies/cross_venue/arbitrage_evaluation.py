@@ -665,7 +665,7 @@ def _condition(row, context, forecast):
     current_s = b.finite(math.log(float(e.exact(current_mids[1]/current_mids[0]))))
     for source in row.scenarios:
         if (source.entry.matched_base != context.entry.matched_base
-                or any(a.rules != z.rules or a.kind != z.kind or a.direction != z.direction or a.exit_fee != z.exit_fee or a.account != z.account
+                or any(a.rules != z.rules or a.kind != z.kind or a.direction != z.direction or replace(a.exit_fee, valid_from_ns=0, valid_until_ns=1) != replace(z.exit_fee, valid_from_ns=0, valid_until_ns=1) or a.account != z.account
                        for a, z in zip(source.entry.legs, context.entry.legs))):
             raise b.Rejected("conditional_instrument_or_quantity_scope")
         first = source.markets[0]

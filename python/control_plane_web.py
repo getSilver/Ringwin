@@ -254,6 +254,10 @@ class ControlPlaneApp:
             self.scanner_runtime = ScannerRuntime(directory,
                 asset_provider=getattr(projection_provider, "asset_bindings", None))
             scanner_console = self.scanner_runtime.console
+        from opportunity_scanner.fee_schedules import FeeSchedules
+        self.fee_schedules = (self.scanner_runtime.fees if self.scanner_runtime is not None
+                              else FeeSchedules(Path(directory)/"manual-fees.json"))
+        scanner_console.fee_schedules = self.fee_schedules
         self.scanner_console = scanner_console
         if scanner_console is not None and scanner_console.config_store is None:
             scanner_console.bind_config(Path(directory)/"scanner-config.json")
@@ -560,6 +564,17 @@ class ControlPlaneApp:
             return 404, b"asset not found", "text/plain"
         return 200, target.read_bytes(), mimetypes.guess_type(target.name)[0] or "application/octet-stream"
 
+    def manual_fees(self, headers, request=None):
+        status, body = self.authorize(headers)
+        if status != 200:
+            return status, body
+        try:
+            with self.scanner_console.lock:
+                result = self.fee_schedules.view() if request is None else self.fee_schedules.save(request)
+                return 200, {"ok": True, "result": result}
+        except (ValueError, OSError) as error:
+            return 409, {"ok": False, "error": str(error)}
+
     def exchange_settings(self, headers, request=None):
         status, body = self.authorize(headers)
         if status != 200:
@@ -786,6 +801,7 @@ def make_handler(app: ControlPlaneApp):
                     lambda body: app.strategy_instances(dict(self.headers), body)),
                 "/api/scanner": lambda: self._post(
                     lambda body: app.scanner(dict(self.headers), body)),
+                "/api/manual-fees": lambda: self._post(lambda body: app.manual_fees(dict(self.headers), body)),
                 "/api/exchange-settings": lambda: self._post(
                     lambda body: app.exchange_settings(dict(self.headers), body)),
             }
@@ -811,6 +827,7 @@ def make_handler(app: ControlPlaneApp):
                 "/api/releases": lambda: self._get(app.releases),
                 "/api/strategy-instances": lambda: self._get(app.strategy_instances),
                 "/api/scanner": lambda: self._get(app.scanner),
+                "/api/manual-fees": lambda: self._get(app.manual_fees),
                 "/api/exchange-settings": lambda: self._get(app.exchange_settings),
             }
             handler = routes.get(self.path)

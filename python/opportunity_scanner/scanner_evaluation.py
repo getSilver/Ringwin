@@ -26,8 +26,9 @@ def publish_inputs(path, document):
 
 
 class EvaluationInputs:
-    def __init__(self, path, clock_id, *, synthetic=False):
+    def __init__(self, path, clock_id, *, synthetic=False, fees=None):
         self.path, self.clock_id, self.synthetic = Path(path), clock_id, synthetic
+        self.fees = fees
         self.version, self.digest = 0, None
         self.books = {}
         self.state = dict(state="unloaded", clock_id=clock_id, missing=["evaluation_inputs"], plans=0)
@@ -127,6 +128,16 @@ class EvaluationInputs:
                 failures[identity] = "evaluation_case_missing"
             for case in cases:
                 try:
+                    if self.fees is not None:
+                        fee_version = self.fees.view()["version"]
+                        current_fees = tuple(self.fees.rule(o, version=fee_version) for o in pairs[key[0]])
+                        if any(new.fee_asset != old.fee_asset for new, old in zip(current_fees, case["entry_fees"])):
+                            raise b.Rejected("fees_asset_evidence_missing")
+                        case = dict(case, entry_fees=current_fees,
+                            versions=dict(case["versions"], fees=fee_version),
+                            scenarios=tuple(replace(sc, entry=replace(sc.entry,
+                                legs=tuple(replace(leg, exit_fee=current_fees[i])
+                                           for i, leg in enumerate(sc.entry.legs)))) for sc in case["scenarios"]))
                     plan = self._plan(case, pairs[key[0]], at_ns, max_age_ns, max_skew_ns, bindings,
                                       doc["valid_until_ns"])
                     if any(old.key == plan.key and old.policy.original_base == plan.policy.original_base for old in plans):

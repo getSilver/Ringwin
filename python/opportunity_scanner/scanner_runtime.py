@@ -95,8 +95,10 @@ class ScannerRuntime:
         self.asset_provider = asset_provider or (lambda: dict(schema=1, bindings=[]))
         self.asset_bindings = AssetBindings(dict(schema=1, bindings=[]))
         self.asset_binding_digest = None
+        from opportunity_scanner.fee_schedules import FeeSchedules
+        self.fees = FeeSchedules(self.directory/"manual-fees.json")
         self.evaluation = EvaluationInputs(self.directory/"scanner-evaluation.json", secrets.token_hex(16),
-            synthetic=getattr(self.transport, "input_kind", "venue_public") == "synthetic_protocol_fixture")
+            fees=self.fees, synthetic=getattr(self.transport, "input_kind", "venue_public") == "synthetic_protocol_fixture")
         self.lock = threading.RLock()
         self.poll_lock = threading.Lock()
         self.bindings, entries = {}, []

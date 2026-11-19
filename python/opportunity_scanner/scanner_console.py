@@ -132,6 +132,7 @@ class ScannerConsole:
             statistics=dict(version="1", min_profit_atoms="0", min_probability_ppm=0))
         self.config_store = None
         self.exchange_settings = None
+        self.fee_schedules = None
         self.settings_pending = False
         if config_path is not None:
             self.bind_config(config_path)
@@ -567,6 +568,8 @@ class ScannerConsole:
             row = next((x for x in self.snapshot["candidates"] if x["id"] == selection["candidate_id"]), None)
             if selection["enabled"] and (row is None or row["status"] != "evaluated"):
                 raise ValueError("current evaluated candidate required")
+            if selection["enabled"] and self.fee_schedules is not None:
+                self.fee_schedules.require_current(row.get("input_versions", {}).get("fees"))
             if self.authority is None or self.resolve_selection is None:
                 raise ValueError("core pair authorization unavailable")
             # Disabling uses the trusted node binding, not an expired recommendation.
