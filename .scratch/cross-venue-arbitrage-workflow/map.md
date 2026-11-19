@@ -37,6 +37,7 @@ Status: open
 ## Frontier
 
 - [03 按用户选择生成跨产品、跨环境候选](issues/03-pairing.md)
+- [03 按用户选择生成跨产品、跨环境候选](issues/03-pairing.md)
 - [04 手动费率贯穿扫描和开仓复核](issues/04-fees.md)
 - [05 USDT/USDC 平价估值与汇差归因](issues/05-stablecoin.md)
 - [07 跨所策略以空交易名单启动](issues/07-empty-list.md)

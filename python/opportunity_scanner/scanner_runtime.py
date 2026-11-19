@@ -416,7 +416,7 @@ class ScannerRuntime:
                     state = dict(state="ready", error="", rejected=rejected, evidence=evidence,
                                  count=len(entries), complete=True, refresh_ns=str(CATALOGUE_REFRESH_NS), ttl_ns=str(CATALOGUE_TTL_NS),
                                  asset_binding_digest=registry.digest,
-                                 asset_binding_gaps=[dict(symbol=r["symbol"], codes=self._asset_codes(r), missing=[role for role, binding in r["asset_associations"].items() if binding is None])
+                                 asset_binding_gaps=[dict(symbol=r["symbol"], codes=self._asset_codes(r, adapter), missing=[role for role, binding in r["asset_associations"].items() if binding is None])
                                      for r in rows if any(binding is None for binding in r["asset_associations"].values())])
                     sources = {k:v for k,v in self.discovery_status.items() if v["state"] == "ready"}
                     sources[key] = state
@@ -546,18 +546,17 @@ class ScannerRuntime:
                 self.request_discovery(setting, refresh=True)
 
     @staticmethod
-    def _asset_codes(row):
+    def _asset_codes(row, adapter):
         spec = row.get("specification", {})
         codes = dict(base=spec.get("base", row["symbol"]),
                      quote=spec.get("quote", spec.get("price_quote")))
-        if row["venue"] == 21:
-            codes["settlement"] = "USDC"
+        if adapter.settlement_code is not None:
+            codes["settlement"] = adapter.settlement_code
         return codes
 
-    @classmethod
-    def _asset_basis(cls, row):
+    def _asset_basis(self, row):
         return dict(symbol=row["symbol"], bindings=row.get("asset_associations", {}),
-                    codes=cls._asset_codes(row), base_units_per_lot=row["lot_base"],
+                    codes=self._asset_codes(row, self.adapters[row["venue"]]), base_units_per_lot=row["lot_base"],
                     base_units_per_wire_unit=row.get("contract_value") or "1")
 
     def _asset(self, setting, code, assets):
@@ -580,10 +579,7 @@ class ScannerRuntime:
         if associations is None:  # Old caches must still undergo fresh discovery before use.
             return
         spec = row["specification"]
-        codes = dict(base=spec.get("base", row["symbol"]),
-                     quote=spec.get("quote", spec.get("price_quote")))
-        if adapter.settlement_code is not None:
-            codes["settlement"] = adapter.settlement_code
+        codes = cls._asset_codes(row, adapter)
         if type(associations) is not dict or set(associations) != set(codes):
             raise ValueError("saved asset associations")
         registry = AssetBindings(dict(schema=1, bindings=[r for r in associations.values() if r is not None]), allow_fixture=True)
