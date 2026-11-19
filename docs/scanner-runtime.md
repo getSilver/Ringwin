@@ -8,9 +8,14 @@ Python 跨场所策略实现位于 `python/strategies/cross_venue/`，机会扫�
 
 ```powershell
 python tools/zig-entry.py build-exe src/runtime/scanner_market_node.zig -O ReleaseSafe --stack 536870912 "-femit-bin=zig-out/bin/ringwin-scanner-market.exe"
+python tools/zig-entry.py build-exe src/testing/integration/control_projection_probe.zig -O ReleaseSafe --stack 536870912 "-femit-bin=zig-out/bin/ringwin-control-projection.exe"
 npm.cmd --prefix D:/github/RingwinUi run build
 python python/control_plane_node.py --directory .scratch/run/scanner --ui D:/github/RingwinUi/dist/index.html --port 8765
 ```
+
+Web 默认使用 `zig-out/bin/ringwin-control-projection`（Windows 带 `.exe`）读取核心目录内的 `shard-*.journal`。用 `--core-directory` 指向独立的核心目录，省略时使用 `--directory`。用 `--projection-probe` 可指定已安装的探针路径。登记以已封存部署中的生效资产定义和环境为准。目录没有登记时，扫描页面按来源和品种显示缺少的敞口、报价或结算代码。
+
+候选详情显示两腿的 AssetIdentity、登记版本、原子精度与合约数量换算。OKX 线性合约按 `ctVal` 将协议数量换算成敞口数量，盘口计算保留固定观察精度。关联刷新时先撤销旧候选，完成当前登记下的目录重建和盘口预热后再生成候选。本次运行的历史复算材料保留当时的绑定和合约单位。
 
 首次启动在本机终端设置 Owner 口令，并按现有 setup 结果保存 TOTP 信息。访问 `http://127.0.0.1:8765`，复用正常登录、内存 CSRF 和扫描 API。刷新需要重新认证，已有服务端历史仍可查询。
 
@@ -33,7 +38,7 @@ python python/control_plane_node.py --directory .scratch/run/scanner --ui D:/git
 | Hyperliquid (21) | production | 主网公共 info REST | 默认标准永续 meta 动态目录（collateralToken=0） |
 | Hyperliquid (21) | testnet | Testnet 公共 info REST | 默认标准永续 meta 动态目录（collateralToken=0） |
 
-其他 Venue／环境／产品拒绝。Hyperliquid 没有 demo 别名，不支持现货包装资产、HIP-3 或跨报价币换算。市场与观察来源身份保持 Venue／环境隔离。内部已核对主网 BTC／ETH 标准永续基础资产关联，采用与 OKX 对应观察资产相同的 18 位观察单位；USDT 价格与 USDC 结算分别处理。未知、包装或缩放标签不因同名配对，Testnet 保留独立资产空间。两个已确认基础资产限制的是关联覆盖，而非市场发现；用户无需维护文件。依据与剩余边界见[观察资产关联核对](research/2026-11-16-scanner-observation-asset-pairing.md)。
+其他 Venue／环境／产品拒绝。Hyperliquid 没有 demo 别名，不支持现货包装资产、HIP-3 或跨报价币换算。市场与观察来源身份保持 Venue／环境隔离。标准永续敞口与报价按核心登记查找，使用共享的 18 位观察精度。USDT 报价与 USDC 结算分别记录，Testnet 保留独立资产空间。未登记的代码保留来源身份；没有可验证数量换算的缩放标签不能继承普通资产身份。
 
 当前在线目录和区域端点可用性没有验收，不能因本表列出协议能力就假定某个市场仍在线。实际元数据不匹配时失败关闭，不改名、回退或替换资产。
 

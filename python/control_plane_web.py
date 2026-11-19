@@ -229,7 +229,7 @@ class ControlPlaneApp:
     def __init__(self, directory: str, server: control_plane.CommandServer,
                  clock=lambda: int(time.time()),
                  projection_provider=None, ui_path=None, release_manager=None,
-                 lifecycle_outbox=None, instance_source=None, scanner_console=None):
+                 lifecycle_outbox=None, instance_source=None, scanner_console=None, asset_provider=None):
         self.directory = directory
         self.clock = clock
         self.passphrases = owner_session.PassphraseStore(directory)
@@ -252,7 +252,8 @@ class ControlPlaneApp:
         if scanner_console is None:
             from opportunity_scanner.scanner_runtime import ScannerRuntime
             self.scanner_runtime = ScannerRuntime(directory,
-                asset_provider=getattr(projection_provider, "asset_bindings", None))
+                asset_provider=asset_provider if asset_provider is not None else
+                getattr(projection_provider, "asset_bindings", None))
             scanner_console = self.scanner_runtime.console
         from opportunity_scanner.fee_schedules import FeeSchedules
         self.fee_schedules = (self.scanner_runtime.fees if self.scanner_runtime is not None

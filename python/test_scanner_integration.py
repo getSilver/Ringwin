@@ -753,6 +753,44 @@ class HyperliquidCatalogueTests(unittest.TestCase):
 
 
 class IntegrationTests(unittest.TestCase):
+    def test_scaled_okx_contract_uses_registered_exposure_and_archives_basis(self):
+        self.runtime.console.exchange_settings = self.app.exchange_settings_store
+        self.save_settings()
+        self.call("configure", dict(expected_version="0", scopes=[dict(scope(1), product="linear"), scope(21)]))
+        self.call("start")
+        self.tick()
+        view = self.call("start")
+        self.assertTrue(view["snapshot"]["candidates"])
+        okx = next(o for o in view["market"]["observations"] if o["venue"] == "1")
+        basis = okx["asset_basis"]
+        self.assertEqual(basis["bindings"]["base"]["asset"], "4")
+        self.assertEqual(basis["bindings"]["base"]["atomic_scale"], 8)
+        self.assertEqual(basis["base_units_per_lot"], "1/10")
+        self.assertEqual(okx["bid_depth_atoms"], ["600000000000000000000", "1"])
+        digest, = self.runtime.console.last_evidence
+        from opportunity_scanner.scanner_archive import load
+        saved = load(self.runtime.console.history.artifact(digest))
+        self.assertTrue(any(row.get("asset_basis") == basis for row in saved["supplied_evidence"].values()))
+        self.assertTrue(self.runtime.console.replay(digest)["matches"])
+
+    def test_projection_failure_revokes_both_sources_and_recovers(self):
+        self.start()
+        self.assertTrue(self.call("start")["snapshot"]["candidates"])
+        def unavailable():
+            raise OSError("registry unavailable")
+        self.runtime.asset_provider = unavailable
+        settings = self.app.exchange_settings_store.view()["exchanges"]
+        self.runtime.discover(settings[0])
+        view = self.call("start")
+        self.assertEqual(view["snapshot"]["candidates"], [])
+        self.assertEqual(view["market"]["observations"], [])
+        self.assertTrue(all("registry unavailable" in s["error"] for s in view["market"]["discovery"].values()))
+        self.runtime.asset_provider = registered_assets
+        for setting in settings:
+            self.runtime.discover(setting)
+        self.tick()
+        self.assertTrue(self.call("start")["snapshot"]["candidates"])
+
     def test_registered_SOL_enters_native_cross_venue_pairing(self):
         self.transport.coin = "SOL"
         self.start()
@@ -809,6 +847,18 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(len(view["market"]["observations"]), 2)
         self.assertEqual(view["snapshot"]["candidates"], [])
 
+    def test_missing_quote_registration_reports_exact_source_code(self):
+        document = registered_assets()
+        document["bindings"] = [r for r in document["bindings"] if
+                                (r["venue"], r["environment"], r["code"]) != ("21", "production", "USDT")]
+        self.runtime.asset_provider = lambda: document
+        self.start()
+        view = self.call("start")
+        self.assertEqual(view["snapshot"]["candidates"], [])
+        gap, = view["market"]["discovery"]["21:production"]["asset_binding_gaps"]
+        self.assertEqual(gap["missing"], ["quote"])
+        self.assertEqual(gap["codes"]["quote"], "USDT")
+
     def test_registry_change_revokes_old_pair_and_preserves_registration_and_filter(self):
         self.transport.coin = "SOL"
         self.start()
@@ -820,6 +870,7 @@ class IntegrationTests(unittest.TestCase):
         self.call("configure", dict(expected_version=self.runtime.console.config["version"], scopes=rows))
         self.tick()
         self.assertTrue(self.call("start")["snapshot"]["candidates"])
+        digest, = self.runtime.console.last_evidence
         document = registered_assets()
         for binding in document["bindings"]:
             if binding["venue"] == "21" and binding["code"] == "SOL":
@@ -831,6 +882,11 @@ class IntegrationTests(unittest.TestCase):
         newer = next(r["base_asset"] for r in self.runtime.bindings.values() if r["venue"] == 21)
         self.assertNotEqual(old, newer)
         self.assertEqual(self.runtime.console.config["scopes"][1]["include_assets"], [newer])
+        from opportunity_scanner.scanner_archive import load
+        archived = load(self.runtime.console.history.artifact(digest))
+        hl_evidence = next(r for r in archived["supplied_evidence"].values() if r.get("venue") == "21")
+        self.assertEqual(hl_evidence["asset_basis"]["bindings"]["base"]["version"], "1")
+        self.assertTrue(self.runtime.console.replay(digest)["matches"])
 
     def test_explicit_source_alias_pairs_and_survives_restart(self):
         document = registered_assets()
@@ -849,9 +905,11 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(len(self.call("start")["snapshot"]["candidates"]), 3)
         before = set(self.runtime.source.registered)
         self.runtime.close()
+        current = dict(document, bindings=[dict(r, version="2") if r["asset"] == "4" else r
+                                          for r in reversed(document["bindings"])])
         self.runtime = ScannerRuntime(self.temp.name, transport=self.transport,
             clock=lambda:self.now[0], utc_clock=lambda:self.now[1], automatic=False,
-            asset_provider=lambda: dict(document, bindings=list(reversed(document["bindings"]))))
+            asset_provider=lambda: current)
         self.app.scanner_runtime, self.app.scanner_console = self.runtime, self.runtime.console
         self.runtime.console.exchange_settings = self.app.exchange_settings_store
         self.assertEqual(set(self.runtime.source.registered), before)
@@ -859,7 +917,10 @@ class IntegrationTests(unittest.TestCase):
         for setting in self.app.exchange_settings_store.view()["exchanges"]:
             self.runtime.discover(setting)
         self.call("start"); self.tick()
-        self.assertEqual(len(self.call("start")["snapshot"]["candidates"]), 3)
+        view = self.call("start")
+        self.assertEqual(len(view["snapshot"]["candidates"]), 3)
+        self.assertEqual({row["asset_basis"]["bindings"]["base"]["version"]
+                          for row in view["market"]["observations"]}, {"2"})
 
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

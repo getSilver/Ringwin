@@ -1,10 +1,13 @@
 """Activated identity bindings, not symbol guesses, feed existing pairing rules."""
 import copy
+from pathlib import Path
 import tempfile
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import control_plane
+import control_plane_node
 import control_plane_web
 from opportunity_scanner.scanner_assets import AssetBindings as CheckedBindings
 from test_scanner_integration import registered_assets
@@ -84,6 +87,29 @@ class BindingTests(unittest.TestCase):
             self.addCleanup(app.scanner_runtime.close)
             self.assertEqual(app.scanner_runtime.asset_provider(), registered_assets())
             self.assertEqual(app.scanner_runtime.console.desired, "stopped")
+
+    def test_normal_node_wires_core_journal_to_asset_probe(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            core = root / "core"
+            core.mkdir()
+            (core / "shard-1.journal").write_bytes(b"journal")
+            argv = ["control_plane_node", "--directory", str(root / "web"),
+                    "--ui", str(root / "index.html"), "--core-directory", str(core),
+                    "--projection-probe", str(root / "projection")]
+            with patch("sys.argv", argv), patch.object(control_plane_node, "ControlPlaneApp") as app:
+                app.return_value.passphrases.exists.return_value = True
+                with patch.object(control_plane_node, "ThreadingHTTPServer"):
+                    control_plane_node.main()
+                app.call_args.args[1].close()
+            asset_provider = app.call_args.kwargs["asset_provider"]
+            def probe(command, **_):
+                self.assertEqual(command[:2], [str(root / "projection"), "assets"])
+                self.assertEqual(Path(command[2]).read_text(), b"journal".hex())
+                return SimpleNamespace(returncode=0, stdout='{"schema":1,"bindings":[]}')
+            with patch("subprocess.run", side_effect=probe) as run:
+                self.assertEqual(asset_provider(), dict(schema=1, bindings=[]))
+                run.assert_called_once()
 
 
 if __name__ == "__main__":

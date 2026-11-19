@@ -255,15 +255,15 @@ class ScannerRuntime:
                 self.discovery_status[key] = dict(state="loading", error="")
             try:
                 rows, rejected, evidence = [], [], []
-                registry = AssetBindings(self.asset_provider(),
-                    allow_fixture=getattr(self.transport, "input_kind", "venue_public") == "synthetic_protocol_fixture")
+                try:
+                    registry = AssetBindings(self.asset_provider(),
+                        allow_fixture=getattr(self.transport, "input_kind", "venue_public") == "synthetic_protocol_fixture")
+                except (OSError, ValueError, KeyError, TypeError) as error:
+                    self._invalidate_asset_bindings(key, "core asset projection: " + str(error)[:2048])
+                    self.asset_binding_digest = None
+                    return
                 if self.asset_binding_digest != registry.digest:
-                    # A known association change revokes all old observations before rebind.
-                    with self.poll_lock, self.console.lock, self.source.lock, self.lock:
-                        affected = set(self.bindings)
-                        self.source.unavailable.update(affected)
-                        self._catalogue_changed(affected, restore=False)
-                        self.next_discovery.update((k, 0) for k in self.discovery_settings if k != key)
+                    self._invalidate_asset_bindings(key)
                     self.asset_bindings, self.asset_binding_digest = registry, registry.digest
                 assets_by_id = {a["identity"]: a for a in self.source.assets}
                 for product in (("spot", "linear") if setting["type"] == "okx" else ("linear",)):
@@ -329,7 +329,7 @@ class ScannerRuntime:
                     state = dict(state="ready", error="", rejected=rejected, evidence=evidence,
                                  count=len(entries), complete=True, refresh_ns=str(CATALOGUE_REFRESH_NS), ttl_ns=str(CATALOGUE_TTL_NS),
                                  asset_binding_digest=registry.digest,
-                                 asset_binding_gaps=[dict(symbol=r["symbol"], missing=[role for role, binding in r["asset_associations"].items() if binding is None])
+                                 asset_binding_gaps=[dict(symbol=r["symbol"], codes=self._asset_codes(r), missing=[role for role, binding in r["asset_associations"].items() if binding is None])
                                      for r in rows if any(binding is None for binding in r["asset_associations"].values())])
                     sources = {k:v for k,v in self.discovery_status.items() if v["state"] == "ready"}
                     sources[key] = state
@@ -403,6 +403,20 @@ class ScannerRuntime:
                     self.discovery_status[key] = dict(state="failed", error=str(error)[:2048], evidence=evidence,
                                                      rejected=rejected, complete=False)
 
+    def _invalidate_asset_bindings(self, current_key, error=None):
+        with self.poll_lock, self.console.lock, self.source.lock, self.lock:
+            affected = set(self.bindings)
+            self.source.unavailable.update(affected)
+            self._catalogue_changed(affected, restore=False)
+            self.discovery_success.clear()
+            for key in self.discovery_status:
+                if error is not None:
+                    self.discovery_status[key] = dict(state="failed", error=error, complete=False)
+                elif key != current_key:
+                    self.discovery_status[key] = dict(state="loading", error="", complete=False)
+                if error is None and key != current_key:
+                    self.next_discovery[key] = 0
+
     def _catalogue_changed(self, changed, *, restore=True):
         # Caller serializes polling and holds console/source/runtime locks.
         for identity in changed:
@@ -440,9 +454,24 @@ class ScannerRuntime:
                         if not affected <= self.source.unavailable:
                             self.source.unavailable.update(affected)
                             self._catalogue_changed(affected)
-                        self.discovery_status[key].update(state="failed", error="catalogue TTL expired", complete=False)
+                            self.discovery_status[key].update(state="failed", error="catalogue TTL expired", complete=False)
             if self.clock() >= self.next_discovery.get(key, 0):
                 self.request_discovery(setting, refresh=True)
+
+    @staticmethod
+    def _asset_codes(row):
+        spec = row.get("specification", {})
+        codes = dict(base=spec.get("base", row["symbol"]),
+                     quote=spec.get("quote", spec.get("price_quote")))
+        if row["venue"] == 21:
+            codes["settlement"] = "USDC"
+        return codes
+
+    @classmethod
+    def _asset_basis(cls, row):
+        return dict(symbol=row["symbol"], bindings=row.get("asset_associations", {}),
+                    codes=cls._asset_codes(row), base_units_per_lot=row["lot_base"],
+                    base_units_per_wire_unit=row.get("contract_value") or "1")
 
     def _asset(self, setting, code, assets):
         binding = self.asset_bindings.resolve(setting["venue"], setting["environment"], code)
@@ -463,11 +492,7 @@ class ScannerRuntime:
         associations = row.get("asset_associations")
         if associations is None:  # Old caches must still undergo fresh discovery before use.
             return
-        spec = row["specification"]
-        codes = dict(base=spec.get("base", row["symbol"]),
-                     quote=spec.get("quote", spec.get("price_quote")))
-        if row["venue"] == 21:
-            codes["settlement"] = "USDC"
+        codes = cls._asset_codes(row)
         if type(associations) is not dict or set(associations) != set(codes):
             raise ValueError("saved asset associations")
         registry = AssetBindings(dict(schema=1, bindings=[r for r in associations.values() if r is not None]), allow_fixture=True)
@@ -636,6 +661,7 @@ class ScannerRuntime:
                             bytes.fromhex(payload), result["healthy"], entry.environment)
                     self.evidence[identity] = dict(result, venue=str(row["venue"]), instrument=row["instrument"], raw_path=worker[3], requested_environment=row["environment"],
                         actual_environment=ROUTES[row["venue"], row["environment"]][1], input_kind=getattr(self.transport, "input_kind", "venue_public"))
+                    self.evidence[identity]["asset_basis"] = self._asset_basis(row)
                     self.failures.pop(identity, None)
             except (OSError, ValueError, KeyError) as error:
                 with self.lock:
@@ -669,13 +695,14 @@ class ScannerRuntime:
 
     def status(self):
         observations = []
-        for o in self.observations.copy().values():
+        for identity, o in self.observations.copy().items():
             book = decode_depth_snapshot(o.book)
             ratio = lambda value: [str(value.numerator), str(value.denominator)]
             scale = next(a["atomic_scale"] for a in self.source.assets if int(a["identity"]) == o.rules.base_asset)
             healthy = o.continuous and self.clock()-book["visible_at_ns"] < self.console.max_age_ns
-            observations.append(dict(venue=str(o.venue), instrument=str(o.rules.instrument), environment=o.environment,
+            observations.append(dict(venue=str(o.venue), account=str(o.account), instrument=str(o.rules.instrument), environment=o.environment,
                 base_asset=str(o.rules.base_asset), quote_asset=str(o.rules.quote_asset), continuous=healthy,
+                asset_basis=self.evidence.get(identity, {}).get("asset_basis"),
                 bid_quote_atoms=ratio(book["bids"][0][0]*o.rules.tick_quote_atoms_per_base_atom*10**scale),
                 ask_quote_atoms=ratio(book["asks"][0][0]*o.rules.tick_quote_atoms_per_base_atom*10**scale),
                 bid_depth_atoms=ratio(sum(o.rules.notional(t,l) for t,l in book["bids"])) if all(l is not None for _,l in book["bids"]) else None,
