@@ -1,9 +1,0 @@
-test_stale_candidate_barrier_does_not_revoke_the_active_host (test_strategy_instance.WebInstanceTests) ... [enqueue 236ddaf60a0] enable_trading -> pending will be 1
-ok
-test_current_host_checkpoint_failure_revokes_instead_of_preserving_trading (test_strategy_instance.WebInstanceTests) ... [enqueue 236ddaf67f0] enable_trading -> pending will be 1
-ok
-
-----------------------------------------------------------------------
-Ran 2 tests in 40.054s
-
-OK

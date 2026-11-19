@@ -1,5 +1,0 @@
-Build Summary: 3/3 steps succeeded
-strategy-authority-probe cached
-+- install ringwin-strategy-authority-probe cached
-   +- compile exe ringwin-strategy-authority-probe ReleaseSafe native cached 552ms MaxRSS:16M
-

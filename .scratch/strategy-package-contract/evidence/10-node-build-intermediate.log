@@ -1,5 +1,0 @@
-Build Summary: 3/3 steps succeeded
-strategy-authority-probe success
-+- install ringwin-strategy-authority-probe success
-   +- compile exe ringwin-strategy-authority-probe ReleaseSafe native success 2m MaxRSS:1G
-

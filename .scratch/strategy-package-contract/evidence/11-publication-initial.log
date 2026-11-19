@@ -1,8 +1,0 @@
-test_missing_result_history_keeps_complete_registry_and_blocks_new_publication (test_strategy_contract_e2e.WindowsPublicationTests) ... ok
-test_result_storage_fault_reports_unknown_without_partial_registration (test_strategy_contract_e2e.WindowsPublicationTests) ... ok
-test_web_restart_retries_once_and_reports_version_and_identity_conflicts (test_strategy_contract_e2e.WindowsPublicationTests) ... ok
-
-----------------------------------------------------------------------
-Ran 3 tests in 4.137s
-
-OK

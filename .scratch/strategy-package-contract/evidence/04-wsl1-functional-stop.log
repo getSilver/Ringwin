@@ -1,6 +1,0 @@
-test_backend_pipe_eof_stops_and_reaps_python_host (test_strategy_instance.WebInstanceTests) ... ok
-
-----------------------------------------------------------------------
-Ran 1 test in 5.878s
-
-OK

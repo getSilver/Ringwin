@@ -1,5 +1,0 @@
-1/2 entry.test_0...OK
-2/2 testing.regression.trading_shard_tests.test.same instance parameter activation preserves economics and latches through stable replay...FAIL (ReplayNotEquivalent)
-1 passed; 0 skipped; 1 failed.
-error: the following test command failed with exit code 1:
-.zig-cache\o\1bd74215c86c96da4ff3849e015cbabb\root.exe --seed=0x33e27e10

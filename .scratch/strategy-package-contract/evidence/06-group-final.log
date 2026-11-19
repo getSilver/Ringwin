@@ -1,7 +1,0 @@
-test_complete_group_is_one_actual_frame_and_gateway_accepts_it_before_safety_revokes (test_strategy_instance.WebInstanceTests) ... [enqueue 1a6c6e5f730] enable_trading -> pending will be 1
-ok
-
-----------------------------------------------------------------------
-Ran 1 test in 15.144s
-
-OK

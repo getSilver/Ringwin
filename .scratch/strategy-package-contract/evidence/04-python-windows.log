@@ -1,8 +1,0 @@
-.................................................................................................................................................................................................................................s...D:\Program Files\miniconda3\lib\copy.py:229: ResourceWarning: unclosed <socket.socket fd=712, family=AddressFamily.AF_INET, type=SocketKind.SOCK_STREAM, proto=0, laddr=('127.0.0.1', 59616)>
-  for key, value in x.items():
-ResourceWarning: Enable tracemalloc to get the object allocation traceback
-....................ssssssssssssssssssssssssssssssssss
-----------------------------------------------------------------------
-Ran 283 tests in 184.710s
-
-OK (skipped=35)
