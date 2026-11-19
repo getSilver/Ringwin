@@ -173,10 +173,14 @@ def sweep(book, rules, side, lots, limit_ticks, *, now_ns, max_age_ns):
     integer(max_age_ns)
     if not rules.valid_from_ns <= now_ns < rules.valid_until_ns:
         raise ValueError("expired InstrumentRules")
-    if not isinstance(book, dict) or set(book) != {
+    if not isinstance(book, dict) or set(book) - {"sequence_kind", "capture_epoch"} != {
             "instrument", "rules_version", "sequence", "visible_at_ns",
             "bids", "asks", "bids_truncated", "asks_truncated"}:
         raise ValueError("invalid canonical depth")
+    if book.get("sequence_kind", "venue") == "capture":
+        integer(book.get("capture_epoch"), 1)
+    elif book.get("sequence_kind", "venue") != "venue" or book.get("capture_epoch", 0) != 0:
+        raise ValueError("invalid canonical sequence")
     for key in ("instrument", "rules_version", "sequence"):
         integer(book[key], 1)
     integer(book["visible_at_ns"])

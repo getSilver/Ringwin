@@ -19,6 +19,7 @@ Status: open
 - 03–11通过Python公开接口、数学验证及离线合同回放后，可标记策略开发完成。
 - 16 的扫描运行、历史和 Web 展示真实实施与集成另行验收；独立 UI Demo 不代表功能已接通。
 - [17 OKX／Hyperliquid 内部整合](issues/17-okx-hyperliquid-scanner-integration-spec.md)以正式内部链路和确定性协议夹具独立验收；交易所在线行情数据验收另立计划，不阻塞17关闭，也不因17通过而获得资格。
+- [18 设置驱动扫描](issues/18-settings-driven-scanner-spec.md)完成交易所设置持久化、动态市场发现及配置名称展示，移除静态市场登记依赖，保留 Python／Zig 链路；内部验收与在线行情资格分开。
 - 12/13经济资格、14/15运行资格及[独立集成验收](integration-acceptance.md)分别记录，不阻塞策略开发完成；整个地图须全部范围完成才关闭。
 
 ## Rules
@@ -36,6 +37,7 @@ Status: open
 - 按 Blocked by 领取 Frontier，每次只认领一张；ready-for-agent 不取消依赖。三项核心接口能力由其他会话处理，复用当前实现及验收证据；原规格票不因拆票自动关闭。
 - 交易所选择属于部署配置，不作为策略访谈问题。具体账户、币种名单和资金数值由运行配置提供；策略规格定义输入语义、约束及校验，不要求先选择部署实例。
 - 2026-11-11 用户调用 to-spec 授权发布[17内部整合规格](issues/17-okx-hyperliquid-scanner-integration-spec.md)，本轮选定 OKX／Hyperliquid；本次仅规格发布，不修改实现、不连接交易所，在线行情数据验收另立计划。
+- 2026-11-15 用户调用 to-spec 授权按本轮讨论发布[18 设置驱动扫描规格](issues/18-settings-driven-scanner-spec.md)，明确保留 Python／Zig 方案，并确认按现有完整链路验收；本次仅文档，不开始实现或同步 GitHub。
 
 ## Route
 
@@ -56,8 +58,13 @@ Status: open
 15. [Maker–Taker 只读影子验收](issues/15-maker-shadow.md)
 16. [机会扫描运行、历史与 Web 展示规格](issues/16-scanner-console-spec.md)
 17. [OKX／Hyperliquid 扫描器项目内部整合规格](issues/17-okx-hyperliquid-scanner-integration-spec.md)
+18. [交易所设置驱动扫描范围与动态市场发现规格](issues/18-settings-driven-scanner-spec.md)
+
+18 的实施子图：[设置驱动扫描实施地图](../settings-driven-scanner/map.md)，六张子票的阻塞边和施工 Frontier 在该图维护；来源规格保持原状。
 
 ## Frontier
+
+- [18 设置驱动扫描](issues/18-settings-driven-scanner-spec.md)：来源规格保持 open；用户已确认六张实施子票，执行入口为[子图 Frontier：01](../settings-driven-scanner/map.md#frontier)，不重复认领来源规格。复用17已交付链路，不等待16在线行情验收；仅发布计划，未开始实现。
 
 2026-11-11：前端策略分支已快进合入RingwinUi主工作区，用户定型UI接入默认正式跨所入口，新增实际暂停、精确bp／数量展示及历史热力图，见[定型UI接线记录](scanner-final-ui.md)。原主工作区未提交UI保留，真实行情及资格边界不变。
 
@@ -71,6 +78,10 @@ Status: open
 - 原01/02为来源规格，保持原状态；其他会话施工及资格见核心接口地图。其余新票按各自 Blocked by 推进。
 
 ## Decisions so far
+
+- 2026-11-15：用户确认 to-tickets 的六票拆分，已发布[设置驱动扫描实施地图](../settings-driven-scanner/map.md)。阻塞边为 01 → {02、03、05}，{02、03} → 04，{04、05} → 06；当前只有01可认领。18来源规格未修改，未开始实现、运行验收或GitHub同步。
+
+- 2026-11-15：发布[18规格](issues/18-settings-driven-scanner-spec.md)。交易所设置在服务端运行目录以 JSON 原子持久化，扫描范围直接引用配置名称；移除静态市场登记文件依赖，公共元数据动态发现品种与规则；无需能力声明或二次启用。保留 Python 请求／调度 → Zig MarketFeedAdapter／规范投影／RawIngress → Python 扫描计算。用户确认复用正式完整链路与确定性公共协议输入验收。仅文档，17历史记录和16、12–15未完成资格保持原状。
 
 - 2026-11-12 Debug补验：17的全量 Debug 已完整结束，889/889、退出码0，Debug bounded Host I/O也通过。此前“未完成”记录由本次补验取代。长墙钟时间包含用户确认的系统休眠，不作为纯计算耗时或死锁证据；详见[内部验收记录](scanner-integration-evidence.md)。产品源码与交易资格未改变。
 

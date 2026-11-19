@@ -229,7 +229,9 @@ from disk without a Host. Restart reports Stopped/recovery-required. Multiple
 resident instances belong to task 10.
 Windows runs its own Ready/resource acceptance and does not depend on Linux passing,
 as required by ADR 0010. Legacy WSL1 still rejects loading because its kernel ignores
-RLIMIT_AS; Linux resource acceptance remains pending on a genuinely enforcing kernel.
+RLIMIT_AS. Linux resource acceptance was rerun on an enforcing Debian 11 kernel;
+see the [2026-11-18 target-machine report](research/2026-11-18-linux-development-validation.md).
+This is offline Host evidence, not production qualification.
 
 To recover a stopped instance, use the Web recovery button or authenticated
 `POST /api/strategy-instances` with only
@@ -254,6 +256,9 @@ production qualification on either platform.
 Run `python3 -m unittest discover -s python -p test_strategy_instance.py -v` on
 Linux after building its adapter, or `python -m unittest discover -s python
 -p test_strategy_instance.py -v` on Windows after `zig build -Doptimize=ReleaseSafe`.
+Also build `zig build strategy-authority-probe -Doptimize=ReleaseSafe` and place
+`ringwin-strategy-authority-probe` beside the candidate executable. The authority,
+configuration transition, and successor tests execute that real native probe.
 The defaults are `.scratch/build/candidate-linux/bin/ringwin-strategy-candidate`
 and `zig-out/bin/ringwin-strategy-candidate.exe` respectively; the optional
 `RINGWIN_CANDIDATE_ENGINE` test environment variable selects another build of that

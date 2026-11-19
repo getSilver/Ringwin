@@ -5,11 +5,13 @@ PartOf=ringwin-role.target
 
 [Service]
 Type=simple
-ExecStart=/var/lib/ringwin/versions/current/ringwin --production-role %i --socket /run/ringwin-%i/control.sock --generation 1
+ExecStart=/var/lib/ringwin/versions/current/ringwin --production-role %i --socket /run/ringwin-%i/control.sock --state-dir /var/lib/ringwin-%i
 User=ringwin-%i
 Group=ringwin-%i
 RuntimeDirectory=ringwin-%i
 RuntimeDirectoryMode=0750
+StateDirectory=ringwin-%i
+StateDirectoryMode=0700
 UMask=0077
 NoNewPrivileges=yes
 PrivateTmp=yes

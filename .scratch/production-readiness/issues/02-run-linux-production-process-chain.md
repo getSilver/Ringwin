@@ -1,7 +1,7 @@
 # 启动可安全排空的 Linux 生产进程链
 
 Type: task
-Status: ready-for-agent
+Status: in-progress
 Assignee:
 Blocked by: [01 冻结首个 Linux 生产合同与 schema](01-freeze-linux-production-contract.md)
 Parent: [Linux 生产资格收口](../map.md)
@@ -64,3 +64,35 @@ NoNewPrivileges、能力集清空和系统目录保护。
   `ExecMainStatus=0`、`NRestarts=0`；systemd security exposure 为 4.4/4.6。
 - unit 已保持 disabled/inactive。业务 IPC、controller peer credential、签名控制事实、持久 generation、
   HostSupervisor 与真实业务 drain 仍未实现，因此本票不关闭。
+
+### 目标机复检与控制失败路径修复（2026-11-18）
+
+Debian 11/Linux 5.10 上重新执行当前工作区 ReleaseSafe Linux ELF；五 role 生命周期通过。
+新增真实 Unix socket 回归先复现重复 drain 刷新关闭等待，修复后 3/3 通过；协调器启动失败清理
+分别按已启动 child 与已连接 stream 计数，避免关闭未初始化 stream。
+
+目标机策略实例验收执行 55 项通过、16 项按平台/内核条件跳过，文件、凭证和 KDF 定向验证通过；
+ExecutionGateway 增加 32 MiB memlock drop-in，并在 DynamicUser 受限 systemd 临时服务验证。
+详见[报告与原始证据](../../../docs/research/2026-11-18-linux-development-validation.md)。
+本轮没有接通五 role 业务 IPC、peer credential、签名控制事实、持久 generation、HostSupervisor
+或真实业务 drain；本票保持 in-progress，不提升生产资格。
+
+### 单机启动与对端身份（后续验证）
+
+- systemd 为每个 role 提供独立的持久状态目录。role 持有全生命周期独占文件锁，在监听前以
+  文件同步、原子替换及目录同步推进 generation。遇到损坏的记录或并发实例会拒绝启动。
+- Unix socket 通过 `SO_PEERCRED` 检查身份。夹具限定同用户的父进程 PID，systemd 入口暂以
+  root 为操作系统控制主体，仅允许生命周期操作。正式 controller 的进程身份绑定和签名控制事实仍待接入。
+- Debian 11 原生 Debug ELF 的进程回归 5/5 通过，五 role 生命周期测试通过。同名 systemd
+  临时 unit 以 DynamicUser 两次启动，观察到 generation 从 1 推进到 2，两次完成控制 drain/stop。
+- 五 role 业务 IPC、HostSupervisor 和在途业务排空仍待实现。真实主备隔离验收暂缓。
+
+### 2026-11-19 单机离线业务复检
+
+- Debian 11 上使用 Zig 固定版本交叉构建的 Debug ELF 运行 `--production-chain-test` 通过。
+  五进程通过 Unix IPC 传递行情、fencing token、订单及成交。Engine 内真实 Python Host 通过
+  HostSupervisor 握手并生成意图。进入 Draining 后撤销 Host 权威，执行进程排出两笔合计
+  10 手的成交，Engine 提交并验证磁盘重放摘要，telemetry 核对成交数量后完成停止。
+- 进程控制回归 5/5。原始日志见 [linux-business-v3.log](../../build/linux-20261118/evidence/linux-business-v3.log)。
+- 此路径是显式 SimulatedVenue 验收。systemd 业务启动接线、签名控制事实、在途业务中断后的
+  跨重启恢复与正式部署资格仍待验证，票保持 in-progress。

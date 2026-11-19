@@ -63,6 +63,17 @@ def book(**changes):
 
 
 class DepthTests(unittest.TestCase):
+    def test_capture_sequence_depth_keeps_provenance_and_economics(self):
+        snapshot = book(sequence_kind="capture",capture_epoch=9)
+        decoded = host.decode_depth_snapshot(host.encode_depth_snapshot(snapshot))
+        result = e.sweep(decoded,rules(),"buy",3,101,now_ns=10,max_age_ns=5)
+        self.assertEqual(result.quote_atoms,302)
+        self.assertEqual(decoded["capture_epoch"],9)
+        for fields in (dict(sequence_kind="capture"),dict(sequence_kind="capture",capture_epoch=0),
+                       dict(sequence_kind="venue",capture_epoch=9),dict(sequence_kind="other")):
+            with self.subTest(fields=fields),self.assertRaises(ValueError):
+                e.sweep(book(**fields),rules(),"buy",3,101,now_ns=10,max_age_ns=5)
+
     def test_v2_buy_and_sell_use_opposite_sides_and_price_protection(self):
         buy = e.sweep(book(), rules(), "buy", 3, 101, now_ns=10, max_age_ns=5)
         self.assertEqual((buy.filled_lots, buy.remaining_lots, buy.quote_atoms), (3, 0, 302))

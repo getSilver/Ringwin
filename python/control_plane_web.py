@@ -183,6 +183,45 @@ class ProjectionProvider:
             views.append(view)
         return views
 
+    def asset_bindings(self):
+        """Use the same native semantic replay; never infer identities from names."""
+        import subprocess
+        import tempfile
+        rows = []
+        entries = []
+        for path in sorted(Path(self.runtime_dir).glob("shard-*.journal")):
+            stat = path.stat()
+            entries.append((path, stat.st_mtime_ns, stat.st_size))
+        key = tuple(entries)
+        cached = getattr(self, "_asset_cache", None)
+        if cached is not None and cached[0] == key:
+            return json.loads(json.dumps(cached[1]))
+        for path, _, size in entries:
+            if size > 16 * 1024 * 1024:
+                raise ValueError("asset projection exceeds native journal capacity")
+            raw = path.read_bytes()
+            if len(raw) > 16 * 1024 * 1024:
+                raise ValueError("asset projection exceeds native journal capacity")
+            with tempfile.TemporaryDirectory(prefix="scanner-assets-") as directory:
+                capture = Path(directory)/"journal.hex"
+                capture.write_text(raw.hex(), encoding="ascii")
+                try:
+                    result = subprocess.run([self.probe_path, "assets", str(capture)],
+                        capture_output=True, text=True, timeout=30)
+                except subprocess.TimeoutExpired as error:
+                    raise OSError("asset registry projection timed out") from error
+            if result.returncode:
+                raise ValueError("asset registry projection failed")
+            document = json.loads(result.stdout)
+            if set(document) != {"schema", "bindings"} or document["schema"] != 1:
+                raise ValueError("asset registry projection schema")
+            rows.extend(document["bindings"])
+        document = dict(schema=1, bindings=rows)
+        from opportunity_scanner.scanner_assets import AssetBindings
+        AssetBindings(document, allow_fixture=True)
+        self._asset_cache = key, document
+        return json.loads(json.dumps(document))
+
 
 class ControlPlaneApp:
     """Request routing and policy; transport-independent for acceptance."""
@@ -212,7 +251,8 @@ class ControlPlaneApp:
         self.scanner_runtime = None
         if scanner_console is None:
             from opportunity_scanner.scanner_runtime import ScannerRuntime
-            self.scanner_runtime = ScannerRuntime(directory)
+            self.scanner_runtime = ScannerRuntime(directory,
+                asset_provider=getattr(projection_provider, "asset_bindings", None))
             scanner_console = self.scanner_runtime.console
         self.scanner_console = scanner_console
         if scanner_console is not None and scanner_console.config_store is None:

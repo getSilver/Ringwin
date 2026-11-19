@@ -1608,6 +1608,8 @@ assert all("unapproved-path" not in p for p in sys.path)
         runtime.write_bytes(b"raise RuntimeError('unapproved')")
         if os.name == "nt":
             strategy_instance.windows.set_permissions(runtime)
+        else:
+            runtime.chmod(0o440)
         status, body = self.create()
         self.assertEqual(status, 400, body)
         self.assertIn("differs from approved bytes", body["error"])

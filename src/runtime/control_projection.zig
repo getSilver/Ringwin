@@ -203,3 +203,73 @@ pub fn writeOutcomeJson(outcome: Outcome, writer: anytype) !void {
         .degraded => |d| try writeDegradedJson(d.reason, d.last_sequence, writer),
     }
 }
+
+/// Asset identities come from semantic replay, independently of the legacy micros view.
+pub fn writeAssetBindingsJournal(bytes: []const u8, quantity_denominator: i64, reservation_model: trading.ReservationModel, writer: anytype) !void {
+    const result = try trading.replayForProjection(bytes, quantity_denominator, reservation_model);
+    // Active journals have no sealed footer. The core replay exposes only its
+    // verified committed prefix; an incomplete tail does not activate a fact.
+    try writeAssetBindings(&result.shard, writer);
+}
+
+pub fn writeAssetBindings(shard: *const trading.TradingShard, writer: anytype) !void {
+    try writer.writeAll("{\"schema\":1,\"bindings\":[");
+    var first = true;
+    // An unsealed deployment has not established the venue/environment namespace.
+    if (shard.deployment.sealed) {
+        const assets = shard.activatedAssets();
+        for (assets.entries[0..assets.count]) |entry| {
+            const definition = entry.definition;
+            for (definition.code_bindings[0..definition.code_binding_count]) |binding| {
+                var seen: [4]bool = @splat(false);
+                for (shard.deployment.accounts[0..shard.deployment.account_count]) |account| {
+                    if (account.venue != binding.venue or seen[@intFromEnum(account.environment)]) continue;
+                    seen[@intFromEnum(account.environment)] = true;
+                    if (!first) try writer.writeAll(",");
+                    first = false;
+                    try writer.print("{{\"asset\":\"{d}\",\"atomic_scale\":{d},\"version\":\"{d}\",\"barrier\":\"{d}\",\"source_identity\":\"{d}\",\"source_digest\":\"{x}\",\"source_kind\":\"{s}\",\"venue\":\"{d}\",\"environment\":\"{s}\",\"code\":\"{s}\"}}", .{
+                        definition.asset,              definition.atomic_scale,  definition.version,               entry.barrier,
+                        definition.source_identity,    definition.source_digest, @tagName(definition.source_kind), binding.venue,
+                        @tagName(account.environment), binding.slice(),
+                    });
+                }
+            }
+        }
+    }
+    try writer.writeAll("]}");
+}
+
+test "read-only asset projection retains activated identity units source and environment" {
+    var shard: trading.TradingShard = .{};
+    const canonical = @import("../model/canonical_event.zig");
+    const registry = @import("../trading/asset_registry.zig");
+    const codes = [_][]const u8{ "USDT", "USDC", "SOL", "DOGE" };
+    for (codes, 0..) |code, index| {
+        var definition = registry.testDefinitions(6, 8)[0];
+        definition.asset = @intCast(10 + index);
+        definition.code_bindings = @splat(.{});
+        definition.code_binding_count = 2;
+        definition.code_bindings[0] = try canonical.AssetCodeBinding.init(1, code);
+        definition.code_bindings[1] = try canonical.AssetCodeBinding.init(21, code);
+        _ = try shard.asset_registry.activate(definition, 10);
+    }
+    shard.deployment.account_count = 2;
+    shard.deployment.accounts[0] = .{ .identity = 1, .venue = 1, .environment = .production };
+    shard.deployment.accounts[1] = .{ .identity = 2, .venue = 21, .environment = .testnet };
+    var buffer: [8192]u8 = undefined;
+    var writer = std.Io.Writer.fixed(&buffer);
+    try writeAssetBindings(&shard, &writer);
+    try std.testing.expectEqualStrings("{\"schema\":1,\"bindings\":[]}", writer.buffered());
+    shard.deployment.sealed = true;
+    writer = std.Io.Writer.fixed(&buffer);
+    try writeAssetBindings(&shard, &writer);
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, writer.buffered(), .{});
+    defer parsed.deinit();
+    const rows = parsed.value.object.get("bindings").?.array.items;
+    try std.testing.expectEqual(@as(usize, 8), rows.len);
+    try std.testing.expectEqualStrings("SOL", rows[4].object.get("code").?.string);
+    try std.testing.expectEqualStrings("12", rows[4].object.get("asset").?.string);
+    try std.testing.expectEqualStrings("production", rows[4].object.get("environment").?.string);
+    try std.testing.expectEqualStrings("testnet", rows[5].object.get("environment").?.string);
+    try std.testing.expectEqual(@as(usize, 64), rows[4].object.get("source_digest").?.string.len);
+}

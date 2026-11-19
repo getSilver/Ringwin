@@ -1,6 +1,7 @@
 """Public REST polling -> native MarketFeedAdapter -> canonical depth -> scanner.
 
-Only the public transport is replaceable. No credentials or execution capability.
+Public protocol transport is replaceable; asset bindings come from node-owned
+activated-registry projection. No credentials or execution capability.
 """
 from dataclasses import replace
 from fractions import Fraction
@@ -20,6 +21,8 @@ from opportunity_scanner.arbitrage_scanner import Observation, decode_depth_snap
 from opportunity_scanner.scanner_console import CanonicalSource, CatalogueEntry, ScannerConsole
 from opportunity_scanner.scanner_config import atomic_json, _object
 from opportunity_scanner.scanner_history import History
+from opportunity_scanner.scanner_assets import AssetBindings
+from opportunity_scanner.scanner_evaluation import EvaluationInputs
 from strategy_instance import NativeAuthority
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -29,9 +32,6 @@ MAX_DISCOVERY_BYTES = 4 * 1024 * 1024
 MAX_HL_METADATA_BYTES = 1024 * 1024
 CATALOGUE_REFRESH_NS = 30_000_000_000
 CATALOGUE_TTL_NS = 90_000_000_000
-# Reviewed standard-perp underlyings; this does not restrict market discovery.
-# Basis and unsupported aliases: docs/research/2026-11-16-scanner-observation-asset-pairing.md.
-STANDARD_PERP_UNDERLYINGS = {"BTC": "bitcoin:native", "ETH": "ethereum:native"}
 # Stable historical identities, never an admission list or a worker configuration.
 OKX_LEGACY_IDENTITIES = {"BTC-USDT": 0x4f4b5800000001, "BTC-USDT-SWAP": 0x4f4b5800000002,
                          "BTC-USDC": 0x4f4b5800000003}
@@ -86,12 +86,17 @@ class PublicTransport:
 
 class ScannerRuntime:
     def __init__(self, directory, *, transport=None, clock=time.monotonic_ns,
-                 utc_clock=time.time_ns, automatic=True):
+                 utc_clock=time.time_ns, automatic=True, asset_provider=None):
         configuration = dict(schema=1, assets=[], bindings=[])
         bindings = []
         self.directory = Path(directory).resolve()
         self.directory.mkdir(parents=True, exist_ok=True)
         self.clock, self.utc_clock, self.transport = clock, utc_clock, transport or PublicTransport()
+        self.asset_provider = asset_provider or (lambda: dict(schema=1, bindings=[]))
+        self.asset_bindings = AssetBindings(dict(schema=1, bindings=[]))
+        self.asset_binding_digest = None
+        self.evaluation = EvaluationInputs(self.directory/"scanner-evaluation.json", secrets.token_hex(16),
+            synthetic=getattr(self.transport, "input_kind", "venue_public") == "synthetic_protocol_fixture")
         self.lock = threading.RLock()
         self.poll_lock = threading.Lock()
         self.bindings, entries = {}, []
@@ -121,12 +126,13 @@ class ScannerRuntime:
             if venue == 21 and (not row.get("hl_discovered") or row["product"] != "linear" or row["symbol"] != row["binding"]["coin"]):
                 raise ValueError("missing discovered Hyperliquid binding")
             base, quote = int(row["base_asset"]), int(row["quote_asset"])
+            self._validate_associations(row)
             if base not in assets or quote not in assets:
                 raise ValueError("missing trusted asset definition")
-            if (venue == 1 and assets[quote]["code"] != row["symbol"].split("-")[1]
+            if not row.get("asset_associations") and (venue == 1 and assets[quote]["code"] != row["symbol"].split("-")[1]
                     or venue == 21 and assets[quote]["code"] != row["specification"]["quote"]):
                 raise ValueError("settlement/quote asset mismatch")
-            if assets[base]["code"] != (row["symbol"].split("-")[0] if venue == 1 else row["symbol"]):
+            if not row.get("asset_associations") and assets[base]["code"] != (row["symbol"].split("-")[0] if venue == 1 else row["symbol"]):
                 raise ValueError("base asset identity mismatch")
             if venue == 1 and row["product"] == "spot" and Fraction(row["lot_base"]) != Fraction(row["lot_wire"]):
                 raise ValueError("OKX spot quantity units mismatch")
@@ -142,7 +148,8 @@ class ScannerRuntime:
                     raise ValueError("Hyperliquid binding units mismatch")
                 if row.get("hl_discovered") and b.get("quote_token", 0) != 0:
                     raise ValueError("Hyperliquid collateral binding mismatch")
-                if row.get("hl_discovered") and (int(row["settlement_asset"]) not in assets or assets[int(row["settlement_asset"])]["code"] != "USDC"):
+                if row.get("hl_discovered") and (int(row["settlement_asset"]) not in assets or
+                        not row.get("asset_associations") and assets[int(row["settlement_asset"])]["code"] != "USDC"):
                     raise ValueError("Hyperliquid settlement asset mismatch")
             entry = self._entry(row, assets)
             if entry.identity in self.bindings:
@@ -246,9 +253,17 @@ class ScannerRuntime:
                 self.discovery_status[key] = dict(state="loading", error="")
             try:
                 rows, rejected, evidence = [], [], []
+                registry = AssetBindings(self.asset_provider(),
+                    allow_fixture=getattr(self.transport, "input_kind", "venue_public") == "synthetic_protocol_fixture")
+                if self.asset_binding_digest != registry.digest:
+                    # A known association change revokes all old observations before rebind.
+                    with self.poll_lock, self.console.lock, self.source.lock, self.lock:
+                        affected = set(self.bindings)
+                        self.source.unavailable.update(affected)
+                        self._catalogue_changed(affected, restore=False)
+                        self.next_discovery.update((k, 0) for k in self.discovery_settings if k != key)
+                    self.asset_bindings, self.asset_binding_digest = registry, registry.digest
                 assets_by_id = {a["identity"]: a for a in self.source.assets}
-                okx_assets = {a["code"]: a for a in self.source.assets
-                    if a["identity"] == str(self._stable_id("scanner-asset-v1", a["code"]))}
                 for product in (("spot", "linear") if setting["type"] == "okx" else ("linear",)):
                     if self.closing.is_set():
                         return
@@ -275,11 +290,8 @@ class ScannerRuntime:
                             continue
                         if item["product"] != product:
                             raise ValueError("OKX catalogue product mismatch")
-                        for code in (item["base"], item["quote"]):
-                            if code not in okx_assets:
-                                # Observation-only fixed precision, independent of core AssetDefinition.
-                                identity = str(self._stable_id("scanner-asset-v1", code))
-                                assets_by_id[identity] = okx_assets[code] = dict(identity=identity, code=code, atomic_scale=18)
+                        base = self._asset(setting, item["base"], assets_by_id)
+                        quote = self._asset(setting, item["quote"], assets_by_id)
                         instrument = OKX_LEGACY_IDENTITIES.get(item["symbol"], self._stable_id("okx-instrument-v1", item["symbol"]))
                         version = self._stable_id("okx-rules-v1", json.dumps(item, sort_keys=True, separators=(",", ":"))) & ((1<<53)-1) or 1
                         lot_base = Fraction(item["lot"]) * Fraction(item["contract_value"] or "1")
@@ -290,7 +302,8 @@ class ScannerRuntime:
                         observation_identity = previous["observation_identity"] if previous else str(self._stable_id("scanner-source-v1", key))
                         rows.append(dict(venue=1, environment=setting["environment"], symbol=item["symbol"], product=product,
                             instrument=str(instrument), observation_identity=observation_identity, rules_version=version,
-                            base_asset=okx_assets[item["base"]]["identity"], quote_asset=okx_assets[item["quote"]]["identity"],
+                            base_asset=base, quote_asset=quote,
+                            asset_associations=self._associations(setting, base=item["base"], quote=item["quote"]),
                             tick=item["tick"], lot_wire=item["lot"], lot_base=str(lot_base), minimum_size=item["minimum_size"], contract_value=item["contract_value"], specification=item,
                             okx_binding=dict(symbol=item["symbol"], instrument=instrument, product=product, base=item["base"], quote=item["quote"])))
                 assets = list(assets_by_id.values())
@@ -312,7 +325,10 @@ class ScannerRuntime:
                     if len(updated) > MAX_CATALOGUE:
                         raise ValueError("scanner catalogue capacity")
                     state = dict(state="ready", error="", rejected=rejected, evidence=evidence,
-                                 count=len(entries), complete=True, refresh_ns=str(CATALOGUE_REFRESH_NS), ttl_ns=str(CATALOGUE_TTL_NS))
+                                 count=len(entries), complete=True, refresh_ns=str(CATALOGUE_REFRESH_NS), ttl_ns=str(CATALOGUE_TTL_NS),
+                                 asset_binding_digest=registry.digest,
+                                 asset_binding_gaps=[dict(symbol=r["symbol"], missing=[role for role, binding in r["asset_associations"].items() if binding is None])
+                                     for r in rows if any(binding is None for binding in r["asset_associations"].values())])
                     sources = {k:v for k,v in self.discovery_status.items() if v["state"] == "ready"}
                     sources[key] = state
                     missing = source_identities - incoming
@@ -324,20 +340,23 @@ class ScannerRuntime:
                     console = self.console
                     candidate = None
                     codes = {a["identity"]:a["code"] for a in assets}
-                    base_ids = {codes[r["base_asset"]]:r["base_asset"] for r in rows}
-                    quote_ids = {codes[r["quote_asset"]]:r["quote_asset"] for r in rows}
+                    # Keep each source's original code when a registered Asset has aliases.
+                    for old in self.bindings.values():
+                        if (old["venue"], old["environment"]) == (int(setting["venue"]), setting["environment"]):
+                            spec = old["specification"]
+                            codes[old["base_asset"]] = spec.get("base", old["symbol"])
+                            codes[old["quote_asset"]] = spec.get("quote", spec.get("price_quote"))
+                    base_ids = {r["specification"].get("base", r["symbol"]):r["base_asset"] for r in rows}
+                    quote_ids = {r["specification"].get("quote", r["specification"].get("price_quote")):r["quote_asset"] for r in rows}
                     def rebind(identity, identities, role):
+                        if identity in identities.values():
+                            return identity
                         code = codes.get(identity)
                         if code is None:
                             return identity
                         if code not in identities:
                             # A missing instrument must still retain its filter in the target namespace.
-                            if setting["type"] == "hyperliquid":
-                                identities[code] = self._hyperliquid_asset(setting, role, code, assets_by_id)
-                            else:
-                                asset = okx_assets.get(code) or dict(identity=str(self._stable_id("scanner-asset-v1", code)), code=code, atomic_scale=18)
-                                assets_by_id[asset["identity"]] = asset
-                                identities[code] = asset["identity"]
+                            identities[code] = self._asset(setting, code, assets_by_id)
                         return identities[code]
                     scopes = []
                     for scope in console.config["scopes"]:
@@ -423,24 +442,53 @@ class ScannerRuntime:
             if self.clock() >= self.next_discovery.get(key, 0):
                 self.request_discovery(setting, refresh=True)
 
-    def _hyperliquid_asset(self, setting, role, code, assets):
-        key = "21:" + setting["environment"]
-        shared = setting["environment"] == "production" and (
-            role == "perp" and code in STANDARD_PERP_UNDERLYINGS
-            or role == "price-denomination" and code in ("USDT", "USDC")
-            or role == "collateral-0" and code == "USDC")
-        identity = str(self._stable_id("scanner-asset-v1", code) if shared else
-                       self._stable_id("hyperliquid-observation-asset-v1", key+":"+role+":"+code))
-        assets[identity] = dict(identity=identity, code=code, atomic_scale=18)
+    def _asset(self, setting, code, assets):
+        binding = self.asset_bindings.resolve(setting["venue"], setting["environment"], code)
+        if binding is None:
+            identity = str(self._stable_id("scanner-source-asset-v2",
+                setting["venue"]+":"+setting["environment"]+":"+code))
+            label = code
+        else:
+            identity = str(self._stable_id("scanner-registered-asset-v1",
+                setting["environment"]+":"+binding["asset"]))
+            label = self.asset_bindings.label(binding)
+        # Scanner quantities use independent fixed observation units, never ledger atoms.
+        assets[identity] = dict(identity=identity, code=label, atomic_scale=18)
         return identity
+
+    @classmethod
+    def _validate_associations(cls, row):
+        associations = row.get("asset_associations")
+        if associations is None:  # Old caches must still undergo fresh discovery before use.
+            return
+        spec = row["specification"]
+        codes = dict(base=spec.get("base", row["symbol"]),
+                     quote=spec.get("quote", spec.get("price_quote")))
+        if row["venue"] == 21:
+            codes["settlement"] = "USDC"
+        if type(associations) is not dict or set(associations) != set(codes):
+            raise ValueError("saved asset associations")
+        registry = AssetBindings(dict(schema=1, bindings=[r for r in associations.values() if r is not None]), allow_fixture=True)
+        for role, code in codes.items():
+            binding = registry.resolve(row["venue"], row["environment"], code)
+            if binding != associations[role]:
+                raise ValueError("saved asset association scope")
+            namespace, value = (("scanner-registered-asset-v1", row["environment"]+":"+binding["asset"])
+                if binding else ("scanner-source-asset-v2", str(row["venue"])+":"+row["environment"]+":"+code))
+            if row[role+"_asset"] != str(cls._stable_id(namespace, value)):
+                raise ValueError("saved asset association identity")
+
+    def _associations(self, setting, **codes):
+        return {role: self.asset_bindings.resolve(setting["venue"], setting["environment"], code)
+                for role, code in codes.items()}
 
     def _hyperliquid_row(self, setting, item, assets):
         key = "21:" + setting["environment"]
         coin = item["coin"]
         # Protocol coin identity is scoped to the standard perp namespace and environment.
-        base = self._hyperliquid_asset(setting, "perp", coin, assets)
-        quote = self._hyperliquid_asset(setting, "price-denomination", item["price_quote"], assets)
-        settlement = self._hyperliquid_asset(setting, "collateral-0", "USDC", assets)
+        base = self._asset(setting, coin, assets)
+        quote = self._asset(setting, item["price_quote"], assets)
+        settlement = self._asset(setting, "USDC", assets)
         instrument = self._stable_id("hyperliquid-standard-perp-v1", key+":"+coin)
         version = self._stable_id("hyperliquid-rules-v1", json.dumps(item, sort_keys=True, separators=(",", ":"))) & ((1<<53)-1) or 1
         size = item["size_decimals"]
@@ -452,8 +500,9 @@ class ScannerRuntime:
         return dict(venue=21, environment=setting["environment"], symbol=coin, product="linear", instrument=str(instrument),
             observation_identity=str(self._stable_id("scanner-source-v1", key)), rules_version=version,
             base_asset=base, quote_asset=quote, settlement_asset=settlement, tick=tick, lot_wire=lot, lot_base=lot,
+            asset_associations=self._associations(setting, base=coin, quote=item["price_quote"], settlement="USDC"),
             specification=dict(item, product="linear", quote=item["price_quote"], settlement="USDC", collateral_token=0,
-                underlying_binding=STANDARD_PERP_UNDERLYINGS.get(coin) if setting["environment"] == "production" else None,
+                underlying_binding=self.asset_bindings.resolve(21, setting["environment"], coin),
                 max_significant_digits=5, integer_price_exception=True), binding=binding, hl_discovered=True)
 
     @staticmethod
@@ -607,7 +656,14 @@ class ScannerRuntime:
         # Publish with evidence through the same console public seam. No HTTP input route.
         with self.console.lock:
             if self.console.desired == "running" and self.console.session == session and self.console.config["version"] == version:
-                self.console.publish(session, cursor, observations, (), at_ns=self.clock(), evidence=evidence)
+                at_ns = self.clock()
+                selected_ids = self.console._selected()
+                selected_observations = tuple(o for o in observations if o.identity in selected_ids)
+                plans, failures, versions = self.evaluation.build(selected_observations, at_ns=at_ns,
+                    max_age_ns=self.console.max_age_ns, max_skew_ns=self.console.max_skew_ns, bindings=self.bindings)
+                evidence["evaluation"] = dict(self.evaluation.state, input_versions=versions)
+                self.console.publish(session, cursor, observations, plans, at_ns=at_ns,
+                    evidence=evidence, plan_failures=failures, input_versions=versions)
 
     def status(self):
         observations = []
@@ -630,7 +686,8 @@ class ScannerRuntime:
                             for (v, e), (url, a) in ROUTES.items()],
                     failures={str(k): v for k, v in self.failures.copy().items()}, observations=observations,
                     evidence=list(self.evidence.copy().values()), trading_qualified=False,
-                    missing_evaluation=["research_plan", "model", "calibration", "fees"])
+                    evaluation=copy.deepcopy(self.evaluation.state),
+                    missing_evaluation=list(self.evaluation.state["missing"]))
 
     def _run(self):
         while not self.closing.wait(.5) and not self.console.shutdown.is_set():

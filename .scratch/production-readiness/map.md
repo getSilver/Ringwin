@@ -54,6 +54,11 @@ Status: active
 
 ## Frontier
 
+- 2026-11-18：当前 Linux 目标机基线与策略离线验收已重跑，02 已修复重复 drain 延长关闭等待与
+  部分启动清理问题，状态为 in-progress。[本轮报告](../../docs/research/2026-11-18-linux-development-validation.md)
+  记录全部范围与失败；五 role 业务接线、peer credential、签名控制事实、持久 generation 和
+  HostSupervisor/drain 仍未完成，外部 NodeFence 等待第二节点与隔离设施，不关闭生产票。
+
 - 2026-10-08：新增[核心持续运行容量闭合](../core-continuous-capacity/map.md)前置波次，目标为每分片
   1,024 个同时存活订单；先完成合同、轮转、订单/发送归档、经济历史和容量验收，再收口生产业务链。
   当前仅发布计划，未改实现；本波完成也不自动关闭本图任何生产资格票。

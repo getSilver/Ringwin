@@ -432,8 +432,29 @@ pub fn revokeHostOwnerAuthority(
     fact_identity: u64,
     now_monotonic_ns: u64,
 ) !bool {
+    return revokeHostOwner(supervisor, gateway, owner, fact_identity, now_monotonic_ns, .fault);
+}
+
+pub fn revokeHostOwnerForDrain(
+    supervisor: *const HostSupervisor,
+    gateway: *gateway_module.Gateway,
+    owner: *@import("../runtime/demo/demo_authority.zig").Owner,
+    fact_identity: u64,
+    now_monotonic_ns: u64,
+) !bool {
+    return revokeHostOwner(supervisor, gateway, owner, fact_identity, now_monotonic_ns, .control);
+}
+
+fn revokeHostOwner(
+    supervisor: *const HostSupervisor,
+    gateway: *gateway_module.Gateway,
+    owner: *@import("../runtime/demo/demo_authority.zig").Owner,
+    fact_identity: u64,
+    now_monotonic_ns: u64,
+    reason: @import("../trading/trading_shard_event.zig").HostRevocationReason,
+) !bool {
     if (now_monotonic_ns == 0) return error.InvalidSafetyTime;
-    var event = try prepareHostRevocation(supervisor, gateway, try owner.source(), fact_identity, .fault) orelse return false;
+    var event = try prepareHostRevocation(supervisor, gateway, try owner.source(), fact_identity, reason) orelse return false;
     event.monotonic_time = now_monotonic_ns;
     event.time_presence.monotonic = true;
     _ = try owner.apply(.{ .core = event });

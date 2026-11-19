@@ -67,12 +67,12 @@ fn runDemo(writer: anytype) !void {
     try writer.writeAll("]\n");
 }
 
-fn runProjectHexFile(io: std.Io, path: []const u8, writer: anytype) !void {
+fn runProjectHexFile(io: std.Io, path: []const u8, writer: anytype, assets: bool) !void {
     var file = try std.Io.Dir.cwd().openFile(io, path, .{ .mode = .read_only });
     defer file.close(io);
     var hex_buffer: [64 * 1024]u8 = undefined;
     var reader = file.reader(io, &hex_buffer);
-    var hex: [32 * 1024]u8 = undefined;
+    var hex: [32 * 1024 * 1024]u8 = undefined;
     var hex_len: usize = 0;
     while (true) {
         const byte = reader.interface.takeByte() catch |err| switch (err) {
@@ -84,10 +84,12 @@ fn runProjectHexFile(io: std.Io, path: []const u8, writer: anytype) !void {
         hex[hex_len] = byte;
         hex_len += 1;
     }
-    var bytes_buffer: [32 * 1024]u8 = undefined;
+    var bytes_buffer: [16 * 1024 * 1024]u8 = undefined;
     const decoded_len = hex_len / 2;
     _ = std.fmt.hexToBytes(bytes_buffer[0..decoded_len], hex[0..hex_len]) catch return error.BadHex;
-    try projection.writeOutcomeJson(
+    if (assets) {
+        try projection.writeAssetBindingsJournal(bytes_buffer[0..decoded_len], trading_fixture.contract_denominator, .leveraged, writer);
+    } else try projection.writeOutcomeJson(
         projection.projectJournal(bytes_buffer[0..decoded_len], trading_fixture.contract_denominator, .leveraged),
         writer,
     );
@@ -127,9 +129,9 @@ pub fn main(init: std.process.Init) !void {
             hex_len += 2;
         }
         try out.print("{s}\n", .{hex_buffer[0..hex_len]});
-    } else if (std.mem.eql(u8, mode, "project")) {
+    } else if (std.mem.eql(u8, mode, "project") or std.mem.eql(u8, mode, "assets")) {
         const path = args.next() orelse return error.PathRequired;
-        try runProjectHexFile(init.io, path, out);
+        try runProjectHexFile(init.io, path, out, std.mem.eql(u8, mode, "assets"));
     } else {
         return error.UnknownMode;
     }

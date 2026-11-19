@@ -72,10 +72,16 @@ pub fn main(init: std.process.Init) !void {
             const role = try production_runtime.parseRole(args.next() orelse return error.MissingRole);
             if (!std.mem.eql(u8, args.next() orelse return error.MissingSocketFlag, "--socket")) return error.MissingSocketFlag;
             const socket = args.next() orelse return error.MissingSocket;
-            if (!std.mem.eql(u8, args.next() orelse return error.MissingGenerationFlag, "--generation")) return error.MissingGenerationFlag;
-            const generation = try std.fmt.parseInt(u64, args.next() orelse return error.MissingGeneration, 10);
+            const flag = args.next() orelse return error.MissingRoleStartupMode;
+            const value = args.next() orelse return error.MissingRoleStartupValue;
             if (args.next() != null) return error.UnknownArgument;
-            return production_runtime.runRole(init, role, socket, generation);
+            const startup: production_runtime.Startup = if (std.mem.eql(u8, flag, "--state-dir"))
+                .{ .state_dir = value }
+            else if (std.mem.eql(u8, flag, "--generation"))
+                .{ .fixture_generation = try std.fmt.parseInt(u64, value, 10) }
+            else
+                return error.UnknownArgument;
+            return production_runtime.runRole(init, role, socket, startup);
         }
         if (std.mem.eql(u8, argument, "--verify-role")) {
             const role = try windows_verification_runtime.parseRole(args.next() orelse return error.MissingRole);

@@ -5,6 +5,8 @@
 
 const std = @import("std");
 const builtin = @import("builtin");
+const business = @import("../testing/support/linux_role_business.zig");
+const simulated = @import("../adapters/simulated/simulated_venue.zig");
 
 pub const max_control_queue = 8;
 pub const max_frame_bytes = 1;
@@ -13,7 +15,7 @@ pub const Role = enum { engine, market_feed, execution_gateway, telemetry, contr
 pub const Phase = enum { stopped, starting, ready, recovering, trading, draining, forced_stop, failed };
 pub const RolePhase = enum { stopped, starting, ready, recovering, draining, forced_stop, failed };
 pub const Venue = enum { simulated };
-pub const Command = enum(u8) { enable_risk = 'A', drain = 'D', stop = 'S' };
+pub const Command = enum(u8) { enable_risk = 'A', drain = 'D', stop = 'S', business = 'B', settle = 'L' };
 pub const Status = enum(u8) { hello = 'H', ready = 'R', risk_enabled = 'A', draining = 'G', stopped = 'T', forced_stop = 'F', failed = 'X' };
 
 pub const BoundedQueue = struct {
@@ -170,14 +172,18 @@ fn readCommand(stream: *std.Io.net.Stream, io: std.Io) !?Command {
     }
 }
 
-fn waitForCommand(stream: *std.Io.net.Stream, io: std.Io, draining: bool) !?Command {
+fn waitForCommand(stream: *std.Io.net.Stream, io: std.Io, drain_deadline: ?i96) !?Command {
     if (comptime builtin.os.tag == .linux) {
         var descriptors: [1]std.posix.pollfd = .{.{
             .fd = stream.socket.handle,
             .events = std.os.linux.POLL.IN,
             .revents = 0,
         }};
-        const timeout_ms: i32 = if (draining) 5_000 else -1;
+        const timeout_ms: i32 = if (drain_deadline) |deadline| blk: {
+            const remaining = deadline - std.Io.Clock.awake.now(io).nanoseconds;
+            if (remaining <= 0) return error.DrainDeadline;
+            break :blk @intCast(@divTrunc(remaining + std.time.ns_per_ms - 1, std.time.ns_per_ms));
+        } else -1;
         const ready = std.posix.poll(&descriptors, timeout_ms) catch |err| {
             if (termination_requested.load(.seq_cst)) return null;
             return err;
@@ -187,9 +193,60 @@ fn waitForCommand(stream: *std.Io.net.Stream, io: std.Io, draining: bool) !?Comm
     return readCommand(stream, io);
 }
 
-pub fn runRole(init: std.process.Init, role: Role, socket_path: []const u8, generation: u64) !void {
+pub const Startup = union(enum) { fixture_generation: u64, state_dir: []const u8 };
+
+fn advanceGeneration(io: std.Io, dir: std.Io.Dir) !u64 {
+    var bytes: [9]u8 = undefined;
+    const current = if (dir.readFile(io, "generation", &bytes)) |stored| blk: {
+        if (stored.len != 8) return error.CorruptRoleGeneration;
+        const value = std.mem.readInt(u64, stored[0..8], .little);
+        if (value == 0) return error.CorruptRoleGeneration;
+        break :blk value;
+    } else |err| switch (err) {
+        error.FileNotFound => 0,
+        else => return err,
+    };
+    const next = try std.math.add(u64, current, 1);
+    std.mem.writeInt(u64, bytes[0..8], next, .little);
+    {
+        const file = try dir.createFile(io, "generation.tmp", .{ .permissions = @enumFromInt(0o600) });
+        defer file.close(io);
+        try file.writeStreamingAll(io, bytes[0..8]);
+        try file.sync(io);
+    }
+    try dir.rename("generation.tmp", dir, "generation", io);
+    if (std.os.linux.errno(std.os.linux.fsync(dir.handle)) != .SUCCESS) return error.GenerationDirectorySyncFailed;
+    return next;
+}
+
+fn verifyController(stream: std.Io.net.Stream, fixture: bool, parent: std.os.linux.pid_t) !void {
+    const linux = std.os.linux;
+    const Credentials = extern struct { pid: linux.pid_t, uid: linux.uid_t, gid: linux.gid_t };
+    var credentials: Credentials = undefined;
+    var length: linux.socklen_t = @sizeOf(Credentials);
+    if (linux.errno(linux.getsockopt(stream.socket.handle, linux.SOL.SOCKET, linux.SO.PEERCRED, std.mem.asBytes(&credentials), &length)) != .SUCCESS or
+        length != @sizeOf(Credentials) or credentials.pid <= 0)
+        return error.ControllerCredentialsUnavailable;
+    if (fixture) {
+        if (parent <= 1 or credentials.pid != parent or credentials.uid != linux.geteuid()) return error.UntrustedRoleController;
+    } else if (credentials.uid != 0) return error.UntrustedRoleController;
+}
+
+pub fn runRole(init: std.process.Init, role: Role, socket_path: []const u8, startup: Startup) !void {
     if (comptime builtin.os.tag != .linux) return error.LinuxOnlyProductionRole;
-    if (socket_path.len == 0 or generation == 0) return error.InvalidRoleConfiguration;
+    if (!std.fs.path.isAbsolute(socket_path)) return error.InvalidRoleConfiguration;
+    const parent = std.os.linux.getppid();
+    const fixture = startup == .fixture_generation;
+    const state_dir = if (fixture) null else try std.Io.Dir.openDirAbsolute(init.io, startup.state_dir, .{ .iterate = true });
+    defer if (state_dir) |dir| dir.close(init.io);
+    const owner = if (state_dir) |dir| try dir.createFile(init.io, "role.lock", .{
+        .truncate = false,
+        .permissions = @enumFromInt(0o600),
+    }) else null;
+    defer if (owner) |file| file.close(init.io);
+    if (owner) |file| if (!try file.tryLock(init.io, .exclusive)) return error.RoleAlreadyRunning;
+    const generation = if (state_dir) |dir| try advanceGeneration(init.io, dir) else startup.fixture_generation;
+    if (generation == 0) return error.InvalidRoleConfiguration;
     try installTermHandler();
     const address = try std.Io.net.UnixAddress.init(socket_path);
     std.Io.Dir.cwd().deleteFile(init.io, socket_path) catch |err| switch (err) {
@@ -213,13 +270,19 @@ pub fn runRole(init: std.process.Init, role: Role, socket_path: []const u8, gene
     };
     defer stream.close(init.io);
     active_socket.store(stream.socket.handle, .seq_cst);
+    try verifyController(stream, fixture, parent);
     try writeStatus(&stream, init.io, .hello);
     try writeStatus(&stream, init.io, .ready);
 
     var draining = false;
+    var drain_deadline: ?i96 = null;
     var risk_gate_open = false;
+    var engine: ?*business.Engine = null;
+    defer if (engine) |owner_| owner_.deinit(init);
+    var backend: simulated.SimulatedVenue = .{};
+    var business_started = false;
     while (true) {
-        const command = waitForCommand(&stream, init.io, draining) catch |err| {
+        const command = waitForCommand(&stream, init.io, drain_deadline) catch |err| {
             if (err == error.DrainDeadline) {
                 try writeStatus(&stream, init.io, .forced_stop);
                 try writeStatus(&stream, init.io, .stopped);
@@ -243,14 +306,24 @@ pub fn runRole(init: std.process.Init, role: Role, socket_path: []const u8, gene
         };
         switch (command) {
             .enable_risk => {
+                if (!fixture) {
+                    try writeStatus(&stream, init.io, .failed);
+                    return error.SignedControlFactRequired;
+                }
                 if (!enforcesRiskGate(role) or draining or risk_gate_open)
                     return error.InvalidRoleTransition;
                 risk_gate_open = true;
                 try writeStatus(&stream, init.io, .risk_enabled);
             },
             .drain => {
+                if (draining) {
+                    try writeStatus(&stream, init.io, .failed);
+                    return error.InvalidRoleTransition;
+                }
                 risk_gate_open = false;
                 draining = true;
+                drain_deadline = std.Io.Clock.awake.now(init.io).nanoseconds + 5 * std.time.ns_per_s;
+                if (engine) |owner_| try owner_.revoke(init);
                 try writeStatus(&stream, init.io, .draining);
             },
             .stop => {
@@ -258,8 +331,69 @@ pub fn runRole(init: std.process.Init, role: Role, socket_path: []const u8, gene
                     try writeStatus(&stream, init.io, .failed);
                     return error.InvalidRoleTransition;
                 }
+                if ((engine != null and engine.?.pending) or backend.pending != null) {
+                    try writeStatus(&stream, init.io, .forced_stop);
+                    return error.BusinessOutputPending;
+                }
+                if (role == .execution_gateway and business_started)
+                    try backend.adapter().stop(.{ .monotonic_ns = @intCast(std.Io.Clock.awake.now(init.io).nanoseconds) });
                 try writeStatus(&stream, init.io, .stopped);
                 return;
+            },
+            .business => {
+                if (!fixture or draining or business_started or (enforcesRiskGate(role) and !risk_gate_open))
+                    return error.InvalidBusinessTransition;
+                business_started = true;
+                switch (role) {
+                    .control_fence => try business.writeFrame(stream, init.io, &.{1}),
+                    .market_feed => {
+                        var mark: [8]u8 = undefined;
+                        std.mem.writeInt(u64, &mark, 50_000_000_000, .little);
+                        try business.writeFrame(stream, init.io, &mark);
+                    },
+                    .engine => {
+                        var input: [9]u8 = undefined;
+                        if ((try business.readFrame(stream, init.io, &input)).len != input.len)
+                            return error.InvalidBusinessFrame;
+                        engine = try business.Engine.start(init, stream, generation, socket_path);
+                        try engine.?.submit(init, std.mem.readInt(u64, input[0..8], .little), input[8]);
+                        try business.writeFrame(stream, init.io, "A");
+                    },
+                    .execution_gateway => {
+                        var input: [business.max_frame]u8 = undefined;
+                        try business.execute(init, &backend, try business.readFrame(stream, init.io, &input));
+                        try business.writeFrame(stream, init.io, "A");
+                    },
+                    .telemetry => return error.InvalidBusinessTransition,
+                }
+            },
+            .settle => {
+                if (!fixture or !draining) return error.InvalidBusinessTransition;
+                switch (role) {
+                    .engine => {
+                        const owner_ = engine orelse return error.NoDispatchPending;
+                        try owner_.settle(init, try business.readBatch(stream, init.io));
+                        try business.writeFrame(stream, init.io, "A");
+                    },
+                    .execution_gateway => {
+                        const batch = try backend.adapter().tryDrain() orelse return error.NoDispatchPending;
+                        try business.writeBatch(stream, init.io, &batch);
+                    },
+                    .telemetry => {
+                        if (business_started) return error.InvalidBusinessTransition;
+                        const batch = try business.readBatch(stream, init.io);
+                        var fills: u8 = 0;
+                        var lots: i128 = 0;
+                        for (batch.slice()) |event| if (event.event == .fill) {
+                            fills += 1;
+                            lots = try std.math.add(i128, lots, event.event.fill.quantity.lots);
+                        };
+                        if (fills != 2 or lots != 10) return error.UnexpectedSimulatedFills;
+                        business_started = true;
+                        try business.writeFrame(stream, init.io, &.{fills});
+                    },
+                    else => return error.InvalidBusinessTransition,
+                }
             },
         }
     }
@@ -322,8 +456,9 @@ pub fn runIntegration(init: std.process.Init, executable: []const u8) !void {
     var children: [roles.len]std.process.Child = undefined;
     var streams: [roles.len]std.Io.net.Stream = undefined;
     var started: usize = 0;
+    var connected: usize = 0;
     defer {
-        for (streams[0..started]) |*stream| stream.close(init.io);
+        for (streams[0..connected]) |*stream| stream.close(init.io);
         for (children[0..started]) |*child| child.kill(init.io);
     }
 
@@ -331,6 +466,7 @@ pub fn runIntegration(init: std.process.Init, executable: []const u8) !void {
         children[index] = try spawnRole(init, executable, role, path_slices[index], 1);
         started += 1;
         streams[index] = try connectRole(init, path_slices[index]);
+        connected += 1;
         try expectStatus(&streams[index], init.io, .hello);
         try expectStatus(&streams[index], init.io, .ready);
         try chain.startRole(role, 1);
@@ -344,11 +480,42 @@ pub fn runIntegration(init: std.process.Init, executable: []const u8) !void {
         try sendCommand(stream, init.io, .enable_risk);
         try expectStatus(stream, init.io, .risk_enabled);
     }
+    const engine_stream = &streams[@intFromEnum(Role.engine)];
+    const market_stream = &streams[@intFromEnum(Role.market_feed)];
+    const fence_stream = &streams[@intFromEnum(Role.control_fence)];
+    const gateway_stream = &streams[@intFromEnum(Role.execution_gateway)];
+    const telemetry_stream = &streams[@intFromEnum(Role.telemetry)];
+    var state_path: [128]u8 = undefined;
+    const engine_state = try std.fmt.bufPrint(&state_path, "{s}.state", .{path_slices[0]});
+    var input: [9]u8 = undefined;
+    try sendCommand(market_stream, init.io, .business);
+    if ((try business.readFrame(market_stream.*, init.io, input[0..8])).len != 8) return error.InvalidBusinessFrame;
+    try sendCommand(fence_stream, init.io, .business);
+    _ = try business.readFrame(fence_stream.*, init.io, input[8..9]);
+    try sendCommand(engine_stream, init.io, .business);
+    try business.writeFrame(engine_stream.*, init.io, &input);
+    var request: [business.max_frame]u8 = undefined;
+    const submission = try business.readFrame(engine_stream.*, init.io, &request);
+    try sendCommand(gateway_stream, init.io, .business);
+    try business.writeFrame(gateway_stream.*, init.io, submission);
+    var ack: [1]u8 = undefined;
+    if (!std.mem.eql(u8, try business.readFrame(gateway_stream.*, init.io, &ack), "A")) return error.DispatchNotAccepted;
+    try business.writeFrame(engine_stream.*, init.io, "A");
+    if (!std.mem.eql(u8, try business.readFrame(engine_stream.*, init.io, &ack), "A")) return error.DispatchNotCommitted;
     try chain.beginDrain();
     for (&streams) |*stream| {
         try sendCommand(stream, init.io, .drain);
         try expectStatus(stream, init.io, .draining);
     }
+    try sendCommand(gateway_stream, init.io, .settle);
+    const result = try business.readBatch(gateway_stream.*, init.io);
+    try sendCommand(engine_stream, init.io, .settle);
+    try business.writeBatch(engine_stream.*, init.io, &result);
+    if (!std.mem.eql(u8, try business.readFrame(engine_stream.*, init.io, &ack), "A")) return error.FillNotCommitted;
+    try sendCommand(telemetry_stream, init.io, .settle);
+    try business.writeBatch(telemetry_stream.*, init.io, &result);
+    _ = try business.readFrame(telemetry_stream.*, init.io, &ack);
+    if (ack[0] != 2) return error.FillNotObserved;
     for (&streams) |*stream| {
         try sendCommand(stream, init.io, .stop);
         try expectStatus(stream, init.io, .stopped);
@@ -358,8 +525,10 @@ pub fn runIntegration(init: std.process.Init, executable: []const u8) !void {
         if (term != .exited or term.exited != 0) return error.RoleExitedUnexpectedly;
     }
     try chain.stop();
+    try std.Io.Dir.cwd().deleteTree(init.io, engine_state);
 
     var forced_child = try spawnRole(init, executable, .engine, path_slices[0], 2);
+    defer forced_child.kill(init.io);
     var forced_stream = try connectRole(init, path_slices[0]);
     defer forced_stream.close(init.io);
     try expectStatus(&forced_stream, init.io, .hello);
@@ -376,6 +545,7 @@ pub fn runIntegration(init: std.process.Init, executable: []const u8) !void {
     if (chain.risk_authorized or !chain.forced_stop) return error.SafetyGateNotRevoked;
 
     var restart_child = try spawnRole(init, executable, .engine, path_slices[0], 3);
+    defer restart_child.kill(init.io);
     var restart_stream = try connectRole(init, path_slices[0]);
     defer restart_stream.close(init.io);
     try expectStatus(&restart_stream, init.io, .hello);
@@ -392,7 +562,7 @@ pub fn runIntegration(init: std.process.Init, executable: []const u8) !void {
     var output_buffer: [512]u8 = undefined;
     var output = std.Io.File.stdout().writer(init.io, &output_buffer);
     try output.interface.print(
-        "production_chain: venue=SimulatedVenue roles=5 recovering=5 ready=5 drain=5 forced_stop=1 restart_generation=3 risk_authorized=false ipc=unix bounded_queue={d}\n",
+        "production_chain: venue=SimulatedVenue roles=5 recovering=5 ready=5 drain=5 forced_stop=1 restart_generation=3 risk_authorized=false ipc=unix bounded_queue={d} host=python durable_fills=2\n",
         .{max_control_queue},
     );
     try output.interface.flush();

@@ -459,14 +459,14 @@ class ScannerConsole:
                 self.phase = "Paused" if reason == "paused" else "Stopped"
             return self.view()
 
-    def publish(self, session, cursor, observations, plans=(), *, at_ns, evidence=None):
+    def publish(self, session, cursor, observations, plans=(), *, at_ns, evidence=None, plan_failures=None, input_versions=None):
         """Node-only full canonical input; no HTTP route accepts observations/plans."""
         with self.lock:
             if self.desired != "running" or session != self.session:
                 raise ValueError("inactive scanner session")
             if type(cursor) is not int or not 1 <= cursor < 1 << 63:
                 raise ValueError("scanner cursor")
-            digest = checkpoint.content((observations, plans, at_ns, self.config))
+            digest = checkpoint.content((observations, plans, at_ns, self.config, plan_failures or {}, input_versions))
             if cursor == self.cursor:
                 if self.last_publication != digest:
                     raise ValueError("scanner input identity conflict")
@@ -485,7 +485,8 @@ class ScannerConsole:
             self.warming.difference_update(fresh)
             try:
                 snapshot = scanner.scan(observations, plans, at_ns=at_ns, cursor=cursor,
-                    max_age_ns=self.max_age_ns, max_skew_ns=self.max_skew_ns, scope=self._scope())
+                    max_age_ns=self.max_age_ns, max_skew_ns=self.max_skew_ns, scope=self._scope(),
+                    plan_failures=plan_failures, input_versions=input_versions)
                 snapshot["candidates"] = [r for r in snapshot["candidates"] if all(tuple(map(int, x)) in selected for x in r["pair"])]
             except Exception as error:
                 self.phase = "Faulted"
@@ -503,7 +504,7 @@ class ScannerConsole:
             self.sequence += 1
             envelope = self._envelope()
             material = encoded(dict(schema="scanner_inputs_v1", canonical_observations=freeze(observations),
-                                    frozen_plans=freeze(plans), config=self.config,
+                                    frozen_plans=freeze(plans), plan_failures=plan_failures or {}, input_versions=input_versions, config=self.config,
                                     at_ns=str(at_ns), cursor=str(cursor), max_age_ns=str(self.max_age_ns),
                                     max_skew_ns=str(self.max_skew_ns), snapshot=snapshot,
                                     selected_identities=[list(map(str, x)) for x in sorted(selected)],
@@ -644,7 +645,8 @@ class ScannerConsole:
             raise ValueError("scanner replay schema")
         result = scanner.scan(archive["canonical_observations"], archive["frozen_plans"],
             at_ns=int(archive["at_ns"]), cursor=int(archive["cursor"]),
-            max_age_ns=int(archive["max_age_ns"]), max_skew_ns=int(archive["max_skew_ns"]), scope=self._scope(archive["config"]))
+            max_age_ns=int(archive["max_age_ns"]), max_skew_ns=int(archive["max_skew_ns"]), scope=self._scope(archive["config"]),
+            plan_failures=archive.get("plan_failures", {}), input_versions=archive.get("input_versions"))
         registered = {tuple(map(int, x)) for x in archive["selected_identities"]}
         result["candidates"] = [r for r in result["candidates"] if all(tuple(map(int, x)) in registered for x in r["pair"])]
         return dict(replayable=True, matches=result == archive["snapshot"], snapshot=result)

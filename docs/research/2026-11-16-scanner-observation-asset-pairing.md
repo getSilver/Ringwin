@@ -2,6 +2,8 @@
 
 日期：2026-11-16。范围：设置驱动扫描票 06；这是只读观察关联，不是核心资产注册或交易批准。
 
+更新（2026-11-17）：下述 BTC／ETH 特殊关联是历史实现，已删除。当前目录复用核心已生效资产绑定，不按名单或同名推导等价；实现及限制见[已登记资产配对](2026-11-17-scanner-registered-asset-pairing.md)。尚未登记资产的自动身份依据与正式机会评估仍未解决。
+
 ## 来源与解释
 
 - [Hyperliquid 合约规格](https://hyperliquid.gitbook.io/hyperliquid-docs/trading/contract-specifications)：默认标准加密永续每单位对应一个标的现货单位，通常以 USDT 计价、USDC 结算；HYPE、PURR 指数以 USDC 计价。计价不能由保证金币种推断。

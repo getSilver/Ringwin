@@ -15,7 +15,25 @@ from unittest.mock import patch
 import control_plane
 import control_plane_web
 import owner_session
-from opportunity_scanner.scanner_runtime import ScannerRuntime, PublicTransport
+from opportunity_scanner.scanner_runtime import ScannerRuntime as PublicScannerRuntime, PublicTransport
+
+
+def registered_assets():
+    """Explicit activated-registry fixture, not inferred from discovery names."""
+    rows = []
+    for index, code in enumerate(("USDT", "USDC", "BTC", "ETH", "SOL", "DOGE", "HYPE", "PURR"), 1):
+        for venue, environments in (("1", ("production", "demo")), ("21", ("production", "testnet"))):
+            for environment in environments:
+                rows.append(dict(asset=str(index), atomic_scale=8, version="1", barrier="10",
+                    source_identity="100", source_digest="ab"*32, source_kind="test_fixture", venue=venue,
+                    environment=environment, code=code))
+    return dict(schema=1, bindings=rows)
+
+
+class ScannerRuntime(PublicScannerRuntime):
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("asset_provider", registered_assets)
+        super().__init__(*args, **kwargs)
 
 
 class PublicTransportTests(unittest.TestCase):
@@ -586,6 +604,7 @@ class HyperliquidCatalogueTests(unittest.TestCase):
         previous_quote = "235876055870610484460362939402242130"
         cache = Path(self.temp.name, "scanner-discovery.json")
         document = json.loads(cache.read_bytes())
+        document["bindings"][0].pop("asset_associations", None)
         document["bindings"][0].update(base_asset=previous_base, quote_asset=previous_quote)
         document["assets"] += [dict(identity=previous_base, code="ETH", atomic_scale=18),
                                dict(identity=previous_quote, code="USDT", atomic_scale=18)]
@@ -734,6 +753,114 @@ class HyperliquidCatalogueTests(unittest.TestCase):
 
 
 class IntegrationTests(unittest.TestCase):
+    def test_registered_SOL_enters_native_cross_venue_pairing(self):
+        self.transport.coin = "SOL"
+        self.start()
+        view = self.call("start")
+        self.assertEqual(len(view["market"]["observations"]), 2)
+        self.assertEqual(len(view["snapshot"]["candidates"]), 3)
+        self.assertTrue(all(a["captures"] == 3 for a in self.runtime.audit().values()))
+        rows = list(self.runtime.bindings.values())
+        self.assertEqual(len({r["base_asset"] for r in rows}), 1)
+        self.assertTrue(all(r["asset_associations"]["base"]["asset"] == "5" for r in rows))
+
+    def test_registered_DOGE_enters_native_cross_venue_pairing(self):
+        self.transport.coin = "DOGE"
+        self.start()
+        view = self.call("start")
+        self.assertEqual(len(view["market"]["observations"]), 2)
+        self.assertEqual(len(view["snapshot"]["candidates"]), 3)
+        self.assertTrue(all(a["captures"] == 3 for a in self.runtime.audit().values()))
+
+    def test_same_named_registered_different_assets_do_not_pair(self):
+        document = registered_assets()
+        for binding in document["bindings"]:
+            if binding["venue"] == "21" and binding["code"] == "ETH":
+                binding["asset"] = "99"
+        self.runtime.asset_provider = lambda: document
+        self.start()
+        view = self.call("start")
+        self.assertEqual(len(view["market"]["observations"]), 2)
+        self.assertEqual(view["snapshot"]["candidates"], [])
+
+    def test_scaled_contract_name_cannot_inherit_registered_asset_by_prefix(self):
+        self.transport.coin = "SOL"
+        request = self.transport.request
+        def scaled(url, body=None, **kwargs):
+            if body and body.get("coin") == "kSOL":
+                body = dict(body, coin="SOL")
+            result = request(url, body, **kwargs)
+            return result.replace("SOL", "kSOL") if body else result
+        self.transport.request = scaled
+        self.start()
+        view = self.call("start")
+        self.assertEqual(len(view["market"]["observations"]), 2)
+        self.assertEqual(view["snapshot"]["candidates"], [])
+        hl = next(r for r in self.runtime.bindings.values() if r["venue"] == 21)
+        self.assertIsNone(hl["asset_associations"]["base"])
+        self.assertTrue(any(r["symbol"] == "kSOL" and "base" in r["missing"]
+            for r in view["market"]["discovery"]["21:production"]["asset_binding_gaps"]))
+
+    def test_unregistered_assets_including_BTC_have_no_special_pairing(self):
+        self.runtime.asset_provider = lambda: dict(schema=1, bindings=[])
+        self.transport.coin = "BTC"
+        self.start()
+        view = self.call("start")
+        self.assertEqual(len(view["market"]["observations"]), 2)
+        self.assertEqual(view["snapshot"]["candidates"], [])
+
+    def test_registry_change_revokes_old_pair_and_preserves_registration_and_filter(self):
+        self.transport.coin = "SOL"
+        self.start()
+        registered = self.runtime.console.config["registered"]
+        settings = self.app.exchange_settings_store.view()["exchanges"]
+        hl = next(s for s in settings if s["venue"] == "21")
+        old = next(r["base_asset"] for r in self.runtime.bindings.values() if r["venue"] == 21)
+        rows = [scope(1), dict(scope(21), include_assets=[old])]
+        self.call("configure", dict(expected_version=self.runtime.console.config["version"], scopes=rows))
+        self.tick()
+        self.assertTrue(self.call("start")["snapshot"]["candidates"])
+        document = registered_assets()
+        for binding in document["bindings"]:
+            if binding["venue"] == "21" and binding["code"] == "SOL":
+                binding.update(asset="99", version="2", source_digest="cd"*32)
+        self.runtime.asset_provider = lambda: document
+        self.runtime.discover(hl)
+        self.assertEqual(self.runtime.console.snapshot["candidates"], [])
+        self.assertEqual(self.runtime.console.config["registered"], registered)
+        newer = next(r["base_asset"] for r in self.runtime.bindings.values() if r["venue"] == 21)
+        self.assertNotEqual(old, newer)
+        self.assertEqual(self.runtime.console.config["scopes"][1]["include_assets"], [newer])
+
+    def test_explicit_source_alias_pairs_and_survives_restart(self):
+        document = registered_assets()
+        # The alias is published in the same activated definition as ETH.
+        document["bindings"].append(dict(next(b for b in document["bindings"]
+            if b["venue"] == "21" and b["code"] == "ETH" and b["environment"] == "production"), code="ALIAS"))
+        self.runtime.asset_provider = lambda: document
+        request = self.transport.request
+        def aliased(url, body=None, **kwargs):
+            if body and body.get("coin") == "ALIAS":
+                body = dict(body, coin="ETH")
+            result = request(url, body, **kwargs)
+            return result.replace("ETH", "ALIAS") if body else result
+        self.transport.request = aliased
+        self.start()
+        self.assertEqual(len(self.call("start")["snapshot"]["candidates"]), 3)
+        before = set(self.runtime.source.registered)
+        self.runtime.close()
+        self.runtime = ScannerRuntime(self.temp.name, transport=self.transport,
+            clock=lambda:self.now[0], utc_clock=lambda:self.now[1], automatic=False,
+            asset_provider=lambda: dict(document, bindings=list(reversed(document["bindings"]))))
+        self.app.scanner_runtime, self.app.scanner_console = self.runtime, self.runtime.console
+        self.runtime.console.exchange_settings = self.app.exchange_settings_store
+        self.assertEqual(set(self.runtime.source.registered), before)
+        self.assertEqual(self.runtime.console.desired, "stopped")
+        for setting in self.app.exchange_settings_store.view()["exchanges"]:
+            self.runtime.discover(setting)
+        self.call("start"); self.tick()
+        self.assertEqual(len(self.call("start")["snapshot"]["candidates"]), 3)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.now = [2_000_000_000, 1_800_000_000_000_000_000]
@@ -798,6 +925,76 @@ class IntegrationTests(unittest.TestCase):
         for thread in self.runtime.discovery_threads:
             thread.join(timeout=15)
         return body["result"]
+
+    def test_formal_runtime_native_http_evaluates_and_archive_replays(self):
+        self._assert_formal_evaluation("HYPE")
+
+    def test_second_non_whitelisted_asset_reaches_formal_evaluation(self):
+        self._assert_formal_evaluation("PURR")
+
+    def _assert_formal_evaluation(self, coin):
+        from dataclasses import replace
+        from opportunity_scanner.scanner_evaluation import publish_inputs
+        from strategies.cross_venue import arbitrage_evaluation as evaluation
+        from test_scanner_evaluation import native_inputs
+        self.transport.coin = coin
+        original = self.transport.request
+        def response(url, body=None, **kwargs):
+            payload = original(url, body, **kwargs)
+            if body is None:
+                return payload.replace("USDT", "USDC")
+            if body.get("type") == "l2Book":
+                value = json.loads(payload)
+                value["levels"][0][0]["px"] = "3100"
+                value["levels"][1][0]["px"] = "3100.1"
+                return json.dumps(value)
+            return payload
+        self.transport.request = response
+        self.start()
+        self.now[1] += 3_000_000_000-self.now[0]
+        self.now[0] = 3_000_000_000
+        self.runtime.step()
+        observations = tuple(sorted(self.runtime.observations.values(),key=lambda o:o.identity))
+        self.assertEqual(len(observations),2)
+        document = native_inputs(observations,self.now[0],self.runtime.evaluation.clock_id)
+        publish_inputs(self.runtime.evaluation.path,document)
+        self.runtime.step()
+        view = self.call("start")
+        row = next(r for r in view["snapshot"]["candidates"] if r["mode"] == "taker_taker")
+        self.assertEqual(row["status"],"evaluated",(row,self.runtime.evaluation.state))
+        self.assertTrue(row["recommended"])
+        self.assertIsNotNone(row["quantity_base"])
+        self.assertGreater(int(row["plan_atoms"]),0)
+        self.assertEqual(row["input_versions"]["fees"],"native-fees-v1")
+        material, = self.runtime.console.last_evidence.values()
+        from opportunity_scanner.scanner_archive import load
+        archive = load(material)
+        plan, = archive["frozen_plans"]
+        expected = evaluation.evaluate(plan.scenarios,plan.policy,plan.estimator,plan.calibration,
+                                       plan.simulation_error,plan.limits)
+        self.assertEqual(row["plan_atoms"],str(expected.plan_atoms))
+        self.assertEqual(row["scenario_digest"],expected.scenario_digest)
+        digest, = self.runtime.console.last_evidence
+        self.assertTrue(self.runtime.console.replay(digest)["matches"])
+        case = document["cases"][0]
+        document["version"] = 2
+        original_fees = case["entry_fees"]
+        case["entry_fees"] = tuple(replace(f,taker_ppm=100000) for f in original_fees)
+        publish_inputs(self.runtime.evaluation.path,document)
+        self.runtime.step()
+        rejected = next(r for r in self.call("start")["snapshot"]["candidates"] if r["id"] == row["id"])
+        self.assertEqual((rejected["status"],rejected["reason"]),("rejected","reference_profit"))
+        self.assertFalse(rejected["recommended"])
+        self.assertGreater(int(rejected["observed_edge_bp"][0]),0)
+        document["version"] = 3
+        case["entry_fees"] = tuple(replace(f,valid_until_ns=self.now[0]) for f in original_fees)
+        publish_inputs(self.runtime.evaluation.path,document)
+        self.runtime.step()
+        current = self.call("start")["snapshot"]["candidates"]
+        target = next(r for r in current if r["id"] == row["id"])
+        self.assertEqual(target["reason"],"fees_expired")
+        self.assertFalse(target["recommended"])
+        self.assertIsNone(target["plan_atoms"])
 
     def test_settings_rename_delete_and_retained_history_through_http(self):
         self.start()
@@ -984,6 +1181,7 @@ class IntegrationTests(unittest.TestCase):
         self.runtime.close()
         okx, hl = RefreshTransport(self.now), RefreshTransport(self.now, True)
         transport = PublicTransport()
+        transport.input_kind = "synthetic_protocol_fixture"
         transport.request = lambda url, body=None, **kw: (hl if body else okx).request(url, body, **kw)
         self.runtime = ScannerRuntime(Path(self.temp.name)/"mixed",
             transport=transport, clock=lambda:self.now[0], utc_clock=lambda:self.now[1], automatic=False)
@@ -1247,7 +1445,7 @@ class IntegrationTests(unittest.TestCase):
         self.start()
         view = self.call("start")
         self.assertEqual(len(view["snapshot"]["candidates"]), 3)
-        self.assertTrue(all(c["reason"] == "missing_evidence" and not c["recommended"] for c in view["snapshot"]["candidates"]))
+        self.assertTrue(all(c["reason"] == "evaluation_inputs_missing" and not c["recommended"] for c in view["snapshot"]["candidates"]))
         okx = next(r for r in self.runtime.bindings.values() if r["venue"] == 1)
         hl = next(r for r in self.runtime.bindings.values() if r["venue"] == 21)
         self.assertEqual(okx["base_asset"], hl["base_asset"])
@@ -1277,7 +1475,7 @@ class IntegrationTests(unittest.TestCase):
         view=self.call("start")
         self.assertEqual(view["phase"],"Running",view)
         self.assertEqual(len(view["snapshot"]["candidates"]),3)
-        self.assertTrue(all(c["reason"]=="missing_evidence" and not c["recommended"] for c in view["snapshot"]["candidates"]))
+        self.assertTrue(all(c["reason"]=="evaluation_inputs_missing" and not c["recommended"] for c in view["snapshot"]["candidates"]))
         self.assertEqual(len(view["market"]["observations"]),2)
         self.assertTrue(all(x["raw_sequence"]>=3 for x in view["market"]["evidence"]))
         self.assertTrue(self.call("history",dict(kind="batches",limit=10))["rows"])

@@ -177,7 +177,24 @@ def candidate_id(pair, direction, mode, maker_leg):
     return hashlib.sha256(json.dumps([SCHEMA, key], separators=(",", ":")).encode("ascii")).hexdigest()
 
 
-def scan(observations, plans, *, at_ns, cursor, max_age_ns, max_skew_ns, scope=None):
+def compatible_pairs(observations):
+    pairs = {}
+    for a, z in combinations(sorted(observations, key=lambda x: x.identity), 2):
+        if (a.venue == z.venue or a.environment != z.environment or a.account == z.account or a.rules.instrument == z.rules.instrument
+                or (a.rules.exposure_asset, a.rules.quote_asset) != (z.rules.exposure_asset, z.rules.quote_asset)):
+            continue
+        pairs[a.identity, z.identity] = a, z
+    return pairs
+
+
+def pair_keys(pair, legs):
+    a, z = legs
+    directions = (1, -1) if a.kind == z.kind else ((1,) if a.kind == "spot" else (-1,))
+    return tuple((pair, direction, mode, maker) for direction in directions
+                 for mode, maker in (("taker_taker", None), ("maker_taker", 0), ("maker_taker", 1)))
+
+
+def scan(observations, plans, *, at_ns, cursor, max_age_ns, max_skew_ns, scope=None, plan_failures=None, input_versions=None):
     """Full replacement snapshot; omitted/expired rows cannot retain eligibility.
 
     Plans are frozen research scenario inputs, not scanner-generated forecasts.
@@ -196,12 +213,11 @@ def scan(observations, plans, *, at_ns, cursor, max_age_ns, max_skew_ns, scope=N
         raise b.Rejected("duplicate_observation")
     if scope is not None and not isinstance(scope, Scope):
         raise b.Rejected("scan_scope")
-    pairs = {}
-    for a, z in combinations(sorted(observations, key=lambda x: x.identity), 2):
-        if (a.venue == z.venue or a.environment != z.environment or a.account == z.account or a.rules.instrument == z.rules.instrument
-                or (a.rules.exposure_asset, a.rules.quote_asset) != (z.rules.exposure_asset, z.rules.quote_asset)):
-            continue
-        pairs[a.identity, z.identity] = a, z
+    pairs = compatible_pairs(observations)
+    plan_failures = {} if plan_failures is None else plan_failures
+    if type(plan_failures) is not dict or len(plan_failures) > 256 or any(
+            type(k) is not str or type(v) is not str or len(v) > 256 for k,v in plan_failures.items()):
+        raise b.Rejected("scan_plan_failures")
     selected_identities = {x.identity for x in observations if scope is None or scope.contains(x)}
     active_pairs = {pair: legs for pair, legs in pairs.items() if all(x.identity in selected_identities for x in legs)}
     if len(active_pairs) > 256:
@@ -262,16 +278,20 @@ def scan(observations, plans, *, at_ns, cursor, max_age_ns, max_skew_ns, scope=N
                     if not reason and a.kind == z.kind == "spot":
                         reason = "spot_spot_observation_only"
                     if not reason:
-                        result = v.evaluate(plan.scenarios, policy, plan.estimator, plan.calibration,
-                                            plan.simulation_error, plan.limits)
-                        reason = result.reason
+                        try:
+                            result = v.evaluate(plan.scenarios, policy, plan.estimator, plan.calibration,
+                                                plan.simulation_error, plan.limits)
+                            reason = result.reason
+                        except (ValueError, OverflowError, ZeroDivisionError) as error:
+                            reason = str(error)[:256]
                     evaluated.append((plan, result, reason))
                 # Qualified quantities first; then actual-plan profit, lower occupancy, lower quantity.
                 evaluated.sort(key=lambda x: (not (x[1] is not None and x[1].allowed and not x[2]),
                     -(x[1].plan_atoms if x[1] is not None and x[1].plan_atoms is not None else -e.MAX_INTEGER),
                     x[0].occupied_atoms, e.exact(x[0].policy.original_base)))
                 plan, result, reason = evaluated[0] if evaluated else (None, None,
-                    health or ("spot_spot_observation_only" if a.kind == z.kind == "spot" else "missing_evidence"))
+                    health or ("spot_spot_observation_only" if a.kind == z.kind == "spot" else
+                               plan_failures.get(candidate_id(*key), "missing_evidence")))
                 age = min(max_age_ns, plan.policy.max_book_age_ns) if plan else max_age_ns
                 end = min(*(min(b.MAX_U64, t+age) for t in times), *(x.rules.valid_until_ns for x in legs),
                           plan.valid_until_ns if plan else b.MAX_U64, plan.policy.deadline_ns if plan else b.MAX_U64,
@@ -282,7 +302,8 @@ def scan(observations, plans, *, at_ns, cursor, max_age_ns, max_skew_ns, scope=N
                     "direction": direction, "mode": mode, "maker_leg": maker,
                     "products": [x.kind for x in legs],
                     "observed_edge_bp": _ratio(observed_edge),
-                    "status": "evaluated" if result is not None and result.allowed and not reason else "pending",
+                    "status": "evaluated" if result is not None and result.allowed and not reason else
+                              "rejected" if result is not None and reason in ("reference_profit", "profit", "edge", "probability", "hard_gate") else "pending",
                     "reason": reason, "trading_qualified": False,
                     "quantity_base": _ratio(plan.policy.original_base) if plan else None,
                     "reference_atoms": str(result.reference_atoms) if result and result.reference_atoms is not None else None,
@@ -298,7 +319,9 @@ def scan(observations, plans, *, at_ns, cursor, max_age_ns, max_skew_ns, scope=N
                     "calibration_version": str(plan.calibration.version) if plan else None,
                     "scenario_digest": result.scenario_digest if result else None,
                     "estimator_digest": result.estimator_digest if result else None,
-                    "data_cutoff_ns": str(min(times)), "valid_until_ns": str(end), "recommended": False})
+                    "data_cutoff_ns": str(min(times)), "valid_until_ns": str(end), "recommended": False,
+                    **({"input_versions": input_versions.get(candidate_id(*key), {}).get(str(plan.policy.original_base), {})
+                       if plan else {}} if input_versions is not None else {})})
     for pair in active_pairs:
         for direction in (1, -1):
             eligible = [row for row in rows if row["pair"] == [[str(n) for n in x] for x in pair]
