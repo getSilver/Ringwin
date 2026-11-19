@@ -216,7 +216,7 @@ SPECS = {
         target_cursor=optional(U), first_exit=optional(structure(dict(reason=S, cursor=U))),
         reasons=mapping(S, 16), before_reconciling=optional(S), last_economic_ref=optional(S),
         last_facts_digest=optional(H), matched_base=optional(Q), entry_cursor=optional(U),
-        entry_valid_until_ns=optional(U)),
+        entry_valid_until_ns=optional(U), entry_fee_version=S),
 }
 # A separate component tag preserves the existing IOC v2 intent encoding.
 SPECS["maker_cycle"] = dict(SPECS["cycle"],
@@ -233,7 +233,7 @@ CONFIG_FIELDS = {
     "rolling": {"spec"}, "ar1": set(), "rolling_baseline": set(), "filter": {"parameters"},
     "labels": {"capacity"}, "signal": {"scope", "policy", "identity"},
     "monitor": {"metrics", "warn_windows", "fail_windows", "clear_windows"},
-    "admission": {"config", "pending_signal"}, "cycle": {"plan"},
+    "admission": {"config", "pending_signal", "fees"}, "cycle": {"plan"},
     "estimator": set(), "calibration": set(), "maker_cycle": {"plan"},
 }
 
@@ -258,6 +258,13 @@ def dependency(obj):
     raise ValueError("unknown component")
 
 
+def component_codec(tag, state):
+    spec = SPECS[tag]
+    if tag in ("cycle", "maker_cycle") and "entry_fee_version" not in state:
+        spec = {name: codec for name, codec in spec.items() if name != "entry_fee_version"}
+    return structure(spec)
+
+
 def progress(obj, tag):
     if SPECS[tag]:
         stored = set(SPECS[tag]) | CONFIG_FIELDS[tag]
@@ -269,7 +276,7 @@ def progress(obj, tag):
         if tag == "admission":
             required.remove("pending_scope")
         if tag in ("cycle", "maker_cycle"):
-            required -= {"entry_cursor", "entry_valid_until_ns"}
+            required -= {"entry_cursor", "entry_valid_until_ns", "entry_fee_version"}
         if required-set(vars(obj)):
             raise ValueError("missing component field")
     values = {name: getattr(obj, name, None) for name in SPECS[tag]}
@@ -279,7 +286,9 @@ def progress(obj, tag):
                                for k, v in sorted(obj.evaluated.items())]
     if tag in ("cycle", "maker_cycle") and obj.first_exit is not None:
         values["first_exit"] = dict(reason=obj.first_exit[0], cursor=obj.first_exit[1])
-    return structure(SPECS[tag])[0](values)
+    if tag in ("cycle", "maker_cycle") and values["entry_fee_version"] is None:
+        values.pop("entry_fee_version")
+    return component_codec(tag, values)[0](values)
 
 
 def validate(state, cursor, strategy=None, next_intent=None):
@@ -292,7 +301,7 @@ def validate(state, cursor, strategy=None, next_intent=None):
     s.ordered_unique([x["name"] for x in state["components"]])
     for row in state["components"]:
         tag = row["tag"]
-        values = structure(SPECS[tag])[1](row["state"])
+        values = component_codec(tag, row["state"])[1](row["state"])
         if tag == "rolling":
             b.ordered_points(values["_points"])
             if values["_points"] and values["_points"][-1] != values["_last"]:
@@ -542,7 +551,7 @@ def checkpoint(metadata, components):
         raise ValueError("component schema")
     state = snapshot(components, metadata["cursor"], metadata["strategy"], metadata["next_intent"])
     for row in state["components"]:
-        validate_configured(components[row["name"]], row["tag"], structure(SPECS[row["tag"]])[1](row["state"]), metadata)
+        validate_configured(components[row["name"]], row["tag"], component_codec(row["tag"], row["state"])[1](row["state"]), metadata)
     container = host.encode_checkpoint(metadata, state)
     restore(container, components)
     return container
@@ -559,12 +568,15 @@ def restore(container, templates, *, expected=None):
     rows = state["components"]
     if [r["name"] for r in rows] != sorted(templates):
         raise ValueError("component scope")
-    restored = copy.deepcopy(templates)
+    # The live fee source is a runtime dependency, shared by restored batches.
+    sources = {id(obj.fees): obj.fees for obj in templates.values()
+               if type(obj) is admission.Admission and obj.fees is not None}
+    restored = copy.deepcopy(templates, sources)
     for row in rows:
         obj, tag = restored[row["name"]], row["tag"]
         if TYPES.get(type(obj)) != tag or not matches_content(dependency(obj), row["dependency"]):
             raise ValueError("frozen dependency mismatch")
-        values = structure(SPECS[tag])[1](row["state"])
+        values = component_codec(tag, row["state"])[1](row["state"])
         validate_configured(obj, tag, values, metadata)
         if tag == "rolling":
             values["_points"] = deque(values["_points"], maxlen=obj.spec.capacity)

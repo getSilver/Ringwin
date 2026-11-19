@@ -73,7 +73,11 @@ class FeeSchedules:
             if request["expected_version"] != self.document["version"]:
                 raise ValueError("fee schedule version conflict")
             self._validate_rows(request["rows"])
-            if self.view()["rows"] == request["rows"]:
+            def rates(rows):
+                return {validate(row): (percent_ppm(row["maker_percent"]), percent_ppm(row["taker_percent"]))
+                        for row in rows}
+
+            if rates(self.view()["rows"]) == rates(request["rows"]):
                 return self.view()
             doc = copy.deepcopy(self.document)
             doc["revisions"].append(copy.deepcopy(request["rows"]))

@@ -296,7 +296,7 @@ class Cycle:
         self.matched_base = None
 
     @classmethod
-    def from_admission(cls, plan, request, option):
+    def from_admission(cls, plan, request, option, *, fees=None):
         """Bind 08's recommendation; execution parameters must match certified execution_hash.
 
         The caller resolves that versioned execution configuration. The core
@@ -304,6 +304,7 @@ class Cycle:
         """
         if not isinstance(plan, Plan) or not isinstance(request, admission.Request) or not isinstance(option, admission.Option):
             raise b.Rejected("admission_binding")
+        option.plan.require_current_fees(fees)
         if (request.identity != plan.request_ref or request.config_hash != plan.config_hash
                 or plan.execution_hash != option.execution_hash
                 or request.target_atoms != plan.target_atoms or request.key != option.plan.key
@@ -324,7 +325,16 @@ class Cycle:
         cycle = cls(plan)
         cycle.entry_cursor = request.cursor
         cycle.entry_valid_until_ns = request.valid_until_ns
+        if option.plan.fee_version is not None:
+            cycle.entry_fee_version = option.plan.fee_version
         return cycle
+
+    def _check_entry_fees(self, fees):
+        version = getattr(self, "entry_fee_version", None)
+        if version is not None:
+            if fees is None:
+                raise b.Rejected("fees_version_missing")
+            fees.require_current(version)
 
     def _emit(self, cursor, reason, specs):
         intents = tuple(Intent(self.next_sequence+i, *spec) for i, spec in enumerate(specs))
@@ -333,7 +343,7 @@ class Cycle:
         self.issued += intents
         return Action(self.plan, cursor, reason, intents)
 
-    def start(self, *, cursor, at_ns):
+    def start(self, *, cursor, at_ns, fees=None):
         b.uint(cursor, 1)
         b.uint(at_ns, self.plan.policy.at_ns)
         if self.phase != "idle":
@@ -342,6 +352,7 @@ class Cycle:
             raise b.Rejected("entry_expired")
         if hasattr(self, "entry_cursor") and (cursor != self.entry_cursor or at_ns >= self.entry_valid_until_ns):
             raise b.Rejected("admission_expired_or_cursor")
+        self._check_entry_fees(fees)
         self.cursor, self.last_at_ns, self.phase = cursor, at_ns, "entering"
         return self._emit(cursor, "joint_entry", tuple((i, leg.target_lots, self.plan.entry_limits[i], False)
                           for i, leg in enumerate(self.plan.legs)))

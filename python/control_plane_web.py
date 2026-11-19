@@ -258,8 +258,7 @@ class ControlPlaneApp:
                 getattr(projection_provider, "asset_bindings", None))
             scanner_console = self.scanner_runtime.console
         from opportunity_scanner.fee_schedules import FeeSchedules
-        self.fee_schedules = (self.scanner_runtime.fees if self.scanner_runtime is not None
-                              else FeeSchedules(Path(directory)/"manual-fees.json"))
+        self.fee_schedules = scanner_console.fee_schedules or FeeSchedules(Path(directory)/"manual-fees.json")
         scanner_console.fee_schedules = self.fee_schedules
         self.scanner_console = scanner_console
         if scanner_console is not None and scanner_console.config_store is None:

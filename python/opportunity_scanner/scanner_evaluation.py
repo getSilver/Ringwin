@@ -103,12 +103,21 @@ class EvaluationInputs:
         if len(keys) > 256:
             raise b.Rejected("scan_candidate_capacity")
         failures, plans, versions = {}, [], {}
+        fee_version = self.fees.view()["version"] if self.fees is not None else None
+        fee_rules, fee_errors = {}, {}
+        if fee_version is not None:
+            for pair, legs in pairs.items():
+                try:
+                    fee_rules[pair] = tuple(self.fees.rule(o, version=fee_version) for o in legs)
+                except ValueError as error:
+                    fee_errors[pair] = str(error)
         try:
             doc = self._load(at_ns)
         except (OSError, ValueError, TypeError, KeyError, OverflowError) as error:
             reason = str(error)[:256]
-            failures = {s.candidate_id(*key): reason for key in keys}
-            self.state = dict(state="missing", clock_id=self.clock_id, missing=[reason], plans=0)
+            failures = {s.candidate_id(*key): fee_errors.get(key[0], reason) for key in keys}
+            self.state = dict(state="missing", clock_id=self.clock_id,
+                              missing=sorted({reason, *failures.values()}), plans=0)
             return (), failures, {}
         indexed = {}
         for case in doc["cases"]:
@@ -123,15 +132,20 @@ class EvaluationInputs:
             indexed.setdefault(s.candidate_id(*case["key"]), []).append(case)
         for key in keys:
             identity = s.candidate_id(*key)
+            if key[0] in fee_errors:
+                failures[identity] = fee_errors[key[0]]
+                continue
             cases = indexed.get(identity, ())
             if not cases:
                 failures[identity] = "evaluation_case_missing"
             for case in cases:
                 try:
-                    if self.fees is not None:
-                        fee_version = self.fees.view()["version"]
-                        current_fees = tuple(self.fees.rule(o, version=fee_version) for o in pairs[key[0]])
-                        if any(new.fee_asset != old.fee_asset for new, old in zip(current_fees, case["entry_fees"])):
+                    if fee_version is not None:
+                        current_fees = fee_rules[key[0]]
+                        asset_ids = tuple(fee.fee_asset for fee in current_fees)
+                        if (tuple(fee.fee_asset for fee in case["entry_fees"]) != asset_ids
+                                or any(tuple(leg.exit_fee.fee_asset for leg in sc.entry.legs) != asset_ids
+                                       for sc in case["scenarios"] if sc.entry.legs)):
                             raise b.Rejected("fees_asset_evidence_missing")
                         case = dict(case, entry_fees=current_fees,
                             versions=dict(case["versions"], fees=fee_version),
@@ -140,6 +154,8 @@ class EvaluationInputs:
                                            for i, leg in enumerate(sc.entry.legs)))) for sc in case["scenarios"]))
                     plan = self._plan(case, pairs[key[0]], at_ns, max_age_ns, max_skew_ns, bindings,
                                       doc["valid_until_ns"])
+                    if fee_version is not None:
+                        plan = replace(plan, fee_version=fee_version)
                     if any(old.key == plan.key and old.policy.original_base == plan.policy.original_base for old in plans):
                         plans = [old for old in plans if old.key != plan.key]
                         failures[identity] = "duplicate_evaluation_quantity"

@@ -22,7 +22,9 @@ def freeze(value):
         name = type(value).__module__.rsplit(".", 1)[-1] + "." + type(value).__name__
         if name not in TYPES:
             raise ValueError("unregistered scanner archive type")
-        return {"type": name, "fields": {f.name: freeze(getattr(value, f.name)) for f in fields(value)}}
+        return {"type": name, "fields": {f.name: freeze(getattr(value, f.name)) for f in fields(value)
+                                       if not (type(value) is arbitrage_scanner.Plan and f.name == "fee_version"
+                                               and value.fee_version is None)}}
     if type(value) is Fraction:
         return {"fraction": [str(value.numerator), str(value.denominator)]}
     if type(value) is bytes:
@@ -51,7 +53,12 @@ def thaw(value, depth=0):
         return value
     if set(value) == {"type", "fields"}:
         cls = TYPES.get(value["type"])
-        if cls is None or set(value["fields"]) != {f.name for f in fields(cls)}:
+        names = set(value["fields"])
+        if cls is arbitrage_scanner.Plan:
+            names.add("fee_version")
+        if cls is arbitrage_scanner.Observation:
+            names.update(("market_source", "market_error", "registered_assets"))
+        if cls is None or names != {f.name for f in fields(cls)}:
             raise ValueError("scanner archive type/fields")
         return cls(**{k: thaw(v, depth+1) for k, v in value["fields"].items()})
     if set(value) == {"tuple"}:

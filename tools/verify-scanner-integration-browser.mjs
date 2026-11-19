@@ -52,7 +52,35 @@ try {
   await click('登录');
   await page.getByText('已停止 · 配置 v0',{exact:true}).waitFor();
  });
- if (args.includes('--scope-ticket')) {
+ if (args.includes('--fees-ticket')) {
+  const settings = async () => { await click('Settings'); await click('交易所'); };
+  await check('save exact fee percentages in formal settings',async()=>{
+   await settings();
+   for (const [name,value] of [['场所编号','1'],['账户编号','123'],['费用资产编号','5'],['Maker 费率 (%)','-0.012345'],['Taker 费率 (%)','0.023456']])
+    await page.getByRole('textbox',{name,exact:true}).fill(value);
+   await click('保存费率');
+   await page.getByText('已保存费率版本 1',{exact:true}).waitFor();
+  });
+  await check('restart and owner login restore the same fee revision',async()=>{
+   await context.close();
+   const reply = new Promise((resolve,reject)=>{
+    const timeout=setTimeout(()=>reject(new Error('fixture restart timeout')),30000);
+    fixture.stdout.once('data',data=>{clearTimeout(timeout);resolve(JSON.parse(String(data).trim()));});
+   });
+   fixture.stdin.write('restart\n');
+   const restarted=await reply;
+   context=await newSession();
+   await page.goto(base+'/#opportunities');
+   await page.getByRole('textbox',{name:'口令',exact:true}).fill(ready.passphrase);
+   await page.getByRole('textbox',{name:'TOTP 验证码',exact:true}).fill(restarted.totp);
+   await click('登录');
+   await settings();
+   await page.getByText('已保存费率版本 1',{exact:true}).waitFor();
+   const fees = page.getByRole('table',{name:'已保存费率'});
+   await fees.getByText('-0.012345',{exact:true}).waitFor();
+   await fees.getByText('0.023456',{exact:true}).waitFor();
+  });
+ } else if (args.includes('--scope-ticket')) {
   const settings = page.getByRole('table',{name:'已保存交易所'});
   const scannerView = async predicate => {
    const deadline = Date.now() + 15000;

@@ -998,7 +998,6 @@ class IntegrationTests(unittest.TestCase):
         self._assert_formal_evaluation("PURR")
 
     def _assert_formal_evaluation(self, coin):
-        from dataclasses import replace
         from opportunity_scanner.scanner_evaluation import publish_inputs
         from strategies.cross_venue import arbitrage_evaluation as evaluation
         from test_scanner_evaluation import native_inputs
@@ -1023,6 +1022,12 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(len(observations),2)
         document = native_inputs(observations,self.now[0],self.runtime.evaluation.clock_id)
         publish_inputs(self.runtime.evaluation.path,document)
+        rows = [dict(venue=str(o.venue), account=str(o.account), product=o.kind,
+                     fee_asset=str(o.rules.quote_asset), maker_percent="0", taker_percent="0") for o in observations]
+        self.assertEqual(self.http("/api/manual-fees")[0], 401)
+        status, saved = self.http("/api/manual-fees", dict(expected_version="0", rows=rows), self.headers)
+        self.assertEqual(status, 200, saved)
+        self.assertEqual(self.http("/api/manual-fees", headers=self.headers), (200, saved))
         self.runtime.step()
         view = self.call("start")
         row = next(r for r in view["snapshot"]["candidates"] if r["mode"] == "taker_taker")
@@ -1030,7 +1035,7 @@ class IntegrationTests(unittest.TestCase):
         self.assertTrue(row["recommended"])
         self.assertIsNotNone(row["quantity_base"])
         self.assertGreater(int(row["plan_atoms"]),0)
-        self.assertEqual(row["input_versions"]["fees"],"native-fees-v1")
+        self.assertEqual(row["input_versions"]["fees"],"1")
         material, = self.runtime.console.last_evidence.values()
         from opportunity_scanner.scanner_archive import load
         archive = load(material)
@@ -1041,23 +1046,21 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(row["scenario_digest"],expected.scenario_digest)
         digest, = self.runtime.console.last_evidence
         self.assertTrue(self.runtime.console.replay(digest)["matches"])
-        case = document["cases"][0]
-        document["version"] = 2
-        original_fees = case["entry_fees"]
-        case["entry_fees"] = tuple(replace(f,taker_ppm=100000) for f in original_fees)
-        publish_inputs(self.runtime.evaluation.path,document)
+        rows = [dict(item, taker_percent="10") for item in rows]
+        status, saved = self.http("/api/manual-fees", dict(expected_version="1", rows=rows), self.headers)
+        self.assertEqual(status, 200, saved)
         self.runtime.step()
         rejected = next(r for r in self.call("start")["snapshot"]["candidates"] if r["id"] == row["id"])
         self.assertEqual((rejected["status"],rejected["reason"]),("rejected","reference_profit"))
         self.assertFalse(rejected["recommended"])
         self.assertGreater(int(rejected["observed_edge_bp"][0]),0)
-        document["version"] = 3
-        case["entry_fees"] = tuple(replace(f,valid_until_ns=self.now[0]) for f in original_fees)
-        publish_inputs(self.runtime.evaluation.path,document)
+        self.assertTrue(self.runtime.console.replay(digest)["matches"])
+        status, saved = self.http("/api/manual-fees", dict(expected_version="2", rows=rows[:1]), self.headers)
+        self.assertEqual(status, 200, saved)
         self.runtime.step()
         current = self.call("start")["snapshot"]["candidates"]
         target = next(r for r in current if r["id"] == row["id"])
-        self.assertEqual(target["reason"],"fees_expired")
+        self.assertEqual(target["reason"], "fees_missing_leg:" + ":".join(map(str, observations[1].identity)))
         self.assertFalse(target["recommended"])
         self.assertIsNone(target["plan_atoms"])
 

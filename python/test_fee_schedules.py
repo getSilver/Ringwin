@@ -19,6 +19,8 @@ class ManualFeeTests(unittest.TestCase):
             before = store.rule(observations[0])
             self.assertEqual(before.maker_ppm, 0)
             self.assertEqual(FeeSchedules(path).rule(observations[0]), before)
+            equivalent = [dict(row, taker_percent="0.010") for row in reversed(rows)]
+            self.assertEqual(store.save(dict(expected_version="1", rows=equivalent))["version"], "1")
             rows[0]["taker_percent"] = "1"
             store.save(dict(expected_version="1", rows=rows))
             with self.assertRaisesRegex(ValueError, "fees_version_changed"):
@@ -36,13 +38,32 @@ class ManualFeeTests(unittest.TestCase):
             rows = [dict(venue=str(o.venue), account=str(o.account), product=o.kind,
                          fee_asset=str(o.rules.quote_asset), maker_percent="0", taker_percent="0") for o in obs]
             fees.save(dict(expected_version="0", rows=rows))
-            option = replace(option, fee_version="1")
+            option = replace(option, plan=replace(option.plan, fee_version="1"))
+            request = admission.Admission(config, fees=fees).propose(obs, (option,),
+                (approval,), (ready(option.plan, config),), facts).request
+            self.assertIsNotNone(request)
+            from test_arbitrage_cycle import plan as cycle_plan
+            from strategies.cross_venue import arbitrage_cycle as cycle
+            legs = tuple(cycle.LegSpec(x.account, x.rules, x.kind, x.direction, lots)
+                         for x, lots in zip(option.plan.scenarios[0].entry.legs, option.lots))
+            bound = cycle_plan(request_ref=request.identity, config_hash=config.content_hash,
+                policy=option.plan.policy, legs=legs, target_atoms=request.target_atoms)
+            opening = cycle.Cycle.from_admission(bound, request, option, fees=fees)
+            from test_arbitrage_checkpoint import roundtrip
+            opening = roundtrip({"opening": opening}, facts.cursor)["opening"]
             rows[0]["maker_percent"] = "0.1"
             fees.save(dict(expected_version="1", rows=rows))
             decision = admission.Admission(config, fees=fees).propose(obs, (option,),
                 (approval,), (ready(option.plan, config),), facts)
             self.assertIsNone(decision.request)
             self.assertTrue(any(reason == "fees_version_changed" for _, reason in decision.rejections))
+            with self.assertRaisesRegex(ValueError, "fees_version_changed"):
+                cycle.Cycle.from_admission(bound, request, option, fees=fees)
+            with self.assertRaisesRegex(ValueError, "fees_version_missing"):
+                cycle.Cycle.from_admission(bound, request, option)
+            with self.assertRaisesRegex(ValueError, "fees_version_changed"):
+                opening.start(cursor=facts.cursor, at_ns=facts.at_ns, fees=fees)
+            self.assertEqual(opening.phase, "idle")
 
     def test_scanner_uses_saved_fees_and_reports_missing_leg(self):
         observations, doc = inputs()
@@ -60,11 +81,15 @@ class ManualFeeTests(unittest.TestCase):
             store.save(dict(expected_version="0", rows=rows))
             plans, failures, versions = build()
             self.assertTrue(plans, failures)
-            old = plans
+            from opportunity_scanner.scanner_archive import freeze, thaw
+            archive = freeze(plans)
+            self.assertEqual(plans[0].fee_version, "1")
             rows = [dict(r, taker_percent="10") for r in rows]
             store.save(dict(expected_version="1", rows=rows))
             changed, _, _ = build()
-            self.assertNotEqual(old, changed)
+            old = thaw(archive)
+            self.assertEqual(old, plans)
+            self.assertEqual(changed[0].fee_version, "2")
             from strategies.cross_venue import arbitrage_evaluation as evaluation
             def result(plan):
                 return evaluation.evaluate(plan.scenarios, plan.policy, plan.estimator,

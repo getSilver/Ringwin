@@ -6,6 +6,7 @@ or execution capability is accepted by this module.
 from dataclasses import dataclass
 from fractions import Fraction
 from itertools import combinations
+from typing import Optional
 import hashlib
 import json
 
@@ -136,8 +137,20 @@ class Plan:
     limits: v.Limits
     valid_until_ns: int
     occupied_atoms: int
+    fee_version: Optional[str] = None
+
+    def require_current_fees(self, fees):
+        if self.fee_version is None and fees is None:
+            return
+        if self.fee_version is None or fees is None:
+            raise b.Rejected("fees_version_missing")
+        fees.require_current(self.fee_version)
 
     def __post_init__(self):
+        if self.fee_version is not None and (type(self.fee_version) is not str
+                or not self.fee_version.isascii() or not self.fee_version.isdecimal()
+                or self.fee_version.startswith("0")):
+            raise b.Rejected("fees_version_invalid")
         if (type(self.pair) is not tuple or len(self.pair) != 2
                 or any(type(x) is not tuple or len(x) != 3 for x in self.pair)):
             raise b.Rejected("scan_pair")

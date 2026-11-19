@@ -241,13 +241,13 @@ class Cycle(c.Cycle):
         self.entry_finished = False
 
     @classmethod
-    def from_admission(cls, plan, request, option):
-        cycle = super().from_admission(plan, request, option)
+    def from_admission(cls, plan, request, option, *, fees=None):
+        cycle = super().from_admission(plan, request, option, fees=fees)
         if request.key[3] != plan.maker_leg:
             raise b.Rejected("maker_admission_role")
         return cycle
 
-    def start(self, *, cursor, at_ns, market, quotes):
+    def start(self, *, cursor, at_ns, market, quotes, fees=None):
         b.uint(cursor, 1)
         b.uint(at_ns, self.plan.policy.at_ns)
         if self.phase != "idle":
@@ -259,6 +259,7 @@ class Cycle(c.Cycle):
         selected = select_quote(self.plan, market, quotes, at_ns=at_ns)
         if selected is None:
             return c.Action(self.plan, cursor, "quote_unqualified")
+        self._check_entry_fees(fees)
         self.cursor, self.last_at_ns, self.phase = cursor, at_ns, "entering"
         self.quote_started_ns = at_ns
         return self._quote(cursor, at_ns, selected, self.plan.legs[self.plan.maker_leg].target_lots)

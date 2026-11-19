@@ -147,7 +147,6 @@ class Option:
     account_atoms: tuple
     occupancy_ns: int
     execution_hash: str
-    fee_version: object = None
 
     def __post_init__(self):
         _tuples(self.lots, self.account_atoms, *self.account_atoms)
@@ -308,9 +307,12 @@ class Admission:
             grant = by_key.get(plan.key)
             state = states.get(signal_scope(plan.pair, plan.policy.direction))
             reason = ""
-            if self.fees is not None and option.fee_version != self.fees.view()["version"]:
-                reason = "fees_version_changed"
-            elif (grant is None or not grant.enabled or grant.config_hash != cfg.content_hash
+            try:
+                plan.require_current_fees(self.fees)
+            except ValueError as error:
+                rejected.append((scanner.candidate_id(*plan.key), str(error)))
+                continue
+            if (grant is None or not grant.enabled or grant.config_hash != cfg.content_hash
                     or not grant.valid_from_ns <= facts.at_ns < grant.valid_until_ns):
                 reason = "not_approved"
             elif (grant.model_hash != plan.policy.model_hash or grant.policy_version != plan.policy.version

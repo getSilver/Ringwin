@@ -267,6 +267,7 @@ class ScannerRuntime:
         self.cursor = 0
         self.console = ScannerConsole(self.source, History(), clock=clock,
             config_path=self.directory/"scanner-config.json")
+        self.console.fee_schedules = self.fees
         self.closing = threading.Event()
         self.thread = None
         if automatic:
