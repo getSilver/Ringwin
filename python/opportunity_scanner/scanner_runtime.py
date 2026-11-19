@@ -35,16 +35,153 @@ CATALOGUE_TTL_NS = 90_000_000_000
 # Stable historical identities, never an admission list or a worker configuration.
 OKX_LEGACY_IDENTITIES = {"BTC-USDT": 0x4f4b5800000001, "BTC-USDT-SWAP": 0x4f4b5800000002,
                          "BTC-USDC": 0x4f4b5800000003}
-ROUTES = {
-    (1, "production"): ("https://www.okx.com", "production"),
-    (1, "demo"): ("https://www.okx.com", "production"),
-    (21, "production"): ("https://api.hyperliquid.xyz", "production"),
-    (21, "testnet"): ("https://api.hyperliquid-testnet.xyz", "testnet"),
-}
+class NativeScannerAdapter:
+    """Public requests and native worker binding for one registered Venue."""
 
+    executable = ROOT/"zig-out/bin"/("ringwin-scanner-market.exe" if os.name == "nt" else "ringwin-scanner-market")
+    metadata_limit = MAX_FRAME
+    channel_capacity = 256*1024
+    settlement_code = None
+
+    def settings(self):
+        return dict(type=self.kind, label=self.label, venue=str(self.venue),
+                    environments=list(self.routes), products=list(self.products))
+
+    def validate_saved_binding(self, row, assets):
+        raise NotImplementedError
+
+    def request(self, transport, operation, environment, product, symbol=""):
+        if product not in self.products or environment not in self.routes:
+            raise ValueError("unsupported public market source")
+        endpoint, _ = self.routes[environment]
+        return self.request_public(transport, endpoint, operation, product, symbol)
+
+
+class OkxScannerAdapter(NativeScannerAdapter):
+    kind, label, venue = "okx", "OKX", 1
+    products = ("spot", "linear")
+    routes = {"production": ("https://www.okx.com", "production"),
+              "demo": ("https://www.okx.com", "production")}
+
+    def request_public(self, transport, endpoint, operation, product, symbol):
+        if operation == "book":
+            return transport.request(endpoint + "/api/v5/market/books?instId=" + symbol + "&sz=5")
+        kind = "SPOT" if product == "spot" else "SWAP"
+        url = endpoint + "/api/v5/public/instruments?instType=" + kind
+        if operation == "catalogue":
+            return transport.request(url, max_bytes=MAX_DISCOVERY_BYTES)
+        return transport.request(url + "&instId=" + symbol)
+
+    def validate_saved_binding(self, row, assets):
+        if "okx_binding" not in row:
+            raise ValueError("missing discovered OKX binding")
+        if not row.get("asset_associations"):
+            base, quote = row["symbol"].split("-")[:2]
+            if (assets[int(row["base_asset"])]["code"], assets[int(row["quote_asset"])]["code"]) != (base, quote):
+                raise ValueError("OKX asset identity mismatch")
+        lot = Fraction(row["lot_wire"])
+        if row["product"] == "linear":
+            lot *= Fraction(row["contract_value"])
+        if Fraction(row["lot_base"]) != lot:
+            raise ValueError("OKX quantity units mismatch")
+
+    def worker_config(self, row, discovery):
+        config = dict(contract_value=row.get("contract_value"))
+        if not discovery:
+            config.update(okx_binding=row["okx_binding"], okx_specification=row["specification"])
+        return config
+
+    def discovery_row(self, runtime, setting, product, item, assets):
+        if item["product"] != product:
+            raise ValueError("OKX catalogue product mismatch")
+        base = runtime._asset(setting, item["base"], assets)
+        quote = runtime._asset(setting, item["quote"], assets)
+        instrument = OKX_LEGACY_IDENTITIES.get(item["symbol"], runtime._stable_id("okx-instrument-v1", item["symbol"]))
+        version = runtime._stable_id("okx-rules-v1", json.dumps(item, sort_keys=True, separators=(",", ":"))) & ((1<<53)-1) or 1
+        lot_base = Fraction(item["lot"]) * Fraction(item["contract_value"] or "1")
+        if (lot_base * 10**18).denominator != 1:
+            return None
+        venue = int(setting["venue"])
+        key = setting["venue"] + ":" + setting["environment"]
+        previous = next((r for r in runtime.bindings.values() if (r["venue"], r["environment"], r["symbol"]) ==
+                         (venue, setting["environment"], item["symbol"])), None)
+        observation_identity = previous["observation_identity"] if previous else str(runtime._stable_id("scanner-source-v1", key))
+        return dict(venue=venue, environment=setting["environment"], symbol=item["symbol"], product=product,
+            instrument=str(instrument), observation_identity=observation_identity, rules_version=version,
+            base_asset=base, quote_asset=quote,
+            asset_associations=runtime._associations(setting, base=item["base"], quote=item["quote"]),
+            tick=item["tick"], lot_wire=item["lot"], lot_base=str(lot_base), minimum_size=item["minimum_size"], contract_value=item["contract_value"], specification=item,
+            okx_binding=dict(symbol=item["symbol"], instrument=instrument, product=product, base=item["base"], quote=item["quote"]))
+
+
+class HyperliquidScannerAdapter(NativeScannerAdapter):
+    kind, label, venue = "hyperliquid", "Hyperliquid", 21
+    products = ("linear",)
+    routes = {"production": ("https://api.hyperliquid.xyz", "production"),
+              "testnet": ("https://api.hyperliquid-testnet.xyz", "testnet")}
+    metadata_limit = MAX_HL_METADATA_BYTES
+    channel_capacity = 5*1024*1024
+
+    def request_public(self, transport, endpoint, operation, product, symbol):
+        if operation == "book":
+            return transport.request(endpoint + "/info", {"type": "l2Book", "coin": symbol})
+        return transport.request(endpoint + "/info", {"type": "meta"}, max_bytes=self.metadata_limit)
+
+    settlement_code = "USDC"
+
+    def validate_saved_binding(self, row, assets):
+        binding = row["binding"]
+        if not row.get("hl_discovered") or row["symbol"] != binding["coin"]:
+            raise ValueError("missing discovered Hyperliquid binding")
+        if not row.get("asset_associations") and (
+                assets[int(row["base_asset"])]["code"] != row["symbol"]
+                or assets[int(row["quote_asset"])]["code"] != row["specification"]["quote"]):
+            raise ValueError("Hyperliquid asset identity mismatch")
+        if (int(row["instrument"]) != binding["instrument"] or row["rules_version"] != binding["rules_version"]
+                or binding["product"] != "isolated_linear"
+                or Fraction(row["tick"]) != Fraction(binding["tick_atoms"], 10**binding["price_scale"])
+                or Fraction(row["lot_base"]) != Fraction(binding["lot_atoms"], 10**binding["quantity_scale"])):
+            raise ValueError("Hyperliquid binding units mismatch")
+        if binding.get("quote_token", 0) != 0:
+            raise ValueError("Hyperliquid collateral binding mismatch")
+        settlement = assets.get(int(row["settlement_asset"]))
+        if settlement is None or not row.get("asset_associations") and settlement["code"] != self.settlement_code:
+            raise ValueError("Hyperliquid settlement asset mismatch")
+
+    def worker_config(self, row, discovery):
+        return {} if discovery else dict(binding=row["binding"])
+
+    def discovery_row(self, runtime, setting, product, item, assets):
+        key = "21:" + setting["environment"]
+        coin = item["coin"]
+        # Protocol coin identity is scoped to the standard perp namespace and environment.
+        base = runtime._asset(setting, coin, assets)
+        quote = runtime._asset(setting, item["price_quote"], assets)
+        settlement = runtime._asset(setting, "USDC", assets)
+        instrument = runtime._stable_id("hyperliquid-standard-perp-v1", key+":"+coin)
+        version = runtime._stable_id("hyperliquid-rules-v1", json.dumps(item, sort_keys=True, separators=(",", ":"))) & ((1<<53)-1) or 1
+        size = item["size_decimals"]
+        tick = "0."+"0"*(5-size)+"1" if size < 6 else "1"
+        lot = "0."+"0"*(size-1)+"1" if size else "1"
+        binding = dict(instrument=instrument, coin=coin, product="isolated_linear", universe_index=item["universe_index"],
+            size_decimals=size, rules_version=version, expected_metadata_digest=item["metadata_digest"],
+            price_scale=6-size, tick_atoms=1, quantity_scale=size, lot_atoms=1)
+        return dict(venue=21, environment=setting["environment"], symbol=coin, product="linear", instrument=str(instrument),
+            observation_identity=str(runtime._stable_id("scanner-source-v1", key)), rules_version=version,
+            base_asset=base, quote_asset=quote, settlement_asset=settlement, tick=tick, lot_wire=lot, lot_base=lot,
+            asset_associations=runtime._associations(setting, base=coin, quote=item["price_quote"], settlement="USDC"),
+            specification=dict(item, product="linear", quote=item["price_quote"], settlement="USDC", collateral_token=0,
+                underlying_binding=runtime.asset_bindings.resolve(21, setting["environment"], coin),
+                max_significant_digits=5, integer_price_exception=True), binding=binding, hl_discovered=True)
+
+
+DEFAULT_SCANNER_ADAPTERS = (OkxScannerAdapter(), HyperliquidScannerAdapter())
 
 
 class PublicTransport:
+    def __init__(self, adapters=DEFAULT_SCANNER_ADAPTERS):
+        self.adapters = {adapter.venue: adapter for adapter in adapters}
+
     def request(self, url, body=None, *, max_bytes=MAX_FRAME):
         data = None if body is None else json.dumps(body, separators=(",", ":")).encode()
         request = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
@@ -58,40 +195,27 @@ class PublicTransport:
         return payload.decode("utf-8")
 
     def catalogue(self, setting, product):
-        base, _ = ROUTES[int(setting["venue"]), setting["environment"]]
-        if (setting["type"], setting["venue"], product) == ("hyperliquid", "21", "linear"):
-            return self.request(base + "/info", {"type": "meta"}, max_bytes=MAX_HL_METADATA_BYTES)
-        if setting["type"] != "okx" or setting["venue"] != "1" or product not in ("spot", "linear"):
-            raise ValueError("unsupported discovery source")
-        kind = "SPOT" if product == "spot" else "SWAP"
-        return self.request(base + "/api/v5/public/instruments?instType=" + kind, max_bytes=MAX_DISCOVERY_BYTES)
+        return self.adapters[int(setting["venue"])].request(self, "catalogue", setting["environment"], product)
 
     def metadata(self, binding):
-        base, _ = ROUTES[binding["venue"], binding["environment"]]
-        if binding["venue"] == 1:
-            kind = "SPOT" if binding["product"] == "spot" else "SWAP"
-            return self.request(base + "/api/v5/public/instruments?instType=" + kind + "&instId=" + binding["symbol"])
-        if binding["venue"] == 21 and binding["product"] == "linear":
-            return self.request(base + "/info", {"type": "meta"}, max_bytes=MAX_HL_METADATA_BYTES)
-        raise ValueError("unsupported metadata source")
+        return self.adapters[binding["venue"]].request(self, "metadata", binding["environment"], binding["product"], binding["symbol"])
 
     def book(self, binding):
-        base, _ = ROUTES[binding["venue"], binding["environment"]]
-        if binding["venue"] == 1:
-            return self.request(base + "/api/v5/market/books?instId=" + binding["symbol"] + "&sz=5")
-        if binding["venue"] == 21 and binding["product"] == "linear":
-            return self.request(base + "/info", {"type": "l2Book", "coin": binding["symbol"]})
-        raise ValueError("unsupported book source")
+        return self.adapters[binding["venue"]].request(self, "book", binding["environment"], binding["product"], binding["symbol"])
 
 
 class ScannerRuntime:
     def __init__(self, directory, *, transport=None, clock=time.monotonic_ns,
-                 utc_clock=time.time_ns, automatic=True, asset_provider=None):
+                 utc_clock=time.time_ns, automatic=True, asset_provider=None, adapters=DEFAULT_SCANNER_ADAPTERS):
         configuration = dict(schema=1, assets=[], bindings=[])
         bindings = []
         self.directory = Path(directory).resolve()
         self.directory.mkdir(parents=True, exist_ok=True)
-        self.clock, self.utc_clock, self.transport = clock, utc_clock, transport or PublicTransport()
+        adapters = tuple(adapters)
+        self.adapters = {adapter.venue: adapter for adapter in adapters}
+        if len(self.adapters) != len(adapters) or len({adapter.kind for adapter in adapters}) != len(adapters):
+            raise ValueError("duplicate scanner adapter")
+        self.clock, self.utc_clock, self.transport = clock, utc_clock, transport or PublicTransport(adapters)
         self.asset_provider = asset_provider or (lambda: dict(schema=1, bindings=[]))
         self.asset_bindings = AssetBindings(dict(schema=1, bindings=[]))
         self.asset_binding_digest = None
@@ -121,38 +245,13 @@ class ScannerRuntime:
         assets = {int(a["identity"]): a for a in configuration["assets"]}
         for row in bindings:
             venue, environment = row["venue"], row["environment"]
-            if (venue, environment) not in ROUTES:
-                raise ValueError("unsupported venue/environment; Hyperliquid uses testnet, not demo")
-            if venue == 1 and "okx_binding" not in row:
-                raise ValueError("missing discovered OKX binding")
-            if venue == 21 and (not row.get("hl_discovered") or row["product"] != "linear" or row["symbol"] != row["binding"]["coin"]):
-                raise ValueError("missing discovered Hyperliquid binding")
-            base, quote = int(row["base_asset"]), int(row["quote_asset"])
-            self._validate_associations(row)
-            if base not in assets or quote not in assets:
+            adapter = self.adapters.get(venue)
+            if adapter is None or environment not in adapter.routes or row["product"] not in adapter.products:
+                raise ValueError("unsupported saved market source")
+            self._validate_associations(row, adapter)
+            if any(int(row[field]) not in assets for field in ("base_asset", "quote_asset")):
                 raise ValueError("missing trusted asset definition")
-            if not row.get("asset_associations") and (venue == 1 and assets[quote]["code"] != row["symbol"].split("-")[1]
-                    or venue == 21 and assets[quote]["code"] != row["specification"]["quote"]):
-                raise ValueError("settlement/quote asset mismatch")
-            if not row.get("asset_associations") and assets[base]["code"] != (row["symbol"].split("-")[0] if venue == 1 else row["symbol"]):
-                raise ValueError("base asset identity mismatch")
-            if venue == 1 and row["product"] == "spot" and Fraction(row["lot_base"]) != Fraction(row["lot_wire"]):
-                raise ValueError("OKX spot quantity units mismatch")
-            if venue == 1 and row["product"] == "linear" and Fraction(row["lot_base"]) != Fraction(row["lot_wire"])*Fraction(row["contract_value"]):
-                raise ValueError("OKX contract multiplier mismatch")
-            tick, lot = Fraction(row["tick"]), Fraction(row["lot_base"])
-            if venue == 21:
-                b = row["binding"]
-                if (int(row["instrument"]) != b["instrument"] or row["rules_version"] != b["rules_version"]
-                        or b["product"] != "isolated_linear"
-                        or tick != Fraction(b["tick_atoms"], 10**b["price_scale"])
-                        or lot != Fraction(b["lot_atoms"], 10**b["quantity_scale"])):
-                    raise ValueError("Hyperliquid binding units mismatch")
-                if row.get("hl_discovered") and b.get("quote_token", 0) != 0:
-                    raise ValueError("Hyperliquid collateral binding mismatch")
-                if row.get("hl_discovered") and (int(row["settlement_asset"]) not in assets or
-                        not row.get("asset_associations") and assets[int(row["settlement_asset"])]["code"] != "USDC"):
-                    raise ValueError("Hyperliquid settlement asset mismatch")
+            adapter.validate_saved_binding(row, assets)
             entry = self._entry(row, assets)
             if entry.identity in self.bindings:
                 raise ValueError("duplicate scanner binding")
@@ -184,10 +283,15 @@ class ScannerRuntime:
             lot * 10**assets[base]["atomic_scale"], -(-minimum.numerator // minimum.denominator), 0, 0, (1<<64)-1)
         return CatalogueEntry(row["venue"], int(row["observation_identity"]), row["product"], rules, row["environment"], row.get("specification"))
 
+    def _setting_adapter(self, setting):
+        adapter = self.adapters.get(int(setting["venue"]))
+        if adapter is None or setting["type"] != adapter.kind or setting["environment"] not in adapter.routes:
+            raise ValueError("unsupported discovery setting")
+        return adapter
+
     def request_discovery(self, setting, *, refresh=False):
+        self._setting_adapter(setting)
         key = setting["venue"] + ":" + setting["environment"]
-        if (setting["type"], setting["venue"]) not in (("okx", "1"), ("hyperliquid", "21")):
-            raise ValueError("unsupported discovery source")
         with self.lock:
             self.discovery_settings[key] = dict(setting)
             status = self.discovery_status.get(key, {})
@@ -243,8 +347,7 @@ class ScannerRuntime:
     def discover(self, setting, *, generation=None):
         """Replace one source snapshot and reconcile its existing consumer scopes."""
         key = setting["venue"] + ":" + setting["environment"]
-        if (setting["type"], setting["venue"]) not in (("okx", "1"), ("hyperliquid", "21")) or (int(setting["venue"]), setting["environment"]) not in ROUTES:
-            raise ValueError("unsupported discovery setting")
+        adapter = self._setting_adapter(setting)
         with self.discovery_lock:
             with self.lock:
                 generation = self.source_generations.get(key, 0) if generation is None else generation
@@ -266,7 +369,7 @@ class ScannerRuntime:
                     self._invalidate_asset_bindings(key)
                     self.asset_bindings, self.asset_binding_digest = registry, registry.digest
                 assets_by_id = {a["identity"]: a for a in self.source.assets}
-                for product in (("spot", "linear") if setting["type"] == "okx" else ("linear",)):
+                for product in adapter.products:
                     if self.closing.is_set():
                         return
                     row = dict(venue=int(setting["venue"]), product=product, environment=setting["environment"], symbol="",
@@ -274,7 +377,7 @@ class ScannerRuntime:
                         rules_version=1, tick="1", lot_wire="1")
                     worker = self._open(None, row=row, discovery=True)
                     capture = dict(raw_path=worker[3], requested_environment=setting["environment"],
-                        actual_environment=ROUTES[int(setting["venue"]), setting["environment"]][1], product=product)
+                        actual_environment=adapter.routes[setting["environment"]][1], product=product)
                     evidence.append(capture)
                     try:
                         result = self._input(worker, "discover", self.transport.catalogue(setting, product))
@@ -287,27 +390,11 @@ class ScannerRuntime:
                             rejected.append(dict(symbol=result_row["symbol"], reason=result_row["failure"]))
                             continue
                         item = result_row["item"]
-                        if setting["type"] == "hyperliquid":
-                            rows.append(self._hyperliquid_row(setting, item, assets_by_id))
-                            continue
-                        if item["product"] != product:
-                            raise ValueError("OKX catalogue product mismatch")
-                        base = self._asset(setting, item["base"], assets_by_id)
-                        quote = self._asset(setting, item["quote"], assets_by_id)
-                        instrument = OKX_LEGACY_IDENTITIES.get(item["symbol"], self._stable_id("okx-instrument-v1", item["symbol"]))
-                        version = self._stable_id("okx-rules-v1", json.dumps(item, sort_keys=True, separators=(",", ":"))) & ((1<<53)-1) or 1
-                        lot_base = Fraction(item["lot"]) * Fraction(item["contract_value"] or "1")
-                        if (lot_base * 10**18).denominator != 1:
-                            rejected.append(dict(symbol=item["symbol"], reason="UnsupportedDecimalUnits")); continue
-                        previous = next((r for r in self.bindings.values() if (r["venue"], r["environment"], r["symbol"]) ==
-                                         (1, setting["environment"], item["symbol"])), None)
-                        observation_identity = previous["observation_identity"] if previous else str(self._stable_id("scanner-source-v1", key))
-                        rows.append(dict(venue=1, environment=setting["environment"], symbol=item["symbol"], product=product,
-                            instrument=str(instrument), observation_identity=observation_identity, rules_version=version,
-                            base_asset=base, quote_asset=quote,
-                            asset_associations=self._associations(setting, base=item["base"], quote=item["quote"]),
-                            tick=item["tick"], lot_wire=item["lot"], lot_base=str(lot_base), minimum_size=item["minimum_size"], contract_value=item["contract_value"], specification=item,
-                            okx_binding=dict(symbol=item["symbol"], instrument=instrument, product=product, base=item["base"], quote=item["quote"])))
+                        binding = adapter.discovery_row(self, setting, product, item, assets_by_id)
+                        if binding is None:
+                            rejected.append(dict(symbol=result_row["symbol"], reason="UnsupportedDecimalUnits"))
+                        else:
+                            rows.append(binding)
                 assets = list(assets_by_id.values())
                 asset_definitions = {int(a["identity"]): a for a in assets}
                 entries = [self._entry(row, asset_definitions) for row in rows]
@@ -488,11 +575,15 @@ class ScannerRuntime:
         return identity
 
     @classmethod
-    def _validate_associations(cls, row):
+    def _validate_associations(cls, row, adapter):
         associations = row.get("asset_associations")
         if associations is None:  # Old caches must still undergo fresh discovery before use.
             return
-        codes = cls._asset_codes(row)
+        spec = row["specification"]
+        codes = dict(base=spec.get("base", row["symbol"]),
+                     quote=spec.get("quote", spec.get("price_quote")))
+        if adapter.settlement_code is not None:
+            codes["settlement"] = adapter.settlement_code
         if type(associations) is not dict or set(associations) != set(codes):
             raise ValueError("saved asset associations")
         registry = AssetBindings(dict(schema=1, bindings=[r for r in associations.values() if r is not None]), allow_fixture=True)
@@ -508,29 +599,6 @@ class ScannerRuntime:
     def _associations(self, setting, **codes):
         return {role: self.asset_bindings.resolve(setting["venue"], setting["environment"], code)
                 for role, code in codes.items()}
-
-    def _hyperliquid_row(self, setting, item, assets):
-        key = "21:" + setting["environment"]
-        coin = item["coin"]
-        # Protocol coin identity is scoped to the standard perp namespace and environment.
-        base = self._asset(setting, coin, assets)
-        quote = self._asset(setting, item["price_quote"], assets)
-        settlement = self._asset(setting, "USDC", assets)
-        instrument = self._stable_id("hyperliquid-standard-perp-v1", key+":"+coin)
-        version = self._stable_id("hyperliquid-rules-v1", json.dumps(item, sort_keys=True, separators=(",", ":"))) & ((1<<53)-1) or 1
-        size = item["size_decimals"]
-        tick = "0."+"0"*(5-size)+"1" if size < 6 else "1"
-        lot = "0."+"0"*(size-1)+"1" if size else "1"
-        binding = dict(instrument=instrument, coin=coin, product="isolated_linear", universe_index=item["universe_index"],
-            size_decimals=size, rules_version=version, expected_metadata_digest=item["metadata_digest"],
-            price_scale=6-size, tick_atoms=1, quantity_scale=size, lot_atoms=1)
-        return dict(venue=21, environment=setting["environment"], symbol=coin, product="linear", instrument=str(instrument),
-            observation_identity=str(self._stable_id("scanner-source-v1", key)), rules_version=version,
-            base_asset=base, quote_asset=quote, settlement_asset=settlement, tick=tick, lot_wire=lot, lot_base=lot,
-            asset_associations=self._associations(setting, base=coin, quote=item["price_quote"], settlement="USDC"),
-            specification=dict(item, product="linear", quote=item["price_quote"], settlement="USDC", collateral_token=0,
-                underlying_binding=self.asset_bindings.resolve(21, setting["environment"], coin),
-                max_significant_digits=5, integer_price_exception=True), binding=binding, hl_discovered=True)
 
     @staticmethod
     def _stable_id(namespace, value):
@@ -569,24 +637,18 @@ class ScannerRuntime:
         if sum(p.stat().st_size for p in self.directory.glob("market-*.raw/**/*") if p.is_file()) >= 64 * 1024 * 1024:
             raise OSError("scanner RawIngress capacity exhausted; archive files before restarting")
         path = self.directory / ("market-" + secrets.token_hex(16) + ".raw")
-        executable = ROOT/"zig-out/bin"/("ringwin-scanner-market.exe" if os.name == "nt" else "ringwin-scanner-market")
-        process = subprocess.Popen([str(executable), str(path)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        adapter = self.adapters[row["venue"]]
+        process = subprocess.Popen([str(adapter.executable), str(path)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         # Full Hyperliquid metadata also travels inside the JSON request envelope.
         channel = NativeAuthority(process, timeout=15 if discovery else 5,
-            max_frame_bytes=5*1024*1024 if discovery or row["venue"] == 21 else 256*1024)
-        config = dict(schema=1, discovery=discovery, requested_environment=row["environment"], session=session, venue=row["venue"], environment=ROUTES[row["venue"], row["environment"]][1],
+            max_frame_bytes=5*1024*1024 if discovery else adapter.channel_capacity)
+        config = dict(schema=1, discovery=discovery, requested_environment=row["environment"], session=session, venue=row["venue"], environment=adapter.routes[row["environment"]][1],
             instrument=int(row["instrument"]), rules_version=row["rules_version"], tick=row["tick"], lot=row["lot_wire"])
         config["minimum_size"] = row.get("minimum_size")
         if discovery:
             config["discovery_product"] = row["product"]
         config["raw_budget_bytes"] = row.get("raw_budget_bytes", 4*1024*1024)
-        if row["venue"] == 1:
-            if not discovery:
-                config["okx_binding"] = row["okx_binding"]
-                config["okx_specification"] = row["specification"]
-            config["contract_value"] = row.get("contract_value")
-        elif row["venue"] == 21 and not discovery:
-            config["binding"] = row["binding"]
+        config.update(adapter.worker_config(row, discovery))
         try:
             channel.request(config)
         except Exception:
@@ -596,7 +658,7 @@ class ScannerRuntime:
 
     def _input(self, worker, operation, payload):
         _, channel, state, _ = worker
-        limit = MAX_DISCOVERY_BYTES if operation == "discover" else MAX_HL_METADATA_BYTES if operation == "metadata" and state["venue"] == 21 else MAX_FRAME
+        limit = MAX_DISCOVERY_BYTES if operation == "discover" else self.adapters[state["venue"]].metadata_limit if operation == "metadata" else MAX_FRAME
         if len(payload.encode()) > limit:
             raise ValueError("public frame capacity")
         state["sequence"] += 1
@@ -660,7 +722,7 @@ class ScannerRuntime:
                         self.observations[identity] = Observation(entry.venue, entry.account, entry.kind, entry.rules,
                             bytes.fromhex(payload), result["healthy"], entry.environment)
                     self.evidence[identity] = dict(result, venue=str(row["venue"]), instrument=row["instrument"], raw_path=worker[3], requested_environment=row["environment"],
-                        actual_environment=ROUTES[row["venue"], row["environment"]][1], input_kind=getattr(self.transport, "input_kind", "venue_public"))
+                        actual_environment=self.adapters[row["venue"]].routes[row["environment"]][1], input_kind=getattr(self.transport, "input_kind", "venue_public"))
                     self.evidence[identity]["asset_basis"] = self._asset_basis(row)
                     self.failures.pop(identity, None)
             except (OSError, ValueError, KeyError) as error:
@@ -710,9 +772,10 @@ class ScannerRuntime:
                 bid_levels=len(book["bids"]), ask_levels=len(book["asks"]),
                 truncated=book["bids_truncated"] or book["asks_truncated"],
                 visible_at_ns=str(book["visible_at_ns"]), rules_version=str(o.rules.version)))
-        return dict(discovery=copy.deepcopy(self.discovery_status), active_subscriptions=len(self.workers), routes=[dict(venue=str(v), requested_environment=e, actual_environment=a, endpoint=url,
-                                products=["spot", "linear"] if v == 1 else ["linear"])
-                            for (v, e), (url, a) in ROUTES.items()],
+        return dict(discovery=copy.deepcopy(self.discovery_status), active_subscriptions=len(self.workers), routes=[
+                        dict(venue=str(adapter.venue), requested_environment=environment, actual_environment=actual,
+                             endpoint=url, products=list(adapter.products))
+                        for adapter in self.adapters.values() for environment, (url, actual) in adapter.routes.items()],
                     failures={str(k): v for k, v in self.failures.copy().items()}, observations=observations,
                     evidence=list(self.evidence.copy().values()), trading_qualified=False,
                     evaluation=copy.deepcopy(self.evaluation.state),

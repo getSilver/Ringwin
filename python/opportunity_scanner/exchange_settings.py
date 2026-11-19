@@ -9,16 +9,12 @@ from threading import RLock
 from opportunity_scanner.scanner_config import atomic_json, uint_text, _object
 
 MAX_BYTES = 65536
-ADAPTER_TYPES = (
-    dict(type="okx", label="OKX", venue="1", environments=["production", "demo"], products=["spot", "linear"]),
-    dict(type="hyperliquid", label="Hyperliquid", venue="21", environments=["production", "testnet"], products=["linear"]),
-)
 
 
-def validate_row(row):
+def validate_row(row, adapter_types):
     if type(row) is not dict or set(row) != {"identity", "venue", "type", "name", "environment"}:
         raise ValueError("exchange settings fields")
-    adapter = next((a for a in ADAPTER_TYPES if a["type"] == row["type"]), None)
+    adapter = next((a for a in adapter_types if a["type"] == row["type"]), None)
     if adapter is None or row["venue"] != adapter["venue"] or row["environment"] not in adapter["environments"]:
         raise ValueError("unsupported exchange type/environment")
     if type(row["name"]) is not str or not row["name"].strip() or row["name"] != row["name"].strip() or len(row["name"]) > 128:
@@ -28,7 +24,11 @@ def validate_row(row):
 
 
 class ExchangeSettings:
-    def __init__(self, path):
+    def __init__(self, path, *, adapters=None):
+        if adapters is None:
+            from opportunity_scanner.scanner_runtime import DEFAULT_SCANNER_ADAPTERS
+            adapters = DEFAULT_SCANNER_ADAPTERS
+        self.adapter_types = tuple(adapter.settings() for adapter in adapters)
         self.path, self.lock = Path(path), RLock()
         self.document = dict(schema="exchange_settings_v1", version="0", exchanges=[])
         try:
@@ -49,7 +49,7 @@ class ExchangeSettings:
                 raise ValueError("capacity")
             identities, sources = set(), set()
             for row in rows:
-                validate_row(row)
+                validate_row(row, self.adapter_types)
                 key = row["venue"], row["environment"]
                 if row["identity"] in identities or key in sources:
                     raise ValueError("duplicate source")
@@ -61,7 +61,7 @@ class ExchangeSettings:
 
     def view(self):
         with self.lock:
-            return copy.deepcopy(dict(self.document, types=ADAPTER_TYPES))
+            return copy.deepcopy(dict(self.document, types=self.adapter_types))
 
     def save(self, request):
         with self.lock:
@@ -79,7 +79,7 @@ class ExchangeSettings:
                 raise ValueError("exchange settings request fields")
             if request["expected_version"] != self.document["version"]:
                 raise ValueError("exchange settings version conflict")
-            adapter = next((a for a in ADAPTER_TYPES if a["type"] == request["type"]), None)
+            adapter = next((a for a in self.adapter_types if a["type"] == request["type"]), None)
             if adapter is None:
                 raise ValueError("unsupported exchange type")
             identity = request.get("identity")
@@ -89,7 +89,7 @@ class ExchangeSettings:
             row = dict(identity=identity if previous else secrets.token_hex(16), venue=adapter["venue"],
                        type=request["type"], name=request["name"].strip() if type(request["name"]) is str else request["name"],
                        environment=request["environment"])
-            validate_row(row)
+            validate_row(row, self.adapter_types)
             rows = [r for r in self.document["exchanges"] if r["identity"] != row["identity"]]
             if any((r["venue"], r["environment"]) == (row["venue"], row["environment"]) for r in rows):
                 raise ValueError("duplicate exchange source")

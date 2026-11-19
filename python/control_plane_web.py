@@ -229,7 +229,8 @@ class ControlPlaneApp:
     def __init__(self, directory: str, server: control_plane.CommandServer,
                  clock=lambda: int(time.time()),
                  projection_provider=None, ui_path=None, release_manager=None,
-                 lifecycle_outbox=None, instance_source=None, scanner_console=None, asset_provider=None):
+                 lifecycle_outbox=None, instance_source=None, scanner_console=None, asset_provider=None,
+                 scanner_adapters=None):
         self.directory = directory
         self.clock = clock
         self.passphrases = owner_session.PassphraseStore(directory)
@@ -247,11 +248,12 @@ class ControlPlaneApp:
                                  if release_manager is not None and instance_source is not None else None)
         self.lifecycle_outbox = lifecycle_outbox
         from opportunity_scanner.exchange_settings import ExchangeSettings
-        self.exchange_settings_store = ExchangeSettings(Path(directory)/"exchange-settings.json")
+        from opportunity_scanner.scanner_runtime import DEFAULT_SCANNER_ADAPTERS, ScannerRuntime
+        adapters = DEFAULT_SCANNER_ADAPTERS if scanner_adapters is None else tuple(scanner_adapters)
+        self.exchange_settings_store = ExchangeSettings(Path(directory)/"exchange-settings.json", adapters=adapters)
         self.scanner_runtime = None
         if scanner_console is None:
-            from opportunity_scanner.scanner_runtime import ScannerRuntime
-            self.scanner_runtime = ScannerRuntime(directory,
+            self.scanner_runtime = ScannerRuntime(directory, adapters=adapters,
                 asset_provider=asset_provider if asset_provider is not None else
                 getattr(projection_provider, "asset_bindings", None))
             scanner_console = self.scanner_runtime.console

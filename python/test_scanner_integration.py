@@ -73,6 +73,7 @@ class DynamicOkxTransport(PublicTransport):
     input_kind = "synthetic_protocol_fixture"
 
     def __init__(self, now):
+        super().__init__()
         self.now, self.urls = now, []
 
     def request(self, url, body=None, **kwargs):
@@ -92,6 +93,7 @@ class DynamicHyperliquidTransport(PublicTransport):
     input_kind = "synthetic_protocol_fixture"
 
     def __init__(self, now):
+        super().__init__()
         self.now, self.requests = now, []
         self.metadata_document = dict(collateralToken=0, universe=[dict(name="ETH", szDecimals=4, maxLeverage=25, marginTableId=53)],
             marginTables=[[53, dict(marginTiers=[dict(lowerBound="0", maxLeverage=25)])]])
@@ -111,6 +113,7 @@ class ProtocolTransport(PublicTransport):
     input_kind = "synthetic_protocol_fixture"
 
     def __init__(self, clock):
+        super().__init__()
         self.clock = clock
         self.coin = "ETH"
         self.requests = []
@@ -164,6 +167,7 @@ class RefreshTransport(PublicTransport):
     input_kind = "synthetic_protocol_fixture"
 
     def __init__(self, now, hyperliquid=False):
+        super().__init__()
         self.base = DynamicHyperliquidTransport(now) if hyperliquid else DynamicOkxTransport(now)
         self.hyperliquid, self.mode = hyperliquid, "initial"
 

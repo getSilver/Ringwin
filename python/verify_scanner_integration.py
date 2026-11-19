@@ -10,7 +10,33 @@ import control_plane
 import control_plane_web
 import owner_session
 from test_scanner_integration import ProtocolTransport, DynamicOkxTransport, DynamicHyperliquidTransport, RefreshTransport
+from opportunity_scanner.scanner_runtime import DEFAULT_SCANNER_ADAPTERS, OkxScannerAdapter
 from unittest.mock import patch
+
+
+class ThirdVenueFixture(OkxScannerAdapter):
+    """Independent scanner registration backed by the OKX wire decoder for this fixture."""
+
+    kind, label, venue = "fixture", "Fixture Venue", 77
+    products = ("spot",)
+    routes = {"production": ("https://third-venue.invalid", "production")}
+
+    def worker_config(self, row, discovery):
+        return dict(super().worker_config(row, discovery), venue=1)
+
+
+class ScopeTransport(ProtocolTransport):
+    def __init__(self, clock, adapters):
+        super().__init__(clock)
+        self.adapters = {adapter.venue: adapter for adapter in adapters}
+
+    def request(self, url, body=None, **kwargs):
+        payload = super().request(url, body, **kwargs)
+        if url == "https://www.okx.com/api/v5/public/instruments?instType=SPOT":
+            document = json.loads(payload)
+            document["data"].append(dict(document["data"][0], instId="SOL-USDT", baseCcy="SOL"))
+            return json.dumps(document)
+        return payload
 
 
 def main():
@@ -20,12 +46,17 @@ def main():
     parser.add_argument("--dynamic-hyperliquid", action="store_true")
     parser.add_argument("--refresh", action="store_true")
     parser.add_argument("--large-catalogue", action="store_true")
+    parser.add_argument("--scope-ticket", action="store_true")
     args=parser.parse_args()
     if args.large_catalogue and (args.dynamic_okx or args.dynamic_hyperliquid):
         parser.error("--large-catalogue requires the combined sources")
     with tempfile.TemporaryDirectory(prefix="ringwin-scanner-internal-") as directory:
         now=[2_000_000_000,1_800_000_000_000_000_000]
         transport=DynamicHyperliquidTransport(now) if args.dynamic_hyperliquid else DynamicOkxTransport(now) if args.dynamic_okx else ProtocolTransport(now)
+        adapters = DEFAULT_SCANNER_ADAPTERS
+        if args.scope_ticket:
+            adapters += (ThirdVenueFixture(),)
+            transport = ScopeTransport(now, adapters)
         if args.refresh:
             if args.dynamic_okx or args.dynamic_hyperliquid:
                 transport = RefreshTransport(now, args.dynamic_hyperliquid)
@@ -38,7 +69,7 @@ def main():
         owner_time=int(time.time())
         def assemble():
             with patch("opportunity_scanner.scanner_runtime.PublicTransport", return_value=transport):
-                application=control_plane_web.ControlPlaneApp(directory,channel,ui_path=args.ui,clock=lambda:owner_time)
+                application=control_plane_web.ControlPlaneApp(directory,channel,ui_path=args.ui,clock=lambda:owner_time,scanner_adapters=adapters)
             feeds=application.scanner_runtime
             feeds.closing.set()
             feeds.thread.join(timeout=15)
@@ -84,6 +115,11 @@ def main():
                     publisher=threading.Thread(target=publish,daemon=True); publisher.start()
                     print(json.dumps(dict(command=command,requests=requests,after=len(transport.requests),
                         totp=owner_session.totp_at(app.totp.read_secret(),app.clock()))),flush=True)
+                if command == "book-requests":
+                    books = sorted({url if body is None else url + "/" + body["coin"]
+                        for url, body in transport.requests
+                        if "/market/books?" in url or body and body.get("type") == "l2Book"})
+                    print(json.dumps(dict(command=command, books=books)), flush=True)
                 if command == "requests":
                     print(json.dumps(dict(command=command,requests=len(transport.requests))),flush=True)
                 if command.startswith("catalogue-") and args.refresh:

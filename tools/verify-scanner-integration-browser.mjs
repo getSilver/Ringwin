@@ -18,7 +18,7 @@ const click=name=>page.getByRole('button',{name,exact:true}).click();
 const tab=name=>page.getByRole('tab',{name,exact:true}).click();
 const choose=async(name,value)=>{await page.getByRole('combobox',{name,exact:true}).click();await page.getByRole('option',{name:value,exact:true}).click();};
 try {
- fixture=spawn('python',['-u','python/verify_scanner_integration.py','--ui',join(ui,'dist/index.html'),...(args.includes('--refresh')?['--refresh']:[]),...(args.includes('--large-catalogue')?['--large-catalogue']:[])],{cwd:root,stdio:['pipe','pipe','pipe']});
+ fixture=spawn('python',['-u','python/verify_scanner_integration.py','--ui',join(ui,'dist/index.html'),...(args.includes('--scope-ticket')?['--scope-ticket']:[]),...(args.includes('--refresh')?['--refresh']:[]),...(args.includes('--large-catalogue')?['--large-catalogue']:[])],{cwd:root,stdio:['pipe','pipe','pipe']});
  fixture.stderr.on('data',data=>{diagnostics+=data;});
  const ready=await new Promise((resolve,reject)=>{
   let buffer='';const timeout=setTimeout(()=>reject(new Error('fixture startup timeout '+diagnostics)),45000);
@@ -52,6 +52,88 @@ try {
   await click('登录');
   await page.getByText('已停止 · 配置 v0',{exact:true}).waitFor();
  });
+ if (args.includes('--scope-ticket')) {
+  const settings = page.getByRole('table',{name:'已保存交易所'});
+  const scannerView = async predicate => {
+   const deadline = Date.now() + 15000;
+   while (Date.now() < deadline) {
+    const response = await page.waitForResponse(r=>r.url().endsWith('/api/scanner') && r.request().method()==='GET' && r.ok());
+    const view = (await response.json()).result;
+    if (predicate(view)) return view;
+   }
+   throw new Error('Scanner view did not reach the expected scope');
+  };
+  const command = async value => {
+   const reply = new Promise((resolve,reject)=>{
+    const timeout=setTimeout(()=>reject(new Error('fixture command timeout: '+value)),30000);
+    fixture.stdout.once('data',data=>{clearTimeout(timeout);resolve(JSON.parse(String(data).trim()));});
+   });
+   fixture.stdin.write(value+'\n');
+   return reply;
+  };
+  const login = async code => {
+   await page.getByRole('textbox',{name:'口令',exact:true}).fill(ready.passphrase);
+   await page.getByRole('textbox',{name:'TOTP 验证码',exact:true}).fill(code);
+   await click('登录');
+   await tab('扫描范围');
+  };
+  await check('save three registered sources through the formal settings page',async()=>{
+   await click('Settings');
+   await click('交易所');
+   await settings.getByText('No data',{exact:true}).waitFor();
+   for (const [type,environment,name] of [['OKX','demo','OKX Demo'],['Hyperliquid','testnet','HL Testnet'],['Fixture Venue','production','Third Market']]) {
+    await choose('交易所类型',type);
+    await choose('交易所环境',environment);
+    await page.getByRole('textbox',{name:'交易所名称',exact:true}).fill(name);
+    await click('保存交易所');
+    await settings.getByText(name,{exact:true}).waitFor();
+   }
+   await page.keyboard.press('Escape');
+   await tab('扫描范围');
+   await scannerView(view=>view.exchanges.length===3 && view.exchanges.every(row=>row.catalogue_state==='ready'));
+  });
+  let before;
+  await check('batch actual source/product pairs, exclude SOL locally and collect only selected books',async()=>{
+   for (const name of ['OKX Demo','HL Testnet','Third Market','现货','永续'])
+    await page.getByRole('checkbox',{name,exact:true}).check();
+   await page.getByRole('textbox',{name:'排除资产（优先，可空）',exact:true}).fill('SOL');
+   await click('添加到草稿');
+   await click('应用扫描范围');
+   before = await scannerView(view=>view.config.version==='1');
+   assert.deepEqual(before.config.scopes.map(row=>[row.venue,row.environment,row.product]).sort(),[
+    ['1','demo','linear'],['1','demo','spot'],['21','testnet','linear'],['77','production','spot'],
+   ]);
+   assert.equal(before.config.scopes.find(row=>row.venue==='1' && row.product==='spot').exclude_assets.length,1);
+   assert.equal(before.config.scopes.filter(row=>row.exclude_assets.length).length,1);
+   assert.equal(before.catalogue.filter(row=>row.venue==='77').length,1);
+   await click('启动扫描');
+   await scannerView(view=>view.market.observations.length===4 && view.market.observations.every(row=>row.continuous));
+   assert.deepEqual((await command('book-requests')).books,[
+    'https://api.hyperliquid-testnet.xyz/info/ETH',
+    'https://third-venue.invalid/api/v5/market/books?instId=ETH-USDT&sz=5',
+    'https://www.okx.com/api/v5/market/books?instId=ETH-USDT&sz=5',
+    'https://www.okx.com/api/v5/market/books?instId=ETH-USDT-SWAP&sz=5',
+   ].sort());
+   await click('停止扫描');
+  });
+  await check('refresh, re-login and restart preserve the complete applied scope',async()=>{
+   await page.reload();
+   await login(ready.totp_next);
+   assert.deepEqual((await scannerView(view=>view.config.version==='1')).config,before.config);
+   await context.close();
+   const restarted=await command('restart');
+   assert.equal(restarted.requests,restarted.after);
+   context=await newSession();
+   await page.goto(base+'/#opportunities');
+   await login(restarted.totp);
+   const restored=await scannerView(view=>view.config.version==='1');
+   assert.deepEqual(restored.config,before.config);
+   assert.deepEqual(restored.catalogue,before.catalogue);
+   assert.deepEqual(restored.exchanges,before.exchanges);
+   assert.equal(restored.market.active_subscriptions,0);
+   await page.getByRole('table',{name:'实际生效范围'}).getByText('Third Market',{exact:true}).waitFor();
+  });
+ } else {
  await check('save named exchange settings through UI and recover on reopening',async()=>{
   await tab('扫描范围');
   assert.equal(await page.getByRole('checkbox',{name:'我的现货',exact:true}).count(),0);
@@ -273,6 +355,7 @@ try {
    await page.getByRole('table',{name:'扫描历史'}).getByText(/改名后的市场/).first().waitFor();
    await page.screenshot({path:join(output,'lifecycle.png'),fullPage:true});
   });
+ }
  }
  assert.deepEqual(errors,[]);assert.deepEqual(external,[]);
  await writeFile(join(output,'report.json'),JSON.stringify({status:'passed',browser:browser.version(),input:'synthetic_protocol_fixture',results,errors,external,trading_qualified:false,online_market:'not_run'},null,2));
