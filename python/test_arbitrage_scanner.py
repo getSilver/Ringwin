@@ -125,15 +125,41 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(selected(scan(skew))["reason"], "data_skew")
         self.assertEqual(selected(scan(observations, now=1_000_000, max_age_ns=2_000_000))["reason"], "rules_expired")
 
-    def test_spot_scope_and_cross_asset_or_same_venue_filtering(self):
+    def test_all_products_and_environment_orders_match_with_leg_diagnostics(self):
         observations, _ = fixture()
-        spots = tuple(replace(x, kind="spot") for x in observations)
-        rows = scan(spots)["candidates"]
-        self.assertEqual({x["reason"] for x in rows}, {"spot_spot_observation_only"})
-        mixed = (replace(observations[0], kind="spot"), observations[1])
-        self.assertEqual({x["direction"] for x in scan(mixed)["candidates"]}, {1})
-        reverse = (observations[0], replace(observations[1], kind="spot"))
-        self.assertEqual({x["direction"] for x in scan(reverse)["candidates"]}, {-1})
+        for environments in (("demo", "testnet"), ("testnet", "demo")):
+            for products in (("spot", "spot"), ("spot", "linear"), ("linear", "spot"), ("linear", "linear")):
+                with self.subTest(environments=environments, products=products):
+                    legs = tuple(replace(o, venue=10 if i == 0 else 987, kind=products[i], environment=environments[i])
+                                 for i, o in enumerate(observations))
+                    rows = scan(tuple(reversed(legs)))["candidates"]
+                    self.assertEqual(len(rows), 6)
+                    self.assertEqual({x["direction"] for x in rows}, {-1, 1})
+                    for row in rows:
+                        self.assertEqual([leg["venue"] for leg in row["legs"]], ["10", "987"])
+                        self.assertEqual([leg["requested_environment"] for leg in row["legs"]], list(environments))
+                        sell = 1 if row["direction"] == 1 else 0
+                        self.assertEqual(row["legs"][sell]["side"], "sell")
+                        self.assertEqual(row["legs"][1-sell]["side"], "buy")
+                        if products[sell] == "spot":
+                            self.assertIn("spot_inventory_unverified", row["legs"][sell]["issues"])
+                            self.assertIn("spot_sell_unsupported", row["legs"][sell]["issues"])
+                            self.assertEqual(row["status"], "pending")
+
+    def test_old_scanner_archive_preserves_original_pairing_rules(self):
+        from opportunity_scanner.scanner_archive import freeze, thaw
+        observations, _ = fixture()
+        observations = (replace(observations[0], kind="spot"), observations[1])
+        saved = freeze(observations)
+        for row in saved["tuple"]:
+            for name in ("market_source", "market_error", "registered_assets"):
+                del row["fields"][name]
+        legacy = scan(thaw(saved), legacy=True)["candidates"]
+        self.assertEqual(len(legacy), 3)
+        self.assertTrue(all(row["direction"] == 1 and "legs" not in row for row in legacy))
+
+    def test_cross_asset_or_same_venue_filtering(self):
+        observations, _ = fixture()
         same = (observations[0], replace(observations[1], venue=observations[0].venue))
         self.assertEqual(scan(same)["candidates"], [])
         different = (observations[0], replace(observations[1], rules=replace(observations[1].rules, base_asset=3)))

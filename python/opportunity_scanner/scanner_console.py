@@ -480,7 +480,7 @@ class ScannerConsole:
                 raise ValueError("unregistered canonical input")
             selected = self._selected()
             self.source.acquire(self.session, selected)
-            fresh = {x.identity for x in observations if x.continuous and
+            fresh = {x.identity for x in observations if x.book is not None and x.continuous and
                      at_ns - self.max_age_ns < scanner.decode_depth_snapshot(x.book)["visible_at_ns"] <= at_ns}
             self.warming.intersection_update(selected)
             self.warming.difference_update(fresh)
@@ -504,7 +504,7 @@ class ScannerConsole:
             self.last_input_ns = at_ns
             self.sequence += 1
             envelope = self._envelope()
-            material = encoded(dict(schema="scanner_inputs_v1", canonical_observations=freeze(observations),
+            material = encoded(dict(schema="scanner_inputs_v2", canonical_observations=freeze(observations),
                                     frozen_plans=freeze(plans), plan_failures=plan_failures or {}, input_versions=input_versions, config=self.config,
                                     at_ns=str(at_ns), cursor=str(cursor), max_age_ns=str(self.max_age_ns),
                                     max_skew_ns=str(self.max_skew_ns), snapshot=snapshot,
@@ -644,12 +644,13 @@ class ScannerConsole:
         if hashlib.sha256(material.encode()).hexdigest() != digest:
             raise ValueError("scanner replay digest")
         archive = load(material)
-        if archive["schema"] != "scanner_inputs_v1":
+        if archive["schema"] not in ("scanner_inputs_v1", "scanner_inputs_v2"):
             raise ValueError("scanner replay schema")
         result = scanner.scan(archive["canonical_observations"], archive["frozen_plans"],
             at_ns=int(archive["at_ns"]), cursor=int(archive["cursor"]),
             max_age_ns=int(archive["max_age_ns"]), max_skew_ns=int(archive["max_skew_ns"]), scope=self._scope(archive["config"]),
-            plan_failures=archive.get("plan_failures", {}), input_versions=archive.get("input_versions"))
+            plan_failures=archive.get("plan_failures", {}), input_versions=archive.get("input_versions"),
+            legacy=archive["schema"] == "scanner_inputs_v1")
         registered = {tuple(map(int, x)) for x in archive["selected_identities"]}
         result["candidates"] = [r for r in result["candidates"] if all(tuple(map(int, x)) in registered for x in r["pair"])]
         return dict(replayable=True, matches=result == archive["snapshot"], snapshot=result)

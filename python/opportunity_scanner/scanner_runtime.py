@@ -736,7 +736,8 @@ class ScannerRuntime:
                 if worker:
                     self._close_worker(worker)
         with self.lock:
-            observations = tuple(self.observations.values())
+            observations = self.observations.copy()
+            market_errors = self.failures.copy()
             evidence = {str(k): v for k, v in self.evidence.items()}
             self.cursor += 1
             cursor = self.cursor
@@ -745,11 +746,29 @@ class ScannerRuntime:
             if self.console.desired == "running" and self.console.session == session and self.console.config["version"] == version:
                 at_ns = self.clock()
                 selected_ids = self.console._selected()
-                selected_observations = tuple(o for o in observations if o.identity in selected_ids)
-                plans, failures, versions = self.evaluation.build(selected_observations, at_ns=at_ns,
+                selected_observations = []
+                with self.source.lock:
+                    for identity in sorted(selected_ids):
+                        entry = self.source.registered[identity]
+                        endpoint, actual = self.adapters[entry.venue].routes[entry.environment]
+                        source = (actual, endpoint, getattr(self.transport, "input_kind", "venue_public"))
+                        observation = observations.get(identity)
+                        binding = self.bindings[identity]
+                        if observation is None:
+                            observation = Observation(entry.venue, entry.account, entry.kind, entry.rules,
+                                None, False, entry.environment)
+                            evidence.setdefault(str(identity), dict(asset_basis=self._asset_basis(binding)))
+                        associations = binding.get("asset_associations", {})
+                        assets = tuple(associations.get(role) for role in ("base", "quote"))
+                        registered_assets = (tuple((int(asset["asset"]), asset["atomic_scale"]) for asset in assets)
+                                             if all(assets) else None)
+                        selected_observations.append(replace(observation, market_source=source,
+                            market_error=market_errors.get(identity), registered_assets=registered_assets))
+                plans, failures, versions = self.evaluation.build(
+                    tuple(o for o in selected_observations if o.book is not None), at_ns=at_ns,
                     max_age_ns=self.console.max_age_ns, max_skew_ns=self.console.max_skew_ns, bindings=self.bindings)
                 evidence["evaluation"] = dict(self.evaluation.state, input_versions=versions)
-                self.console.publish(session, cursor, observations, plans, at_ns=at_ns,
+                self.console.publish(session, cursor, tuple(selected_observations), plans, at_ns=at_ns,
                     evidence=evidence, plan_failures=failures, input_versions=versions)
 
     def status(self):

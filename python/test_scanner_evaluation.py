@@ -235,7 +235,16 @@ class EvaluationInputTests(unittest.TestCase):
             publish_inputs(self.path,doc)
             plans,failures,_ = self.build(observations)
             self.assertFalse(plans,(reason,self.source.state))
-            self.assertIn(reason,failures.values())
+            if reason in ("insufficient_depth", "insufficient_funds"):
+                candidate = s.candidate_id(*case["key"])
+                self.assertEqual(failures[candidate], {"leg": 0, "reason": reason})
+                snapshot = s.scan(observations, (), at_ns=NOW, cursor=1, max_age_ns=10**10,
+                    max_skew_ns=10**10, plan_failures=failures)
+                row = next(r for r in snapshot["candidates"] if r["id"] == candidate)
+                self.assertIn(reason, row["legs"][0]["issues"])
+                self.assertNotIn(reason, row["legs"][1]["issues"])
+            else:
+                self.assertIn(reason, failures.values())
 
     def test_public_transport_rejects_synthetic_research_artifacts(self):
         observations,doc = inputs()

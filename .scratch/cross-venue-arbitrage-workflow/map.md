@@ -36,12 +36,11 @@ Status: open
 
 ## Frontier
 
-- [03 按用户选择生成跨产品、跨环境候选](issues/03-pairing.md)
-- [03 按用户选择生成跨产品、跨环境候选](issues/03-pairing.md)
 - [04 手动费率贯穿扫描和开仓复核](issues/04-fees.md)
 - [05 USDT/USDC 平价估值与汇差归因](issues/05-stablecoin.md)
 - [07 跨所策略以空交易名单启动](issues/07-empty-list.md)
 - [10 让策略限价准确到达 Gateway](issues/10-limit-price.md)
+- [14 扩大扫描范围并展示实际覆盖](issues/14-coverage.md)
 
 ## Decisions so far
 
@@ -50,6 +49,8 @@ Status: open
 [01](issues/01-scope.md) 已通过正式设置页离线验收，应用范围可跨会话和重启恢复。第三注册来源由合成协议数据验证。
 
 扫描节点通过现有只读核心投影读取生效资产登记。候选和归档证据引用当时的登记版本，验收范围见 [02](issues/02-assets.md)。
+
+[03](issues/03-pairing.md) 按核心登记资产匹配跨环境路线，为全部产品搭配生成两个方向并逐腿记录行情来源与缺项。覆盖容量由 [14](issues/14-coverage.md) 继续验证。
 
 ## Not yet specified
 

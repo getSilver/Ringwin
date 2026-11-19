@@ -54,11 +54,13 @@ def thaw(value, depth=0):
     if set(value) == {"type", "fields"}:
         cls = TYPES.get(value["type"])
         names = set(value["fields"])
+        optional = set()
         if cls is arbitrage_scanner.Plan:
-            names.add("fee_version")
+            optional = {"fee_version"}
         if cls is arbitrage_scanner.Observation:
-            names.update(("market_source", "market_error", "registered_assets"))
-        if cls is None or names != {f.name for f in fields(cls)}:
+            optional = {"market_source", "market_error", "registered_assets"}
+        expected = {f.name for f in fields(cls)} if cls is not None else set()
+        if cls is None or not expected - optional <= names <= expected:
             raise ValueError("scanner archive type/fields")
         return cls(**{k: thaw(v, depth+1) for k, v in value["fields"].items()})
     if set(value) == {"tuple"}:

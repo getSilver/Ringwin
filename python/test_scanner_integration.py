@@ -757,6 +757,42 @@ class HyperliquidCatalogueTests(unittest.TestCase):
 
 
 class IntegrationTests(unittest.TestCase):
+    def test_demo_testnet_candidate_keeps_routes_and_reports_missing_book(self):
+        self.runtime.console.exchange_settings = self.app.exchange_settings_store
+        for version, kind, environment in (("0", "okx", "demo"), ("1", "hyperliquid", "testnet")):
+            status, body = self.http("/api/exchange-settings", dict(expected_version=version,
+                type=kind, name=kind, environment=environment), self.headers)
+            self.assertEqual(status, 200, body)
+        for thread in self.runtime.discovery_threads:
+            thread.join(timeout=15)
+        self.call("configure", dict(expected_version="0", scopes=[scope(21, "testnet"), scope(1, "demo")]))
+        self.call("start")
+        book = self.transport.book
+        def missing_testnet(row):
+            if row["environment"] == "testnet":
+                raise OSError("fixture book unavailable")
+            return book(row)
+        self.transport.book = missing_testnet
+        self.tick()
+        view = self.http("/api/scanner", headers=self.headers)[1]["result"]
+        rows = [r for r in view["snapshot"]["candidates"] if r["mode"] == "taker_taker"]
+        self.assertEqual({r["direction"] for r in rows}, {-1, 1}, (view["config"], view["catalogue"], view["market"]["failures"]))
+        for row in rows:
+            okx, hyperliquid = row["legs"]
+            self.assertEqual((okx["requested_environment"], okx["actual_environment"]), ("demo", "production"))
+            self.assertEqual((hyperliquid["requested_environment"], hyperliquid["actual_environment"]), ("testnet", "testnet"))
+            self.assertIn("api.hyperliquid-testnet.xyz", hyperliquid["market_endpoint"])
+            self.assertEqual(row["reason"], "book_missing")
+            self.assertIn("fixture book unavailable", hyperliquid["issues"])
+            self.assertNotIn("book_missing", okx["issues"])
+            self.assertIsNone(row["observed_edge_bp"])
+        digest, = self.runtime.console.last_evidence
+        self.assertTrue(self.runtime.console.replay(digest)["matches"])
+        self.transport.book = book
+        self.tick()
+        view = self.http("/api/scanner", headers=self.headers)[1]["result"]
+        self.assertTrue(all(r["observed_edge_bp"] is not None for r in view["snapshot"]["candidates"]))
+
     def test_scaled_okx_contract_uses_registered_exposure_and_archives_basis(self):
         self.runtime.console.exchange_settings = self.app.exchange_settings_store
         self.save_settings()
@@ -800,7 +836,7 @@ class IntegrationTests(unittest.TestCase):
         self.start()
         view = self.call("start")
         self.assertEqual(len(view["market"]["observations"]), 2)
-        self.assertEqual(len(view["snapshot"]["candidates"]), 3)
+        self.assertEqual(len(view["snapshot"]["candidates"]), 6)
         self.assertTrue(all(a["captures"] == 3 for a in self.runtime.audit().values()))
         rows = list(self.runtime.bindings.values())
         self.assertEqual(len({r["base_asset"] for r in rows}), 1)
@@ -811,7 +847,7 @@ class IntegrationTests(unittest.TestCase):
         self.start()
         view = self.call("start")
         self.assertEqual(len(view["market"]["observations"]), 2)
-        self.assertEqual(len(view["snapshot"]["candidates"]), 3)
+        self.assertEqual(len(view["snapshot"]["candidates"]), 6)
         self.assertTrue(all(a["captures"] == 3 for a in self.runtime.audit().values()))
 
     def test_same_named_registered_different_assets_do_not_pair(self):
@@ -906,7 +942,7 @@ class IntegrationTests(unittest.TestCase):
             return result.replace("ETH", "ALIAS") if body else result
         self.transport.request = aliased
         self.start()
-        self.assertEqual(len(self.call("start")["snapshot"]["candidates"]), 3)
+        self.assertEqual(len(self.call("start")["snapshot"]["candidates"]), 6)
         before = set(self.runtime.source.registered)
         self.runtime.close()
         current = dict(document, bindings=[dict(r, version="2") if r["asset"] == "4" else r
@@ -922,7 +958,7 @@ class IntegrationTests(unittest.TestCase):
             self.runtime.discover(setting)
         self.call("start"); self.tick()
         view = self.call("start")
-        self.assertEqual(len(view["snapshot"]["candidates"]), 3)
+        self.assertEqual(len(view["snapshot"]["candidates"]), 6)
         self.assertEqual({row["asset_basis"]["bindings"]["base"]["version"]
                           for row in view["market"]["observations"]}, {"2"})
 
@@ -1144,7 +1180,8 @@ class IntegrationTests(unittest.TestCase):
         self.tick()
         view = self.runtime.console.view()
         self.assertEqual({r["environment"] for r in view["market"]["observations"]}, {"demo", "production"})
-        self.assertEqual(view["snapshot"]["candidates"], [])
+        self.assertEqual(len(view["snapshot"]["candidates"]), 6)
+        self.assertTrue(all(r["legs"][0]["requested_environment"] == "demo" for r in view["snapshot"]["candidates"]))
         self.assertIs(self.runtime.workers[old], workers[old])
         self.assertIs(self.runtime.workers[other], workers[other])
         self.assertEqual(view["config"]["scopes"][0]["setting_id"], setting["identity"])
@@ -1283,7 +1320,7 @@ class IntegrationTests(unittest.TestCase):
     def test_failed_catalogue_immediately_revokes_existing_candidates(self):
         self.start()
         before = self.call("start")
-        self.assertEqual(len(before["snapshot"]["candidates"]), 3)
+        self.assertEqual(len(before["snapshot"]["candidates"]), 6)
         identity = next(i for i in self.runtime.workers if i[0] == 21)
         worker = self.runtime.workers[identity]
         def disconnected(*args):
@@ -1297,7 +1334,7 @@ class IntegrationTests(unittest.TestCase):
 
     def test_complete_catalogue_revokes_missing_dynamic_inputs_and_candidates(self):
         self.start()
-        self.assertEqual(len(self.call("start")["snapshot"]["candidates"]), 3)
+        self.assertEqual(len(self.call("start")["snapshot"]["candidates"]), 6)
         removed = next(i for i in self.runtime.workers if i[0] == 1)
         healthy = next(i for i in self.runtime.workers if i[0] == 21)
         worker = self.runtime.workers[healthy]
@@ -1321,7 +1358,7 @@ class IntegrationTests(unittest.TestCase):
         self.assertIn(list(map(str, removed)), self.call("start")["warming"])
         self.tick()
         view = self.call("start")
-        self.assertEqual(len(view["snapshot"]["candidates"]), 3, view)
+        self.assertEqual(len(view["snapshot"]["candidates"]), 6, view)
         self.assertTrue(all(o["continuous"] for o in view["market"]["observations"]))
         self.assertIs(self.runtime.workers[healthy], worker)
 
@@ -1431,7 +1468,7 @@ class IntegrationTests(unittest.TestCase):
         self.assertTrue(all(r["setting_id"] in {s["identity"] for s in view["exchanges"]} for r in self.call("stop")["config"]["scopes"]))
         self.call("start")
         self.tick()
-        self.assertEqual(len(self.call("start")["snapshot"]["candidates"]), 3)
+        self.assertEqual(len(self.call("start")["snapshot"]["candidates"]), 6)
         self.transport.fail.add(21); self.tick()
         failed = self.call("start")
         self.assertEqual(next(s for s in failed["exchanges"] if s["type"] == "hyperliquid")["catalogue_state"], "failed")
@@ -1488,7 +1525,7 @@ class IntegrationTests(unittest.TestCase):
             released.set()
             for thread in self.runtime.discovery_threads: thread.join(timeout=15)
         self.tick()
-        self.assertEqual(len(self.call("start")["snapshot"]["candidates"]), 3)
+        self.assertEqual(len(self.call("start")["snapshot"]["candidates"]), 6)
 
     def test_removed_unknown_source_assets_cannot_become_okx_asset_aliases(self):
         self.transport.coin = "UNKNOWN"
@@ -1512,8 +1549,10 @@ class IntegrationTests(unittest.TestCase):
         self.transport.coin = "BTC"
         self.start()
         view = self.call("start")
-        self.assertEqual(len(view["snapshot"]["candidates"]), 3)
-        self.assertTrue(all(c["reason"] == "evaluation_inputs_missing" and not c["recommended"] for c in view["snapshot"]["candidates"]))
+        self.assertEqual(len(view["snapshot"]["candidates"]), 6)
+        self.assertTrue(all(c["reason"].startswith("fees_missing_leg:") if c["direction"] == 1
+                            else c["reason"] == "spot_sell_unsupported" for c in view["snapshot"]["candidates"]))
+        self.assertFalse(any(c["recommended"] for c in view["snapshot"]["candidates"]))
         okx = next(r for r in self.runtime.bindings.values() if r["venue"] == 1)
         hl = next(r for r in self.runtime.bindings.values() if r["venue"] == 21)
         self.assertEqual(okx["base_asset"], hl["base_asset"])
@@ -1542,8 +1581,10 @@ class IntegrationTests(unittest.TestCase):
         self.start()
         view=self.call("start")
         self.assertEqual(view["phase"],"Running",view)
-        self.assertEqual(len(view["snapshot"]["candidates"]),3)
-        self.assertTrue(all(c["reason"]=="evaluation_inputs_missing" and not c["recommended"] for c in view["snapshot"]["candidates"]))
+        self.assertEqual(len(view["snapshot"]["candidates"]),6)
+        self.assertTrue(all(c["reason"].startswith("fees_missing_leg:") if c["direction"] == 1
+                            else c["reason"] == "spot_sell_unsupported" for c in view["snapshot"]["candidates"]))
+        self.assertFalse(any(c["recommended"] for c in view["snapshot"]["candidates"]))
         self.assertEqual(len(view["market"]["observations"]),2)
         self.assertTrue(all(x["raw_sequence"]>=3 for x in view["market"]["evidence"]))
         self.assertTrue(self.call("history",dict(kind="batches",limit=10))["rows"])
@@ -1571,7 +1612,9 @@ class IntegrationTests(unittest.TestCase):
         self.transport.bad_rules=True
         self.start()
         view=self.call("start")
-        self.assertFalse(view["snapshot"]["candidates"])
+        row = view["snapshot"]["candidates"][0]
+        self.assertIsNone(row["observed_edge_bp"])
+        self.assertIn("InstrumentRulesMismatch", row["legs"][0]["issues"])
         self.assertTrue(view["market"]["failures"])
 
     def test_ttl_expires_without_new_input_and_releases_shared_subscriptions(self):
@@ -1635,7 +1678,7 @@ class IntegrationTests(unittest.TestCase):
         self.call("start"); self.tick()
         view=self.call("start")
         self.assertEqual(len(view["market"]["observations"]),2)
-        self.assertFalse(view["snapshot"]["candidates"],"different environments cannot form a pair")
+        self.assertEqual(len(view["snapshot"]["candidates"]), 6)
         sources={(r["requested_environment"],r["actual_environment"]) for r in view["market"]["evidence"]}
         self.assertEqual(sources,{("demo","production"),("testnet","testnet")})
 
@@ -1700,7 +1743,9 @@ class IntegrationTests(unittest.TestCase):
         view=self.call("start")
         self.assertEqual(view["phase"],"Running")
         self.assertEqual({o["environment"] for o in view["market"]["observations"]},{"demo","testnet"})
-        self.assertFalse(view["snapshot"]["candidates"])
+        self.assertEqual(len(view["snapshot"]["candidates"]), 6)
+        self.assertTrue(all({leg["requested_environment"] for leg in r["legs"]} == {"demo", "testnet"}
+                            for r in view["snapshot"]["candidates"]))
         self.assertFalse(old_sessions & {e["session"] for e in view["market"]["evidence"]})
 
     def test_missing_catalogue_and_missing_rules_are_explicit(self):
@@ -1715,7 +1760,8 @@ class IntegrationTests(unittest.TestCase):
         view=self.call("start")
         self.assertEqual(view["phase"],"Degraded")
         self.assertFalse(view["market"]["observations"])
-        self.assertFalse(view["snapshot"]["candidates"])
+        self.assertEqual({r["reason"] for r in view["snapshot"]["candidates"]}, {"book_missing"})
+        self.assertTrue(all("book_missing" in leg["issues"] for r in view["snapshot"]["candidates"] for leg in r["legs"]))
 
     def test_unknown_quantity_and_sequence_regression_revoke_inputs(self):
         self.start()

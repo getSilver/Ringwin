@@ -20,6 +20,12 @@ from strategies.cross_venue import arbitrage_probability as p
 SCHEMA = "scanner_evaluation_inputs_v1"
 
 
+class LegUnavailable(b.Rejected):
+    def __init__(self, leg, reason):
+        super().__init__(reason)
+        self.leg = leg
+
+
 def publish_inputs(path, document):
     """Publish existing research artifacts atomically; creates no qualified evidence."""
     atomic_json(Path(path), freeze(document), MAX_BYTES)
@@ -163,11 +169,13 @@ class EvaluationInputs:
                     plans.append(plan)
                     versions.setdefault(identity, {})[str(plan.policy.original_base)] = dict(
                         case["versions"], package=str(doc["version"]), package_digest=self.digest)
+                except LegUnavailable as error:
+                    failures[identity] = dict(leg=error.leg, reason=str(error))
                 except (ValueError, TypeError, KeyError, OverflowError, ZeroDivisionError) as error:
                     failures[identity] = str(error)[:256]
             if any(plan.key == key for plan in plans):
                 failures.pop(identity, None)
-        missing = sorted(set(failures.values()))
+        missing = sorted({failure["reason"] if type(failure) is dict else failure for failure in failures.values()})
         self.state = dict(state="ready" if plans else "missing", clock_id=self.clock_id,
             version=str(doc["version"]), digest=self.digest, missing=missing, plans=len(plans))
         return tuple(plans), failures, versions
@@ -253,7 +261,7 @@ class EvaluationInputs:
             else:
                 sweep = e.sweep(books[i], rule, side, lots, limit, now_ns=at, max_age_ns=policy.max_book_age_ns)
                 if sweep.remaining_lots:
-                    raise b.Rejected("insufficient_depth")
+                    raise LegUnavailable(i, "insufficient_depth")
                 notional = sweep.quote_atoms
                 full_fills = sweep.fills
             executions.append(full_fills)
@@ -276,7 +284,7 @@ class EvaluationInputs:
             funding_reserve = e.ceil_atoms(funding_reserve*max(Fraction(1), case["bounds"].max_price_factor))
             needed = e.ceil_atoms(e.exact(notional*factor+max(Fraction(0), entry_cost)))+case["capital_buffers"][i]+funding_reserve
             if needed > case["funds_available"][i]:
-                raise b.Rejected("insufficient_funds")
+                raise LegUnavailable(i, "insufficient_funds")
             occupied += needed
         scenarios = []
         for source in case["scenarios"]:

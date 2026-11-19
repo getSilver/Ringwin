@@ -75,6 +75,8 @@ class Scope:
             return True
         if observation.rules.quote_asset != self.quote_asset:
             return False
+        if observation.book is None:
+            return True  # Keep pending routes visible until depth can be checked.
         book = decode_depth_snapshot(observation.book)
         if any(lots is None for side in ("bids", "asks") for _, lots in book[side]):
             return False
@@ -99,9 +101,12 @@ class Observation:
     account: int
     kind: str
     rules: e.InstrumentRules
-    book: bytes
+    book: Optional[bytes]
     continuous: bool
     environment: str = "simulation"
+    market_source: Optional[tuple] = None  # Actual environment, endpoint, input kind.
+    market_error: Optional[str] = None
+    registered_assets: Optional[tuple] = None  # Core (identity, scale) for exposure and quote.
 
     def __post_init__(self):
         for identity in (self.venue, self.account):
@@ -109,10 +114,24 @@ class Observation:
                 raise b.Rejected("observation_identity")
         if self.kind not in ("spot", "linear") or not isinstance(self.rules, e.InstrumentRules):
             raise b.Rejected("observation_product")
-        if type(self.book) is not bytes or type(self.continuous) is not bool:
+        if type(self.continuous) is not bool or (self.book is None and self.continuous):
             raise b.Rejected("observation_depth")
         if self.environment not in ("simulation", "demo", "testnet", "production"):
             raise b.Rejected("observation_environment")
+        if self.market_source is not None and (type(self.market_source) is not tuple
+                or len(self.market_source) != 3 or any(type(x) is not str or not x for x in self.market_source)):
+            raise b.Rejected("observation_market_source")
+        if self.market_error is not None and (type(self.market_error) is not str or len(self.market_error) > 2048):
+            raise b.Rejected("observation_market_error")
+        if self.registered_assets is not None and (type(self.registered_assets) is not tuple
+                or len(self.registered_assets) != 2 or any(type(x) is not tuple or len(x) != 2
+                    or any(type(n) is not int for n in x) or x[0] <= 0 or not 0 <= x[1] <= 18
+                    for x in self.registered_assets)):
+            raise b.Rejected("observation_registered_assets")
+        if self.book is None:
+            return
+        if type(self.book) is not bytes:
+            raise b.Rejected("observation_depth")
         try:
             book = decode_depth_snapshot(self.book)
         except RecoveryNeeded as error:
@@ -190,24 +209,36 @@ def candidate_id(pair, direction, mode, maker_leg):
     return hashlib.sha256(json.dumps([SCHEMA, key], separators=(",", ":")).encode("ascii")).hexdigest()
 
 
-def compatible_pairs(observations):
+def compatible_pairs(observations, *, legacy=False):
     pairs = {}
     for a, z in combinations(sorted(observations, key=lambda x: x.identity), 2):
-        if (a.venue == z.venue or a.environment != z.environment or a.account == z.account or a.rules.instrument == z.rules.instrument
-                or (a.rules.exposure_asset, a.rules.quote_asset) != (z.rules.exposure_asset, z.rules.quote_asset)):
+        if (a.venue == z.venue or (legacy and a.environment != z.environment)
+                or a.account == z.account or a.rules.instrument == z.rules.instrument):
+            continue
+        shared_units = (a.rules.exposure_asset, a.rules.quote_asset) == (z.rules.exposure_asset, z.rules.quote_asset)
+        shared_registration = not legacy and a.registered_assets is not None and a.registered_assets == z.registered_assets
+        if not (shared_units or shared_registration):
             continue
         pairs[a.identity, z.identity] = a, z
     return pairs
 
 
-def pair_keys(pair, legs):
+def pair_keys(pair, legs, *, legacy=False):
     a, z = legs
-    directions = (1, -1) if a.kind == z.kind else ((1,) if a.kind == "spot" else (-1,))
+    directions = (1, -1) if not legacy or a.kind == z.kind else ((1,) if a.kind == "spot" else (-1,))
     return tuple((pair, direction, mode, maker) for direction in directions
                  for mode, maker in (("taker_taker", None), ("maker_taker", 0), ("maker_taker", 1)))
 
 
-def scan(observations, plans, *, at_ns, cursor, max_age_ns, max_skew_ns, scope=None, plan_failures=None, input_versions=None):
+def _valid_failure(failure):
+    if type(failure) is str:
+        return len(failure) <= 256
+    return (type(failure) is dict and set(failure) == {"leg", "reason"}
+            and type(failure["leg"]) is int and failure["leg"] in (0, 1)
+            and type(failure["reason"]) is str and len(failure["reason"]) <= 256)
+
+
+def scan(observations, plans, *, at_ns, cursor, max_age_ns, max_skew_ns, scope=None, plan_failures=None, input_versions=None, legacy=False):
     """Full replacement snapshot; omitted/expired rows cannot retain eligibility.
 
     Plans are frozen research scenario inputs, not scanner-generated forecasts.
@@ -226,10 +257,10 @@ def scan(observations, plans, *, at_ns, cursor, max_age_ns, max_skew_ns, scope=N
         raise b.Rejected("duplicate_observation")
     if scope is not None and not isinstance(scope, Scope):
         raise b.Rejected("scan_scope")
-    pairs = compatible_pairs(observations)
+    pairs = compatible_pairs(observations, legacy=legacy)
     plan_failures = {} if plan_failures is None else plan_failures
     if type(plan_failures) is not dict or len(plan_failures) > 256 or any(
-            type(k) is not str or type(v) is not str or len(v) > 256 for k,v in plan_failures.items()):
+            type(key) is not str or not _valid_failure(failure) for key, failure in plan_failures.items()):
         raise b.Rejected("scan_plan_failures")
     selected_identities = {x.identity for x in observations if scope is None or scope.contains(x)}
     active_pairs = {pair: legs for pair, legs in pairs.items() if all(x.identity in selected_identities for x in legs)}
@@ -260,81 +291,111 @@ def scan(observations, plans, *, at_ns, cursor, max_age_ns, max_skew_ns, scope=N
             raise b.Rejected("duplicate_scan_plan")
         quantities[quantity] = plan
     rows = []
-    books_by_identity = {x.identity: decode_depth_snapshot(x.book) for x in observations if x.identity in selected_identities}
+    books_by_identity = {x.identity: decode_depth_snapshot(x.book) for x in observations
+                         if x.identity in selected_identities and x.book is not None}
     for pair, legs in active_pairs.items():
         a, z = legs
-        books = tuple(books_by_identity[x.identity] for x in legs)
-        times = tuple(x["visible_at_ns"] for x in books)
+        books = tuple(books_by_identity.get(x.identity) for x in legs)
+        times = tuple(book["visible_at_ns"] for book in books if book is not None)
         if any(t > at_ns for t in times):
             raise b.Rejected("future_observation")
-        health = ("data_gap" if not all(x.continuous for x in legs) else
-                  "stale_data" if any(at_ns-t >= max_age_ns for t in times) else
-                  "data_skew" if max(times)-min(times) > max_skew_ns else
-                  "rules_expired" if any(not x.rules.valid_from_ns <= at_ns < x.rules.valid_until_ns for x in legs) else "")
-        directions = (1, -1) if a.kind == z.kind else ((1,) if a.kind == "spot" else (-1,))
-        for direction in directions:
+        book_issues = tuple(("book_missing" if book is None else
+                            "data_gap" if not leg.continuous else
+                            "stale_data" if at_ns-book["visible_at_ns"] >= max_age_ns else
+                            "rules_expired" if not leg.rules.valid_from_ns <= at_ns < leg.rules.valid_until_ns else "")
+                            for leg, book in zip(legs, books))
+        skewed = len(times) == 2 and abs(times[0] - times[1]) > max_skew_ns
+        health = next((issue for issue in ("book_missing", "data_gap", "stale_data", "data_skew", "rules_expired")
+                       if issue in book_issues or (issue == "data_skew" and skewed)), "")
+        for key in pair_keys(pair, legs, legacy=legacy):
+            _, direction, mode, maker = key
             buy, sell = (0, 1) if direction == 1 else (1, 0)
-            buy_price = books[buy]["asks"][0][0] * legs[buy].rules.tick_quote_atoms_per_base_atom
-            sell_price = books[sell]["bids"][0][0] * legs[sell].rules.tick_quote_atoms_per_base_atom
-            observed_edge = None if health else (sell_price - buy_price) * 10_000 / buy_price
-            for mode, maker in (("taker_taker", None), ("maker_taker", 0), ("maker_taker", 1)):
-                key = pair, direction, mode, maker
-                options = grouped.get(key, {})
-                if len(rows) >= 256:
-                    raise b.Rejected("scan_candidate_capacity")
-                evaluated = []
-                for quantity, plan in options.items():
-                    policy = plan.policy
-                    reason = health or ("expired" if at_ns >= plan.valid_until_ns or at_ns >= policy.deadline_ns else
-                                        "evaluation_cutoff" if policy.at_ns != at_ns else "")
-                    result = None
-                    if not reason and a.kind == z.kind == "spot":
-                        reason = "spot_spot_observation_only"
-                    if not reason:
-                        try:
-                            result = v.evaluate(plan.scenarios, policy, plan.estimator, plan.calibration,
-                                                plan.simulation_error, plan.limits)
-                            reason = result.reason
-                        except (ValueError, OverflowError, ZeroDivisionError) as error:
-                            reason = str(error)[:256]
-                    evaluated.append((plan, result, reason))
-                # Qualified quantities first; then actual-plan profit, lower occupancy, lower quantity.
-                evaluated.sort(key=lambda x: (not (x[1] is not None and x[1].allowed and not x[2]),
-                    -(x[1].plan_atoms if x[1] is not None and x[1].plan_atoms is not None else -e.MAX_INTEGER),
-                    x[0].occupied_atoms, e.exact(x[0].policy.original_base)))
-                plan, result, reason = evaluated[0] if evaluated else (None, None,
-                    health or ("spot_spot_observation_only" if a.kind == z.kind == "spot" else
-                               plan_failures.get(candidate_id(*key), "missing_evidence")))
-                age = min(max_age_ns, plan.policy.max_book_age_ns) if plan else max_age_ns
-                end = min(*(min(b.MAX_U64, t+age) for t in times), *(x.rules.valid_until_ns for x in legs),
-                          plan.valid_until_ns if plan else b.MAX_U64, plan.policy.deadline_ns if plan else b.MAX_U64,
-                          plan.calibration.valid_until_ns if plan else b.MAX_U64)
-                probability = result.entry_probability if result else None
-                rows.append({"id": candidate_id(*key), "pair": [[str(n) for n in x] for x in pair],
-                    "base_asset": str(a.rules.base_asset), "quote_asset": str(a.rules.quote_asset),
-                    "direction": direction, "mode": mode, "maker_leg": maker,
-                    "products": [x.kind for x in legs],
-                    "observed_edge_bp": _ratio(observed_edge),
-                    "status": "evaluated" if result is not None and result.allowed and not reason else
-                              "rejected" if result is not None and reason in ("reference_profit", "profit", "edge", "probability", "hard_gate") else "pending",
-                    "reason": reason, "trading_qualified": False,
-                    "quantity_base": _ratio(plan.policy.original_base) if plan else None,
-                    "reference_atoms": str(result.reference_atoms) if result and result.reference_atoms is not None else None,
-                    "plan_atoms": str(result.plan_atoms) if result and result.plan_atoms is not None else None,
-                    "target_atoms": str(result.entry_target_atoms) if result and result.entry_target_atoms is not None else None,
-                    "probability_lower_ppm": probability.lower_ppm if probability else None,
-                    "worst_net_atoms": str(min(x.net_atoms for x in result.plan_paths))
-                        if result and result.plan_paths and all(x.net_atoms is not None for x in result.plan_paths) else None,
-                    "unresolved_weight": _ratio(result.unresolved_weight) if result else None,
-                    "occupied_atoms": str(plan.occupied_atoms) if plan else None,
-                    "model_hash": plan.policy.model_hash if plan else None,
-                    "policy_version": str(plan.policy.version) if plan else None,
-                    "calibration_version": str(plan.calibration.version) if plan else None,
-                    "scenario_digest": result.scenario_digest if result else None,
-                    "estimator_digest": result.estimator_digest if result else None,
-                    "data_cutoff_ns": str(min(times)), "valid_until_ns": str(end), "recommended": False,
-                    **({"input_versions": input_versions.get(candidate_id(*key), {}).get(str(plan.policy.original_base), {})
-                       if plan else {}} if input_versions is not None else {})})
+            observed_edge = None
+            if not health:
+                buy_price = books[buy]["asks"][0][0] * legs[buy].rules.tick_quote_atoms_per_base_atom
+                sell_price = books[sell]["bids"][0][0] * legs[sell].rules.tick_quote_atoms_per_base_atom
+                observed_edge = (sell_price - buy_price) * 10_000 / buy_price
+            unsupported = ("spot_spot_observation_only" if a.kind == z.kind == "spot" else "") if legacy else (
+                "spot_sell_unsupported" if legs[sell].kind == "spot" else "")
+            if not unsupported and (a.rules.exposure_asset, a.rules.quote_asset) != (z.rules.exposure_asset, z.rules.quote_asset):
+                unsupported = "evaluation_asset_scope"
+            options = grouped.get(key, {})
+            if len(rows) >= 256:
+                raise b.Rejected("scan_candidate_capacity")
+            evaluated = []
+            for plan in options.values():
+                policy = plan.policy
+                reason = health or (unsupported if not legacy else "") or ("expired" if at_ns >= plan.valid_until_ns or at_ns >= policy.deadline_ns else
+                                    "evaluation_cutoff" if policy.at_ns != at_ns else "")
+                result = None
+                if not reason:
+                    reason = unsupported
+                if not reason:
+                    try:
+                        result = v.evaluate(plan.scenarios, policy, plan.estimator, plan.calibration,
+                                            plan.simulation_error, plan.limits)
+                        reason = result.reason
+                    except (ValueError, OverflowError, ZeroDivisionError) as error:
+                        reason = str(error)[:256]
+                evaluated.append((plan, result, reason))
+            # Qualified quantities first; then actual-plan profit, lower occupancy, lower quantity.
+            evaluated.sort(key=lambda x: (not (x[1] is not None and x[1].allowed and not x[2]),
+                -(x[1].plan_atoms if x[1] is not None and x[1].plan_atoms is not None else -e.MAX_INTEGER),
+                x[0].occupied_atoms, e.exact(x[0].policy.original_base)))
+            candidate = candidate_id(*key)
+            failure = plan_failures.get(candidate, "missing_evidence")
+            failure_leg = None
+            if type(failure) is dict:
+                failure_leg, failure = failure["leg"], failure["reason"]
+            plan, result, reason = evaluated[0] if evaluated else (None, None, health or unsupported or failure)
+            age = min(max_age_ns, plan.policy.max_book_age_ns) if plan else max_age_ns
+            end = min(*(min(b.MAX_U64, t+age) for t in times), *(x.rules.valid_until_ns for x in legs),
+                      plan.valid_until_ns if plan else b.MAX_U64, plan.policy.deadline_ns if plan else b.MAX_U64,
+                      plan.calibration.valid_until_ns if plan else b.MAX_U64)
+            probability = result.entry_probability if result else None
+            route_legs = []
+            for i, leg in enumerate(legs):
+                issues = [book_issues[i]] if book_issues[i] else []
+                if book_issues[i] and leg.market_error:
+                    issues.append(leg.market_error)
+                if health == "data_skew" and times[i] == min(times):
+                    issues.append("data_skew")
+                if i == sell and unsupported == "spot_sell_unsupported":
+                    issues.extend(("spot_inventory_unverified", unsupported))
+                if i == failure_leg and reason == failure:
+                    issues.append(failure)
+                issues.append("execution_capability_unverified")
+                actual, endpoint, input_kind = leg.market_source or (None, None, None)
+                route_legs.append(dict(venue=str(leg.venue), account=str(leg.account),
+                    instrument=str(leg.rules.instrument), product=leg.kind, side="buy" if i == buy else "sell",
+                    requested_environment=leg.environment, actual_environment=actual,
+                    market_endpoint=endpoint, market_input_kind=input_kind, issues=issues))
+            rows.append({"id": candidate, "pair": [[str(n) for n in x] for x in pair],
+                "base_asset": str(a.rules.base_asset), "quote_asset": str(a.rules.quote_asset),
+                "direction": direction, "mode": mode, "maker_leg": maker,
+                "products": [x.kind for x in legs],
+                **({"legs": route_legs} if not legacy else {}),
+                "observed_edge_bp": _ratio(observed_edge),
+                "status": "evaluated" if result is not None and result.allowed and not reason else
+                          "rejected" if result is not None and reason in ("reference_profit", "profit", "edge", "probability", "hard_gate") else "pending",
+                "reason": reason, "trading_qualified": False,
+                "quantity_base": _ratio(plan.policy.original_base) if plan else None,
+                "reference_atoms": str(result.reference_atoms) if result and result.reference_atoms is not None else None,
+                "plan_atoms": str(result.plan_atoms) if result and result.plan_atoms is not None else None,
+                "target_atoms": str(result.entry_target_atoms) if result and result.entry_target_atoms is not None else None,
+                "probability_lower_ppm": probability.lower_ppm if probability else None,
+                "worst_net_atoms": str(min(x.net_atoms for x in result.plan_paths))
+                    if result and result.plan_paths and all(x.net_atoms is not None for x in result.plan_paths) else None,
+                "unresolved_weight": _ratio(result.unresolved_weight) if result else None,
+                "occupied_atoms": str(plan.occupied_atoms) if plan else None,
+                "model_hash": plan.policy.model_hash if plan else None,
+                "policy_version": str(plan.policy.version) if plan else None,
+                "calibration_version": str(plan.calibration.version) if plan else None,
+                "scenario_digest": result.scenario_digest if result else None,
+                "estimator_digest": result.estimator_digest if result else None,
+                "data_cutoff_ns": str(min(times, default=at_ns)), "valid_until_ns": str(end), "recommended": False,
+                **({"input_versions": input_versions.get(candidate_id(*key), {}).get(str(plan.policy.original_base), {})
+                   if plan else {}} if input_versions is not None else {})})
     for pair in active_pairs:
         for direction in (1, -1):
             eligible = [row for row in rows if row["pair"] == [[str(n) for n in x] for x in pair]
