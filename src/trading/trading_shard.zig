@@ -1682,10 +1682,22 @@ pub const TradingShard = struct {
             }
         }
         if (entries[0].rules.base_asset == 0 or entries[0].rules.base_asset != entries[1].rules.base_asset or
-            entries[0].rules.settlement_asset != entries[1].rules.settlement_asset or
+            !self.pairSettlementCompatible(entries) or
             (request.enabled and entries[0].product == .spot and entries[1].product == .spot)) return error.InvalidPairAssets;
         if (request.enabled and ((entries[0].product == .spot and request.direction != 1) or
             (entries[1].product == .spot and request.direction != -1))) return error.InvalidPairDirection;
+    }
+
+    fn pairSettlementCompatible(self: *const TradingShard, entries: [2]InstrumentEntry) bool {
+        const a = entries[0];
+        const z = entries[1];
+        if (a.rules.settlement_asset == z.rules.settlement_asset) return true;
+        const a_usdt = self.asset_registry.resolveCode(a.venue, "USDT") catch 0;
+        const a_usdc = self.asset_registry.resolveCode(a.venue, "USDC") catch 0;
+        const z_usdt = self.asset_registry.resolveCode(z.venue, "USDT") catch 0;
+        const z_usdc = self.asset_registry.resolveCode(z.venue, "USDC") catch 0;
+        return (a.rules.settlement_asset == a_usdt and z.rules.settlement_asset == z_usdc) or
+            (a.rules.settlement_asset == a_usdc and z.rules.settlement_asset == z_usdt);
     }
 
     pub fn copyAccountViewInto(self: *const TradingShard, destination: *TradingShard, identity: u128) !void {

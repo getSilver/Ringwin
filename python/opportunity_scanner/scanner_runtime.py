@@ -9,6 +9,7 @@ import hashlib
 import copy
 import json
 import os
+import re
 from pathlib import Path
 import secrets
 import subprocess
@@ -277,12 +278,46 @@ class ScannerRuntime:
     @staticmethod
     def _entry(row, assets):
         base, quote = int(row["base_asset"]), int(row["quote_asset"])
+        associations = row.get("asset_associations", {})
+        def stable_unit(role, scale):
+            binding = associations.get(role)
+            if binding and binding["code"] in economics.STABLECOINS:
+                return binding["code"], scale if scale is not None else binding["atomic_scale"]
+            return None
+        quote_unit = stable_unit("quote", assets[quote]["atomic_scale"])
+        settlement_unit = stable_unit("settlement", None)
+        base_binding = associations.get("base")
+        registered_base = (int(base_binding["asset"]), assets[base]["atomic_scale"]) if base_binding and quote_unit else None
+        settlement_id = int(row.get("settlement_asset", quote))
+        settlement = ((settlement_id, *settlement_unit)
+                      if settlement_id != quote and quote_unit and settlement_unit else None)
         tick, lot = Fraction(row["tick"]), Fraction(row["lot_base"])
         minimum = Fraction(row.get("minimum_size", row["lot_wire"])) / Fraction(row["lot_wire"])
         rules = economics.InstrumentRules(int(row["instrument"]), row["rules_version"], base, quote,
             tick * Fraction(10**assets[quote]["atomic_scale"], 10**assets[base]["atomic_scale"]),
-            lot * 10**assets[base]["atomic_scale"], -(-minimum.numerator // minimum.denominator), 0, 0, (1<<64)-1)
+            lot * 10**assets[base]["atomic_scale"], -(-minimum.numerator // minimum.denominator), 0, 0, (1<<64)-1,
+            quote_unit=quote_unit, settlement=settlement, registered_base=registered_base)
         return CatalogueEntry(row["venue"], int(row["observation_identity"]), row["product"], rules, row["environment"], row.get("specification"))
+
+    def _fx_rate(self, at_ns):
+        try:
+            with (self.directory/"stablecoin-fx.json").open("rb") as stream:
+                raw = stream.read(2049)
+            if len(raw) > 2048:
+                return None
+            row = json.loads(raw, object_pairs_hook=_object)
+            if (type(row) is not dict or set(row) != {"at_ns", "source", "usdt_per_usdc"}
+                    or type(row["usdt_per_usdc"]) is not str
+                    or re.fullmatch(r"[0-9]{1,38}(?:[./][0-9]{1,38})?", row["usdt_per_usdc"]) is None
+                    or type(row["at_ns"]) is not str or re.fullmatch(r"[0-9]{1,20}", row["at_ns"]) is None):
+                return None
+            sampled = int(row["at_ns"])
+            age = self.utc_clock() - sampled
+            if 0 <= age < self.console.max_age_ns and age <= at_ns:
+                return economics.FxRate(Fraction(row["usdt_per_usdc"]), at_ns-age, row["source"], sampled)
+        except (OSError, ValueError, TypeError, OverflowError, ZeroDivisionError, RecursionError):
+            return None
+        return None
 
     def _setting_adapter(self, setting):
         adapter = self.adapters.get(int(setting["venue"]))
@@ -769,7 +804,7 @@ class ScannerRuntime:
                     max_age_ns=self.console.max_age_ns, max_skew_ns=self.console.max_skew_ns, bindings=self.bindings)
                 evidence["evaluation"] = dict(self.evaluation.state, input_versions=versions)
                 self.console.publish(session, cursor, tuple(selected_observations), plans, at_ns=at_ns,
-                    evidence=evidence, plan_failures=failures, input_versions=versions)
+                    evidence=evidence, plan_failures=failures, input_versions=versions, fx_rate=self._fx_rate(at_ns))
 
     def status(self):
         observations = []

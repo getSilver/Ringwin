@@ -217,7 +217,12 @@ def compatible_pairs(observations, *, legacy=False):
             continue
         shared_units = (a.rules.exposure_asset, a.rules.quote_asset) == (z.rules.exposure_asset, z.rules.quote_asset)
         shared_registration = not legacy and a.registered_assets is not None and a.registered_assets == z.registered_assets
-        if not (shared_units or shared_registration):
+        shared_exposure = (e.compatible_exposure(a.rules, z.rules)
+                           or a.registered_assets is not None and z.registered_assets is not None
+                           and a.registered_assets[0] == z.registered_assets[0])
+        mixed_parity = (not legacy and shared_exposure
+                        and a.rules.quote_asset != z.rules.quote_asset and e.compatible_quotes(a.rules, z.rules))
+        if not (shared_units or shared_registration or mixed_parity):
             continue
         pairs[a.identity, z.identity] = a, z
     return pairs
@@ -238,7 +243,8 @@ def _valid_failure(failure):
             and type(failure["reason"]) is str and len(failure["reason"]) <= 256)
 
 
-def scan(observations, plans, *, at_ns, cursor, max_age_ns, max_skew_ns, scope=None, plan_failures=None, input_versions=None, legacy=False):
+def scan(observations, plans, *, at_ns, cursor, max_age_ns, max_skew_ns, scope=None,
+         plan_failures=None, input_versions=None, legacy=False, fx_rate=None):
     """Full replacement snapshot; omitted/expired rows cannot retain eligibility.
 
     Plans are frozen research scenario inputs, not scanner-generated forecasts.
@@ -248,6 +254,9 @@ def scan(observations, plans, *, at_ns, cursor, max_age_ns, max_skew_ns, scope=N
     b.uint(cursor, 1)
     b.uint(max_age_ns, 1)
     b.uint(max_skew_ns)
+    if fx_rate is not None and (not isinstance(fx_rate, e.FxRate) or
+            not 0 <= at_ns-fx_rate.at_ns < max_age_ns):
+        fx_rate = None
     v._tuple(observations, 64)
     v._tuple(plans)
     if any(not isinstance(x, Observation) for x in observations) or any(not isinstance(x, Plan) for x in plans):
@@ -272,9 +281,10 @@ def scan(observations, plans, *, at_ns, cursor, max_age_ns, max_skew_ns, scope=N
             raise b.Rejected("plan_outside_observation")
         # Validate the original binding even when a new observation filter hides it.
         legs = pairs[plan.pair]
-        if (plan.policy.base_asset, plan.policy.quote_asset) != (
-                legs[0].rules.exposure_asset, legs[0].rules.quote_asset):
-            raise b.Rejected("scan_asset_scope")
+        try:
+            e.strategy_units(tuple(x.rules for x in legs), plan.policy.base_asset, plan.policy.quote_asset)
+        except ValueError as error:
+            raise b.Rejected("scan_asset_scope") from error
         for scenario in plan.scenarios:
             if len(scenario.entry.legs) != 2:
                 if scenario.entry.state == "flat":
@@ -311,13 +321,19 @@ def scan(observations, plans, *, at_ns, cursor, max_age_ns, max_skew_ns, scope=N
             _, direction, mode, maker = key
             buy, sell = (0, 1) if direction == 1 else (1, 0)
             observed_edge = None
-            if not health:
+            quote_compatible = e.compatible_quotes(a.rules, z.rules)
+            if not health and quote_compatible:
+                buy_price = books[buy]["asks"][0][0] * legs[buy].rules.tick_quote_atoms_per_base_atom
+                sell_price = books[sell]["bids"][0][0] * legs[sell].rules.tick_quote_atoms_per_base_atom
+                sell_price *= e.quote_factor(legs[sell].rules, legs[buy].rules)
+                observed_edge = (sell_price - buy_price) * 10_000 / buy_price
+            elif not health and a.registered_assets is not None and a.registered_assets == z.registered_assets:
                 buy_price = books[buy]["asks"][0][0] * legs[buy].rules.tick_quote_atoms_per_base_atom
                 sell_price = books[sell]["bids"][0][0] * legs[sell].rules.tick_quote_atoms_per_base_atom
                 observed_edge = (sell_price - buy_price) * 10_000 / buy_price
             unsupported = ("spot_spot_observation_only" if a.kind == z.kind == "spot" else "") if legacy else (
                 "spot_sell_unsupported" if legs[sell].kind == "spot" else "")
-            if not unsupported and (a.rules.exposure_asset, a.rules.quote_asset) != (z.rules.exposure_asset, z.rules.quote_asset):
+            if not unsupported and (not e.compatible_exposure(a.rules, z.rules) or not quote_compatible):
                 unsupported = "evaluation_asset_scope"
             options = grouped.get(key, {})
             if len(rows) >= 256:
@@ -370,12 +386,25 @@ def scan(observations, plans, *, at_ns, cursor, max_age_ns, max_skew_ns, scope=N
                     instrument=str(leg.rules.instrument), product=leg.kind, side="buy" if i == buy else "sell",
                     requested_environment=leg.environment, actual_environment=actual,
                     market_endpoint=endpoint, market_input_kind=input_kind, issues=issues))
+            estimated_fx = {}
+            if not legacy and any(x.rules.settlement_unit and x.rules.settlement_unit[0] == "USDC" for x in legs):
+                paths = result.plan_paths if result else ()
+                units = (e.exact(sum(x.weight*x.usdc_units for x in paths))
+                         if paths and all(x.usdc_units is not None for x in paths) else None)
+                deviation = e.parity_deviation(units, fx_rate) if units is not None and fx_rate else None
+                estimated_fx["estimated_fx"] = dict(status="pending" if deviation is None else "available",
+                    net_usdc=_ratio(units), deviation_usdt=_ratio(deviation),
+                    rate=fx_rate.display() if fx_rate else None,
+                    settlement_assets=[str(x.rules.settlement[0] if x.rules.settlement else x.rules.quote_asset)
+                                       for x in legs])
             rows.append({"id": candidate, "pair": [[str(n) for n in x] for x in pair],
-                "base_asset": str(a.rules.base_asset), "quote_asset": str(a.rules.quote_asset),
+                "base_asset": str(a.rules.base_asset),
+                "quote_asset": str(plan.policy.quote_asset if plan else a.rules.quote_asset),
                 "direction": direction, "mode": mode, "maker_leg": maker,
                 "products": [x.kind for x in legs],
                 **({"legs": route_legs} if not legacy else {}),
                 "observed_edge_bp": _ratio(observed_edge),
+                **estimated_fx,
                 "status": "evaluated" if result is not None and result.allowed and not reason else
                           "rejected" if result is not None and reason in ("reference_profit", "profit", "edge", "probability", "hard_gate") else "pending",
                 "reason": reason, "trading_qualified": False,

@@ -47,7 +47,10 @@ def _content(value, *, packaged):
         if is_dataclass(v):
             namespace = type(v).__module__ if packaged else _TYPE_NAMESPACES.get(type(v).__module__, type(v).__module__)
             return [namespace, type(v).__name__, [[f.name, tree(getattr(v, f.name))] for f in fields(v)
-                if not (isinstance(v, b.InstrumentRules) and f.name == "approved_base_pair" and v.approved_base_pair is None)]]
+                if not (isinstance(v, b.InstrumentRules)
+                        and f.name in ("approved_base_pair", "quote_unit", "settlement", "registered_base")
+                        and getattr(v, f.name) is None)
+                and not (isinstance(v, cycle.Facts) and f.name == "fx_exposures" and not v.fx_exposures)]]
         if type(v) is float:
             return ["binary64_bits_v1", s.encode_number(v)]
         if type(v) is Fraction:

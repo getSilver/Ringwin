@@ -6,6 +6,7 @@ import unittest
 
 from opportunity_scanner import arbitrage_scanner as s
 from strategies.cross_venue import arbitrage_evaluation as v
+from strategies.cross_venue import arbitrage_economics as e
 from strategy_host import decode_depth_snapshot, encode_depth_snapshot
 from test_arbitrage_evaluation import (T, EXACT, LIMITS, path, policy, estimator_for, wire)
 from test_arbitrage_probability import calibration
@@ -40,6 +41,49 @@ def selected(snapshot):
 
 
 class ScannerTests(unittest.TestCase):
+    def test_mixed_stablecoin_top_of_book_uses_parity_across_atomic_scales(self):
+        observations, _ = fixture()
+        a, z = observations
+        a = replace(a, rules=replace(a.rules, quote_unit=("USDT", 6)))
+        z = replace(z, rules=replace(z.rules, quote_asset=3, quote_unit=("USDC", 8),
+            tick_quote_atoms_per_base_atom=z.rules.tick_quote_atoms_per_base_atom * 100))
+        row = selected(scan((a, z)))
+        self.assertEqual(row["observed_edge_bp"], selected(scan(observations))["observed_edge_bp"])
+        self.assertEqual(row["estimated_fx"]["status"], "pending")
+
+    def test_mixed_stablecoin_scenario_reports_fx_separately_from_parity(self):
+        observations, initial = fixture()
+        original = initial.scenarios[0]
+        a, z = original.entry.legs
+        a = replace(a, rules=replace(a.rules, quote_unit=("USDT", 6), registered_base=(222, 8)))
+        z = replace(z, rules=replace(z.rules, base_asset=4, quote_asset=3, quote_unit=("USDC", 8),
+            registered_base=(222, 8),
+            tick_quote_atoms_per_base_atom=z.rules.tick_quote_atoms_per_base_atom * 100),
+            exit_fee=replace(z.exit_fee, fee_asset=3),
+            entries=tuple(replace(t, fee=replace(t.fee, asset=3)) for t in z.entries))
+        scenario = replace(original, entry=replace(original.entry, legs=(a, z)))
+        observations = tuple(replace(o, rules=leg.rules) for o, leg in zip(observations, (a, z)))
+        estimator = estimator_for((scenario,), initial.policy)
+        artifact = replace(initial.calibration, simulation_hash=estimator.probability_model_hash(initial.policy))
+        plan = replace(initial, scenarios=(scenario,), estimator=estimator, calibration=artifact)
+        pending = selected(scan(observations, (plan,)))
+        row = selected(scan(observations, (plan,), fx_rate=e.FxRate(F(998, 1000), T, "sample")))
+        self.assertEqual(row["plan_atoms"], selected(scan(fixture()[0], (initial,)))["plan_atoms"])
+        self.assertEqual(row["plan_atoms"], pending["plan_atoms"])
+        self.assertEqual(row["estimated_fx"]["net_usdc"], ["8", "1"])
+        self.assertEqual(row["estimated_fx"]["deviation_usdt"], ["-2", "125"])
+        self.assertEqual(pending["estimated_fx"]["status"], "pending")
+        usdt_fee = replace(z.entries[0].fee, asset=1, asset_atoms=100000, quote_atoms=F(10000000))
+        charged = replace(scenario, entry=replace(scenario.entry, legs=(
+            a, replace(z, entries=(replace(z.entries[0], fee=usdt_fee),)))))
+        estimator = estimator_for((charged,), initial.policy)
+        charged_plan = replace(plan, scenarios=(charged,), estimator=estimator,
+            calibration=replace(artifact, simulation_hash=estimator.probability_model_hash(initial.policy)))
+        charged_row = selected(scan(observations, (charged_plan,), fx_rate=e.FxRate(F(998, 1000), T, "sample")))
+        # The fee delays the qualifying exit, changing gross PnL to 8.20 USDC.
+        self.assertEqual(charged_row["estimated_fx"]["net_usdc"], ["41", "5"])
+        self.assertEqual(charged_row["estimated_fx"]["deviation_usdt"], ["-41", "2500"])
+
     def test_scope_depth_exact_bounds_unknown_quantity_and_quote_unit(self):
         observations, _ = fixture()
         # Leg A: min(1000*100,1001*100)*100000 = 10,000,000,000 atoms.

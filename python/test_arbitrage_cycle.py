@@ -44,6 +44,32 @@ def done(sequence, index, lots, **changes):
 
 
 class CycleTests(unittest.TestCase):
+    def test_profit_report_uses_signed_canonical_fx_and_never_rebooks_samples(self):
+        cycle = c.Cycle(plan())
+        cycle.start(cursor=1, at_ns=T)
+        frame = facts(orders=(done(1, 0, 0), done(2, 1, 0)))
+        cycle.apply(frame)
+        quote = c.e.FxRate(F(998, 1000), T, "USDC-USDT spot")
+        for amount, expected in ((1000, "-2"), (-1000, "2")):
+            fill = c.e.FxExposure("fill", T, F(amount), F(amount), quote)
+            sample = c.e.FxExposure("sample", T+1, F(0), F(amount), quote)
+            snapshot = replace(frame, fx_exposures=(fill, fill, sample))
+            report = cycle.profit_report(snapshot)
+            self.assertEqual(report, cycle.profit_report(snapshot))
+            fx = report["actual_fx"]
+            self.assertEqual(fx["deviation_usdt"], [expected, "1"])
+            self.assertEqual(len(fx["records"]), 2)
+            self.assertEqual(fx["records"][0]["rate"]["source"], "USDC-USDT spot")
+            self.assertEqual(fx["records"][1]["holding_usdt"], ["0", "1"])
+            mark = replace(sample, rate=c.e.FxRate(F(997, 1000), T+1, quote.source))
+            fx = cycle.profit_report(replace(frame, fx_exposures=(fill, mark)))["actual_fx"]
+            self.assertEqual(fx["records"][1]["holding_usdt"], [str(-amount//1000), "1"])
+            fx = cycle.profit_report(replace(frame, fx_exposures=(replace(fill, rate=None), mark)))["actual_fx"]
+            self.assertEqual(fx["status"], "pending")
+            self.assertIsNone(fx["deviation_usdt"])
+        action = cycle.apply(replace(frame, cursor=3, at_ns=T+3, fx_exposures=(fill, mark)))
+        self.assertEqual(action.profit["actual_fx"]["deviation_usdt"], ["3", "1"])
+
     def test_complete_entry_is_one_group_with_independent_leg_price_and_quantity(self):
         cycle = c.Cycle(plan())
         action = cycle.start(cursor=1, at_ns=T)

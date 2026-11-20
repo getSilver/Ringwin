@@ -222,10 +222,13 @@ class EvaluationInputs:
             raise b.Rejected("data_skew")
         for o in legs:
             row = bindings.get(o.identity)
-            if row is not None and str(row.get("settlement_asset", row["quote_asset"])) != str(row["quote_asset"]):
-                # The existing evaluator denominates linear PnL in quote atoms.
-                # A fee FX quote cannot convert the whole quanto position.
+            if (row is not None and o.rules.settlement is None
+                    and str(row.get("settlement_asset", row["quote_asset"])) != str(row["quote_asset"])):
                 raise b.Rejected("settlement_conversion_required")
+        if any(o.rules.settlement is not None for o in legs):
+            units = tuple(o.rules.settlement or (o.rules.quote_asset, *o.rules.quote_unit) for o in legs)
+            if case.get("settlement_units") != units:
+                raise b.Rejected("settlement_units_missing_or_changed")
         shift = at-old.at_ns
         policy = replace(old, at_ns=at, prediction_end_ns=old.prediction_end_ns+shift,
             risk_deadline_ns=old.risk_deadline_ns+shift, reference_exit_ns=old.reference_exit_ns+shift)
@@ -235,6 +238,7 @@ class EvaluationInputs:
         v._validate_scenarios(case["scenarios"])
         occupied, end = 0, min(package_end, case["funds_valid_until_ns"], case["risk_valid_until_ns"],
                                case["calibration"].valid_until_ns)
+        target = e.strategy_units(tuple(o.rules for o in legs), policy.base_asset, policy.quote_asset)
         executions = []
         for i, o in enumerate(legs):
             rule, fee, lots = o.rules, case["entry_fees"][i], case["target_lots"][i]
@@ -271,8 +275,7 @@ class EvaluationInputs:
             balance, entry_cost = case["fee_balances"][i], Fraction(0)
             e.integer(balance)
             for ticks, count in full_fills:
-                valuation = (ticks*rule.tick_quote_atoms_per_base_atom if fee.fee_asset == rule.base_asset
-                    else Fraction(1) if fee.fee_asset == rule.quote_asset else case["fee_valuations"][i])
+                valuation = rule.fee_valuation(fee.fee_asset, ticks, case["fee_valuations"][i])
                 paid = e.estimate_fee(rule, fee, ticks=ticks, lots=count,
                     role="maker" if maker == i and mode == "maker_taker" else "taker", now_ns=at,
                     quote_atoms_per_fee_atom=valuation, available_fee_atoms=balance)
@@ -282,10 +285,11 @@ class EvaluationInputs:
             funding_reserve = max((sum(cost.atoms for cost in scenario.markets[-1].funding_costs if cost.leg == i)
                 for scenario in case["scenarios"] if scenario.markets), default=0)
             funding_reserve = e.ceil_atoms(funding_reserve*max(Fraction(1), case["bounds"].max_price_factor))
-            needed = e.ceil_atoms(e.exact(notional*factor+max(Fraction(0), entry_cost)))+case["capital_buffers"][i]+funding_reserve
+            needed = (e.ceil_atoms((notional*factor+max(Fraction(0), entry_cost))*rule.settlement_factor)
+                      +case["capital_buffers"][i]+funding_reserve)
             if needed > case["funds_available"][i]:
                 raise LegUnavailable(i, "insufficient_funds")
-            occupied += needed
+            occupied += needed*e.quote_factor(rule, target)/rule.settlement_factor
         scenarios = []
         for source in case["scenarios"]:
             entry = source.entry
@@ -298,7 +302,8 @@ class EvaluationInputs:
             projected, balances = [], list(case["fee_balances"])
             for i, original in enumerate(entry.legs):
                 o, fee = legs[i], case["entry_fees"][i]
-                if (original.account, original.rules, original.kind) != (o.account, o.rules, o.kind):
+                if ((original.account, original.kind) != (o.account, o.kind)
+                        or not e.same_valuation_rules(original.rules, o.rules)):
                     raise b.Rejected("rules_changed")
                 if original.gross_lots > case["target_lots"][i]:
                     raise b.Rejected("entry_quantity_scope")
@@ -317,8 +322,7 @@ class EvaluationInputs:
                         remaining -= count
                 trades, balance = [], case["fee_balances"][i]
                 for index, (ticks, count) in enumerate(fills):
-                    valuation = (ticks*o.rules.tick_quote_atoms_per_base_atom if fee.fee_asset == o.rules.base_asset
-                                 else Fraction(1) if fee.fee_asset == o.rules.quote_asset else case["fee_valuations"][i])
+                    valuation = o.rules.fee_valuation(fee.fee_asset, ticks, case["fee_valuations"][i])
                     paid = e.estimate_fee(o.rules, fee, ticks=ticks, lots=count,
                         role="maker" if maker == i and mode == "maker_taker" else "taker", now_ns=at,
                         quote_atoms_per_fee_atom=valuation, available_fee_atoms=balance)
@@ -326,7 +330,7 @@ class EvaluationInputs:
                         balance -= paid.asset_atoms
                     trades.append(v.Trade("scan:"+source.identity+":"+str(i)+":"+str(index), ticks, count,
                                           paid, at+entry.holding_at_ns-old.at_ns))
-                projected.append(replace(original, entries=tuple(trades)))
+                projected.append(replace(original, rules=o.rules, entries=tuple(trades)))
                 balances[i] = balance
             current = replace(entry, legs=tuple(projected), holding_at_ns=entry.holding_at_ns+shift,
                               model_point=point if entry.state == "matched" else None)
@@ -350,4 +354,4 @@ class EvaluationInputs:
                 scenarios.extend(v._condition(row, v.Context(current, market, policy.absolute_minimum_atoms, policy),
                                               estimator.forecast))
         return s.Plan(pair, maker, tuple(scenarios), policy, estimator, case["calibration"],
-                      case["simulation_error"], case["limits"], end, max(1, occupied))
+                      case["simulation_error"], case["limits"], end, max(1, e.ceil_atoms(occupied)))

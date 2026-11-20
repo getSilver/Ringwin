@@ -4,7 +4,7 @@ Callers project the original cycle's complete order/economic facts, including co
 history. Output is a request, never a reservation, command or permission to send.
 Persistence and live Host/Venue wiring are separate acceptance work.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import SimpleNamespace
 import struct
 
@@ -88,10 +88,10 @@ class Plan:
                 or a.kind == z.kind == "spot"):
             raise b.Rejected("pair_scope")
         for leg in self.legs:
-            if ((leg.rules.exposure_asset, leg.rules.quote_asset) != (self.policy.base_asset, self.policy.quote_asset)
-                    or e.exact(leg.target_lots*leg.rules.base_atoms_per_lot) < self.policy.original_base
+            if (e.exact(leg.target_lots*leg.rules.base_atoms_per_lot) < self.policy.original_base
                     or leg.kind == "linear" and leg.target_lots*leg.rules.base_atoms_per_lot != self.policy.original_base):
                 raise b.Rejected("quantity_scope")
+        e.strategy_units(tuple(leg.rules for leg in self.legs), self.policy.base_asset, self.policy.quote_asset)
         for ticks in (*_pair(self.entry_limits), *self.policy.normal_limits, *self.policy.risk_limits):
             if e.integer(ticks, 1) >= 1 << 63:
                 raise b.Rejected("wire_price")
@@ -182,6 +182,7 @@ class Facts:
     closed_ref: object
     residual_refs: tuple
     possible_base: tuple = ()
+    fx_exposures: tuple = ()
 
     def __post_init__(self):
         b.uint(self.cursor, 1)
@@ -207,6 +208,11 @@ class Facts:
             raise b.Rejected("market_time")
         if self.economic_entry is not None and not isinstance(self.economic_entry, v.Entry):
             raise b.Rejected("economic_entry")
+        if type(self.fx_exposures) is not tuple or any(
+                not isinstance(row, e.FxExposure) or row.at_ns > self.at_ns for row in e.bounded(self.fx_exposures)):
+            raise b.Rejected("fx_exposure_cutoff")
+        if self.fx_exposures:
+            e.actual_fx_report(self.fx_exposures)
         for flag in (self.opening_allowed, self.reducing_allowed, self.model_warning):
             if type(flag) is not bool:
                 raise b.Rejected("permission_evidence")
@@ -245,6 +251,7 @@ class Action:
     reconcile: bool = False
     escalate: bool = False
     cancels: tuple = ()
+    profit: object = None
 
     def encode(self, batch, session, *, activation):
         """Use the existing Host output codec; the core still validates admission.
@@ -430,7 +437,26 @@ class Cycle:
             self._exit(reason, facts.cursor)
         return None
 
+    def profit_report(self, facts):
+        """Actual settled economics and FX at one authoritative cycle cutoff."""
+        if not isinstance(facts, Facts) or facts.cycle_ref != self.cycle_ref:
+            raise b.Rejected("cycle_fact_scope")
+        entry = facts.economic_entry
+        return dict(cycle_ref=facts.cycle_ref, economic_ref=facts.economic_ref, cursor=str(facts.cursor),
+                    quote_asset=str(self.plan.policy.quote_asset),
+                    settled_parity_atoms=None if entry is None else str(entry.r_done_atoms),
+                    actual_fx=e.actual_fx_report(facts.fx_exposures))
+
     def apply(self, facts, *, estimator=None, limits=None):
+        return self._report_action(facts, self._step(facts, estimator=estimator, limits=limits))
+
+    def _report_action(self, facts, action):
+        if facts.cycle_ref == self.cycle_ref and (facts.fx_exposures or any(
+                leg.rules.settlement_unit and leg.rules.settlement_unit[0] == "USDC" for leg in self.plan.legs)):
+            return replace(action, profit=self.profit_report(facts))
+        return action
+
+    def _step(self, facts, *, estimator=None, limits=None):
         observed = self._observe(facts)
         if observed is not None:
             return observed

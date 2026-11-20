@@ -32,6 +32,14 @@ fn configurePairAssetsForScenario(owner: *demo.Owner, expanded_economics: bool) 
 }
 
 test "scanner pair approval validates identities and survives durable recovery" {
+    try exercisePairApproval(false);
+}
+
+test "scanner mixed USDT USDC pair approval preserves native accounts through recovery" {
+    try exercisePairApproval(true);
+}
+
+fn exercisePairApproval(mixed: bool) !void {
     const memory = try std.testing.allocator.create(durable.MemoryAdapter);
     defer std.testing.allocator.destroy(memory);
     memory.* = .init();
@@ -39,7 +47,7 @@ test "scanner pair approval validates identities and survives durable recovery" 
     const owner = try std.testing.allocator.create(demo.Owner);
     defer std.testing.allocator.destroy(owner);
     try demo.Owner.bootstrapInto(owner, memory.interface(), undefined, .{ .domain = .decision_log, .id = 91 });
-    try existing.initializePythonOwner(owner);
+    if (mixed) try existing.initializeMixedStablecoinOwner(owner) else try existing.initializePythonOwner(owner);
     // The legacy fixture leaves linear exposure assets unspecified. Register
     // their real canonical base before approving an economic pairing.
     try configurePairAssets(owner);
@@ -80,6 +88,9 @@ test "scanner pair approval validates identities and survives durable recovery" 
     defer std.testing.allocator.destroy(recovered);
     try demo.Owner.recoverInto(recovered, memory.interface(), undefined, owner.stream);
     try std.testing.expectEqual(@as(u64, 2), recovered.shard.pair_authorizations.version);
+    try std.testing.expectEqual(@as(u64, 1), recovered.shard.accountState(20).?.economic_projection.settlement_asset);
+    try std.testing.expectEqual(@as(u64, if (mixed) 3 else 1), recovered.shard.accountState(30).?.economic_projection.settlement_asset);
+    try std.testing.expectEqual(@as(i128, 600), recovered.shard.accountState(30).?.economic_projection.portfolio.settlement_balance_atoms);
     try std.testing.expectEqualSlices(u8, &owner.shard.canonicalStateDigest(), &recovered.shard.canonicalStateDigest());
 }
 

@@ -59,6 +59,8 @@ def thaw(value, depth=0):
             optional = {"fee_version"}
         if cls is arbitrage_scanner.Observation:
             optional = {"market_source", "market_error", "registered_assets"}
+        if cls is arbitrage_economics.InstrumentRules:
+            optional = {"quote_unit", "settlement", "registered_base"}
         expected = {f.name for f in fields(cls)} if cls is not None else set()
         if cls is None or not expected - optional <= names <= expected:
             raise ValueError("scanner archive type/fields")

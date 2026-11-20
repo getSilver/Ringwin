@@ -12,7 +12,7 @@ import json
 import math
 from typing import Optional, Tuple
 
-from strategies.cross_venue.arbitrage_economics import InstrumentRules, exact
+from strategies.cross_venue.arbitrage_economics import InstrumentRules, compatible_exposure, compatible_quotes, exact, quote_factor
 from strategy_host import decode_depth_snapshot, RecoveryNeeded
 from strategy_state import encode_number
 
@@ -251,8 +251,8 @@ class GridSampler:
         if any(not isinstance(r, InstrumentRules) for r in (first_rules, second_rules)):
             raise Rejected("missing_rules")
         if (first_rules.instrument == second_rules.instrument
-                or first_rules.exposure_asset != second_rules.exposure_asset
-                or first_rules.quote_asset != second_rules.quote_asset):
+                or not compatible_exposure(first_rules, second_rules)
+                or not compatible_quotes(first_rules, second_rules)):
             raise Rejected("pair_asset_scope")
         self.rules = (first_rules, second_rules)
         self.version = uint(version, 1)
@@ -324,7 +324,7 @@ class GridSampler:
         value = None
         if not reason:
             mids = [exact(Fraction(entry[0]["bids"][0][0]+entry[0]["asks"][0][0], 2)
-                          * r.tick_quote_atoms_per_base_atom)
+                          * r.tick_quote_atoms_per_base_atom * quote_factor(r, self.rules[0]))
                     for entry, r in zip(self._books, self.rules)]
             value = finite(math.log(float(exact(mids[1]/mids[0]))))
         point = Point(grid_ns, cursor, value, reason, broken, tuple(evidence))

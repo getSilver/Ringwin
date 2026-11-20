@@ -142,7 +142,7 @@ class Entry:
             raise b.Rejected("flat_position")
         if self.legs:
             a, z = self.legs
-            if (a.rules.exposure_asset != z.rules.exposure_asset or a.rules.quote_asset != z.rules.quote_asset
+            if (not e.compatible_exposure(a.rules, z.rules) or not e.compatible_quotes(a.rules, z.rules)
                     or a.rules.instrument == z.rules.instrument or a.direction != -z.direction
                     or a.account == z.account):
                 raise b.Rejected("pair_asset_or_direction")
@@ -318,7 +318,7 @@ class ExitValue:
     legs: Tuple[Optional[e.CycleValue], ...]
 
 
-def _close_leg(leg, market, index, policy, normal):
+def _close_leg(leg, market, index, policy, normal, usdc_assets=None):
     book = decode_depth_snapshot(market.books[index])
     side = "sell" if leg.direction == 1 else "buy"
     lots = leg.gross_lots if leg.kind == "linear" else e.floor_atoms(leg.base_atoms/leg.rules.base_atoms_per_lot)
@@ -329,8 +329,7 @@ def _close_leg(leg, market, index, policy, normal):
                         now_ns=market.at_ns, max_age_ns=policy.max_book_age_ns)
         fees, available = [], market.fee_balances[index]
         for ticks, filled in swept.fills:
-            valuation = (ticks*leg.rules.tick_quote_atoms_per_base_atom if leg.exit_fee.fee_asset == leg.rules.base_asset
-                         else Fraction(1) if leg.exit_fee.fee_asset == leg.rules.quote_asset else market.fee_valuations[index])
+            valuation = leg.rules.fee_valuation(leg.exit_fee.fee_asset, ticks, market.fee_valuations[index])
             fee = e.estimate_fee(leg.rules, leg.exit_fee, ticks=ticks, lots=filled, role="taker",
                                  now_ns=market.at_ns, quote_atoms_per_fee_atom=valuation,
                                  available_fee_atoms=available)
@@ -376,16 +375,25 @@ def _close_leg(leg, market, index, policy, normal):
         legal_cleanup = remaining >= cleanup_base
         closed = remaining <= policy.residual_cap_base and not legal_cleanup
         if not closed:
-            return None, remaining, False
+            return None, remaining, False, None
         residual_value = e.exact(remaining*book["bids"][0][0]*leg.rules.tick_quote_atoms_per_base_atom*policy.residual_haircut)
         value = e.spot_liquidation(leg.entry_notional, exit_quote, residual_value, fees)
+        gross = exit_quote - leg.entry_notional
     else:
         closed = remaining_lots == 0
         if not closed:
-            return None, remaining, False
-        value = e.evaluate_cycle(e.exact(leg.direction*(exit_quote-leg.entry_notional)),
+            return None, remaining, False, None
+        gross = leg.direction*(exit_quote-leg.entry_notional)
+        value = e.evaluate_cycle(e.exact(gross),
                                  tuple(e.Cost("fee:"+str(i), fee.quote_atoms, "expense") for i, fee in enumerate(fees)))
-    return value, remaining, closed
+    usdc_units = Fraction(0)
+    settlement = leg.rules.settlement_unit
+    if settlement and settlement[0] == "USDC":
+        usdc_units = gross / 10**leg.rules.quote_unit[1]
+    if usdc_assets:
+        usdc_units -= sum(Fraction(fee.asset_atoms, 10**usdc_assets[fee.asset])
+                          for fee in fees if fee.asset in usdc_assets)
+    return value, remaining, closed, usdc_units
 
 
 def value_exit(entry, market, policy, *, normal):
@@ -394,8 +402,8 @@ def value_exit(entry, market, policy, *, normal):
         raise b.Rejected("economic_projection_input")
     if type(normal) is not bool:
         raise b.Rejected("exit_policy_kind")
-    if any(x.rules.exposure_asset != policy.base_asset or x.rules.quote_asset != policy.quote_asset for x in entry.legs):
-        raise b.Rejected("candidate_asset_scope")
+    if entry.legs:
+        e.strategy_units(tuple(x.rules for x in entry.legs), policy.base_asset, policy.quote_asset)
     if entry.state != "matched" or not market.qualified or market.unknown:
         return ExitValue(None, False, tuple(x.base_atoms for x in entry.legs), "unqualified_exit", ())
     if market.at_ns < entry.holding_at_ns:
@@ -403,7 +411,7 @@ def value_exit(entry, market, policy, *, normal):
     values, remaining, closed = [], [], True
     try:
         for index, leg in enumerate(entry.legs):
-            value, rest, complete = _close_leg(leg, market, index, policy, normal)
+            value, rest, complete, _ = _close_leg(leg, market, index, policy, normal)
             values.append(value)
             remaining.append(rest)
             closed &= complete
@@ -412,9 +420,26 @@ def value_exit(entry, market, policy, *, normal):
     references = {t.identity for leg in entry.legs for t in leg.entries} | {x.identity for x in entry.completed}
     if references & {x.identity for x in market.funding_costs}:
         raise b.Rejected("duplicate_economic_fact")
-    net = (e.floor_atoms(sum(x.net_atoms for x in values)+entry.r_done_atoms-sum(x.atoms for x in market.funding_costs))
-           if closed else None)
+    net = _exit_total(entry, values, market.funding_costs, policy) if closed else None
     return ExitValue(net, closed, tuple(remaining), "" if closed else "unclosed_exit", tuple(values))
+
+
+def _exit_total(entry, values, funding, policy):
+    rules = tuple(leg.rules for leg in entry.legs)
+    target = e.strategy_quote(rules, policy.quote_asset)
+    net = Fraction(entry.r_done_atoms)
+    for i, (rule, value) in enumerate(zip(rules, values)):
+        native = value.net_atoms*rule.settlement_factor - sum(x.atoms for x in funding if x.leg == i)
+        net += native*e.quote_factor(rule, target)/rule.settlement_factor
+    return e.floor_atoms(net)
+
+
+def _usdc_asset(rules):
+    if rules.settlement and rules.settlement[1] == "USDC":
+        return rules.settlement[0], rules.settlement[2]
+    if rules.quote_unit and rules.quote_unit[0] == "USDC":
+        return rules.quote_asset, rules.quote_unit[1]
+    return None
 
 
 def _entry_payload(entry):
@@ -428,7 +453,9 @@ def _entry_payload(entry):
           [leg.exit_fee.instrument, leg.exit_fee.rules_version, leg.exit_fee.fee_asset,
            _ratio(leg.exit_fee.taker_ppm), _ratio(leg.exit_fee.maker_ppm),
            leg.exit_fee.valid_from_ns, leg.exit_fee.valid_until_ns]]
-          + ([] if leg.rules.approved_base_pair is None else [list(leg.rules.approved_base_pair)]) for leg in entry.legs],
+          + ([] if leg.rules.approved_base_pair is None else [list(leg.rules.approved_base_pair)])
+          + ([] if leg.rules.quote_unit is None else [leg.rules.quote_unit, leg.rules.settlement])
+          + ([] if leg.rules.registered_base is None else [leg.rules.registered_base]) for leg in entry.legs],
         [[x.identity, x.net_atoms] for x in entry.completed], list(entry.unknown_refs),
         [[_ratio(a), _ratio(z)] for a, z in entry.possible_base],
         None if entry.model_point is None else [entry.model_point.grid_ns, entry.model_point.cursor,
@@ -464,8 +491,8 @@ class Context:
         if not isinstance(self.entry, Entry) or not isinstance(self.market, Market) or not isinstance(self.policy, Policy):
             raise b.Rejected("holding_context")
         e.integer(self.target_atoms, 1)
-        if any(x.rules.exposure_asset != self.policy.base_asset or x.rules.quote_asset != self.policy.quote_asset for x in self.entry.legs):
-            raise b.Rejected("candidate_asset_scope")
+        if self.entry.legs:
+            e.strategy_units(tuple(leg.rules for leg in self.entry.legs), self.policy.base_asset, self.policy.quote_asset)
         if self.market.at_ns < self.entry.holding_at_ns or self.market.at_ns < self.policy.at_ns:
             raise b.Rejected("holding_context_time")
 
@@ -662,17 +689,18 @@ def _condition(row, context, forecast):
         raise b.Rejected("missing_grid_model_observation")
     current_books = tuple(decode_depth_snapshot(x) for x in context.market.books)
     current_mids = tuple(_mid(book, leg.rules) for book, leg in zip(current_books, context.entry.legs))
-    current_s = b.finite(math.log(float(e.exact(current_mids[1]/current_mids[0]))))
+    factor = e.quote_factor(context.entry.legs[1].rules, context.entry.legs[0].rules)
+    current_s = b.finite(math.log(float(e.exact(current_mids[1]*factor/current_mids[0]))))
     for source in row.scenarios:
         if (source.entry.matched_base != context.entry.matched_base
-                or any(a.rules != z.rules or a.kind != z.kind or a.direction != z.direction or replace(a.exit_fee, valid_from_ns=0, valid_until_ns=1) != replace(z.exit_fee, valid_from_ns=0, valid_until_ns=1) or a.account != z.account
+                or any(not e.same_valuation_rules(a.rules, z.rules) or a.kind != z.kind or a.direction != z.direction or replace(a.exit_fee, valid_from_ns=0, valid_until_ns=1) != replace(z.exit_fee, valid_from_ns=0, valid_until_ns=1) or a.account != z.account
                        for a, z in zip(source.entry.legs, context.entry.legs))):
             raise b.Rejected("conditional_instrument_or_quantity_scope")
         first = source.markets[0]
         shift = context.market.at_ns-first.at_ns
         first_books = tuple(decode_depth_snapshot(x) for x in first.books)
         source_mids = tuple(_mid(book, leg.rules) for book, leg in zip(first_books, source.entry.legs))
-        source_s = b.finite(math.log(float(e.exact(source_mids[1]/source_mids[0]))))
+        source_s = b.finite(math.log(float(e.exact(source_mids[1]*factor/source_mids[0]))))
         factors = tuple(e.exact(a/z) for a, z in zip(current_mids, source_mids))
         if (any(not row.bounds.min_price_factor <= x <= row.bounds.max_price_factor for x in factors)
                 or abs(current_s-source_s) > row.bounds.max_log_spread_shift):
@@ -785,6 +813,7 @@ class PathResult:
     hold_probability: Optional[p.ProbabilityResult]
     unknown_refs: Tuple[str, ...]
     possible_remaining: Tuple[Tuple[Fraction, Fraction], ...] = ()
+    usdc_units: Optional[Fraction] = None
 
 
 def _market_at(scenario, at_ns):
@@ -821,28 +850,35 @@ def _execute_exit(scenario, trigger, target, reason, policy, holding_probability
                               tuple((Fraction(0), x) for x in remaining))
         arrivals.append(arrival)
     values, remaining, closed = [], [], True
+    usdc_units = Fraction(0)
+    usdc_assets = dict(unit for leg in scenario.entry.legs if (unit := _usdc_asset(leg.rules)))
     try:
         for leg_index, (leg, market) in enumerate(zip(scenario.entry.legs, arrivals)):
-            value, rest, complete = _close_leg(leg, market, leg_index, policy, triggered)
+            value, rest, complete, units = _close_leg(leg, market, leg_index, policy, triggered, usdc_assets)
             values.append(value)
             remaining.append(rest)
             closed &= complete
+            usdc_units += units or 0
     except ValueError as error:
         return PathResult(scenario.identity, scenario.weight, target, triggered, trigger.at_ns, None,
                           None, None, str(error), tuple(x.base_atoms for x in scenario.entry.legs), holding_probability, ())
     latest = max(arrivals, key=lambda x: x.at_ns)
     # Late-reported costs affect realized Y, never the earlier decision quote.
     applicable = tuple(x for x in scenario.markets[-1].funding_costs if x.at_ns <= arrivals[x.leg].at_ns)
-    funding = sum(x.atoms for x in applicable)
     closed_at = latest.at_ns
     if applicable:
         identities = {x.identity for x in applicable}
         known_at = next(x.at_ns for x in scenario.markets if identities <= {z.identity for z in x.funding_costs})
         closed_at = max(closed_at, known_at)
-    net = e.floor_atoms(sum(x.net_atoms for x in values)+scenario.entry.r_done_atoms-funding) if closed else None
+    net = _exit_total(scenario.entry, values, applicable, policy) if closed else None
+    for cost in applicable:
+        unit = scenario.entry.legs[cost.leg].rules.settlement_unit
+        if unit and unit[0] == "USDC":
+            usdc_units -= Fraction(cost.atoms, 10**unit[1])
     return PathResult(scenario.identity, scenario.weight, target, triggered, trigger.at_ns,
                       closed_at if closed else None, net, net >= target if closed and target is not None else None,
-                      reason if closed else "unclosed_exit", tuple(remaining), holding_probability, ())
+                      reason if closed else "unclosed_exit", tuple(remaining), holding_probability, (),
+                      usdc_units=e.exact(usdc_units) if closed and not scenario.entry.completed else None)
 
 
 def _raw_probability(paths):
@@ -884,11 +920,12 @@ def _simulation_weights(scenarios, simulation_error):
 def _simulate(scenario, policy, target, mode, estimator, work):
     work.consume(len(scenario.markets)+1)
     entry = scenario.entry
-    if any(x.rules.exposure_asset != policy.base_asset or x.rules.quote_asset != policy.quote_asset for x in entry.legs):
-        raise b.Rejected("candidate_asset_scope")
+    if entry.legs:
+        e.strategy_units(tuple(leg.rules for leg in entry.legs), policy.base_asset, policy.quote_asset)
     if entry.state == "flat":
         return PathResult(scenario.identity, scenario.weight, target, False, None, entry.holding_at_ns,
-                          entry.r_done_atoms, entry.r_done_atoms >= target if target is not None else None, "flat", (), None, ())
+                          entry.r_done_atoms, entry.r_done_atoms >= target if target is not None else None, "flat", (), None, (),
+                          usdc_units=None if entry.completed else Fraction(0))
     if entry.state == "unknown":
         return PathResult(scenario.identity, scenario.weight, target, None, None, None, None, None,
                           "reconciliation", tuple(z for _, z in entry.possible_base), None,

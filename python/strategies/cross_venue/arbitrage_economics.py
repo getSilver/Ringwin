@@ -1,14 +1,15 @@
-"""Exact, read-only cross-venue economics. Amounts are in one quote Asset's atoms.
+"""Exact, read-only cross-venue economics, with explicit native and strategy units.
 
 Inputs are admitted canonical facts, not venue messages. These functions neither
 own balances nor grant trading authority. No floats or implicit decimal contexts.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from fractions import Fraction
 from typing import Optional, Tuple
 
 MAX_INTEGER = (1 << 127) - 1
 MAX_ITEMS = 256
+STABLECOINS = ("USDT", "USDC")
 
 
 def exact(value):
@@ -118,6 +119,9 @@ class InstrumentRules:
     valid_until_ns: int
     # Same atomic unit only; approval belongs to the immutable configuration.
     approved_base_pair: Optional[Tuple[int, str]] = None
+    quote_unit: Optional[Tuple[str, int]] = None
+    settlement: Optional[Tuple[int, str, int]] = None
+    registered_base: Optional[Tuple[int, int]] = None
 
     def __post_init__(self):
         for value in (self.instrument, self.version, self.base_asset, self.quote_asset,
@@ -130,6 +134,23 @@ class InstrumentRules:
         integer(self.min_notional_atoms)
         integer(self.valid_from_ns)
         integer(self.valid_until_ns, self.valid_from_ns+1)
+        if self.quote_unit is not None:
+            validate_stablecoin_unit(self.quote_unit)
+        if self.registered_base is not None:
+            if type(self.registered_base) is not tuple or len(self.registered_base) != 2:
+                raise ValueError("registered_base_unit")
+            integer(self.registered_base[0], 1)
+            if integer(self.registered_base[1]) > 18:
+                raise ValueError("registered_base_unit")
+        if self.settlement is not None:
+            if type(self.settlement) is not tuple or len(self.settlement) != 3:
+                raise ValueError("settlement_unit")
+            asset, *unit = self.settlement
+            integer(asset, 1)
+            validate_stablecoin_unit(tuple(unit))
+            if (self.quote_unit is None or asset in (self.base_asset, self.quote_asset)
+                    or self.quote_unit[0] == unit[0]):
+                raise ValueError("settlement_conversion_required")
         if self.approved_base_pair is not None:
             pair = self.approved_base_pair
             if (type(pair) is not tuple or len(pair) != 2 or type(pair[0]) is not int
@@ -145,6 +166,163 @@ class InstrumentRules:
     def notional(self, ticks, lots):
         return exact(integer(ticks, 1)*integer(lots)*self.base_atoms_per_lot
                      * self.tick_quote_atoms_per_base_atom)
+
+    @property
+    def settlement_unit(self):
+        return self.quote_unit if self.settlement is None else self.settlement[1:]
+
+    @property
+    def settlement_factor(self):
+        return (Fraction(1) if self.settlement is None else
+                Fraction(10**self.settlement[2], 10**self.quote_unit[1]))
+
+    def fee_valuation(self, asset, ticks, supplied):
+        if asset == self.base_asset:
+            return ticks*self.tick_quote_atoms_per_base_atom
+        if asset == self.quote_asset:
+            return Fraction(1)
+        if self.settlement is not None and asset == self.settlement[0]:
+            return 1/self.settlement_factor
+        return supplied
+
+
+def validate_stablecoin_unit(unit):
+    if (type(unit) is not tuple or len(unit) != 2 or unit[0] not in STABLECOINS
+            or type(unit[1]) is not int or not 0 <= unit[1] <= 18):
+        raise ValueError("stablecoin_unit")
+
+
+def quote_factor(source, target):
+    """Multiply source quote atoms by this factor to get strategy quote atoms."""
+    if source.quote_asset == target.quote_asset:
+        if source.quote_unit and target.quote_unit and source.quote_unit != target.quote_unit:
+            raise ValueError("quote_asset_unit_conflict")
+        return Fraction(1)
+    if source.quote_unit is None or target.quote_unit is None:
+        raise ValueError("pair_quote_asset")
+    return Fraction(10**target.quote_unit[1], 10**source.quote_unit[1])
+
+
+def compatible_quotes(a, z):
+    try:
+        quote_factor(a, z)
+    except ValueError:
+        return False
+    return True
+
+
+def same_valuation_rules(a, z):
+    # Old packages did not bind a display unit for same-currency instruments.
+    if a.settlement is None and z.settlement is None:
+        if a.quote_unit is None or z.quote_unit is None:
+            a, z = replace(a, quote_unit=None), replace(z, quote_unit=None)
+        if a.registered_base is None or z.registered_base is None:
+            a, z = replace(a, registered_base=None), replace(z, registered_base=None)
+    return a == z
+
+
+def compatible_exposure(a, z):
+    if a.exposure_asset == z.exposure_asset:
+        return True
+    return (a.registered_base is not None and a.registered_base == z.registered_base
+            and a.quote_unit is not None and z.quote_unit is not None
+            and (a.quote_unit[0] != z.quote_unit[0]
+                 or a.settlement_unit and z.settlement_unit and a.settlement_unit[0] != z.settlement_unit[0]))
+
+
+def strategy_units(rules, base_asset, quote_asset):
+    if (not any(rule.exposure_asset == base_asset for rule in rules)
+            or any(not compatible_exposure(rule, rules[0]) for rule in rules)):
+        raise ValueError("candidate_asset_scope")
+    return strategy_quote(rules, quote_asset)
+
+
+def strategy_quote(rules, asset):
+    target = next((r for r in rules if r.quote_asset == asset), None)
+    if target is None or any(not compatible_quotes(r, target) for r in rules):
+        raise ValueError("candidate_asset_scope")
+    return target
+
+
+@dataclass(frozen=True)
+class FxRate:
+    usdt_per_usdc: Fraction
+    at_ns: int
+    source: str
+    market_at_ns: Optional[int] = None
+
+    def __post_init__(self):
+        positive(self.usdt_per_usdc)
+        integer(self.at_ns)
+        if self.market_at_ns is not None:
+            integer(self.market_at_ns)
+        if type(self.source) is not str or not 0 < len(self.source) <= 256:
+            raise ValueError("fx_source")
+
+    def display(self):
+        return dict(at_ns=str(self.at_ns if self.market_at_ns is None else self.market_at_ns), source=self.source,
+                    usdt_per_usdc=ratio(self.usdt_per_usdc))
+
+
+def ratio(value):
+    value = exact(value)
+    return [str(value.numerator), str(value.denominator)]
+
+
+def parity_deviation(usdc, rate):
+    return exact(exact(usdc) * (rate.usdt_per_usdc - 1))
+
+
+@dataclass(frozen=True)
+class FxExposure:
+    """One strategy-owned USDC cash flow and the signed holding after it."""
+    identity: str
+    at_ns: int
+    cash_flow_usdc: Fraction
+    held_usdc: Fraction
+    rate: Optional[FxRate]
+
+    def __post_init__(self):
+        if type(self.identity) is not str or not 0 < len(self.identity) <= 128:
+            raise ValueError("fx_exposure_identity")
+        integer(self.at_ns)
+        exact(self.cash_flow_usdc)
+        exact(self.held_usdc)
+        if self.rate is not None and (not isinstance(self.rate, FxRate) or self.rate.at_ns > self.at_ns):
+            raise ValueError("fx_rate_cutoff")
+
+
+def actual_fx_report(exposures):
+    """Recompute a cumulative report from canonical facts at the requested cutoff."""
+    records, seen = [], {}
+    previous, net = None, Fraction(0)
+    pending = not exposures
+    for row in bounded(exposures):
+        if not isinstance(row, FxExposure):
+            raise ValueError("fx_exposure")
+        if row.identity in seen:
+            if row != seen[row.identity]:
+                raise ValueError("fx_exposure_conflict")
+            continue
+        if previous is not None and row.at_ns < previous.at_ns:
+            raise ValueError("fx_exposure_order")
+        seen[row.identity] = row
+        flow = Fraction(0) if not row.cash_flow_usdc else (
+            parity_deviation(row.cash_flow_usdc, row.rate) if row.rate else None)
+        holding = Fraction(0)
+        if previous is not None and previous.held_usdc:
+            holding = (exact(previous.held_usdc * (row.rate.usdt_per_usdc - previous.rate.usdt_per_usdc))
+                       if row.rate and previous.rate else None)
+        pending |= flow is None or holding is None
+        net = exact(net + (flow or 0) + (holding or 0))
+        records.append(dict(identity=row.identity, at_ns=str(row.at_ns),
+                            cash_flow_usdc=ratio(row.cash_flow_usdc), held_usdc=ratio(row.held_usdc),
+                            rate=row.rate.display() if row.rate else None,
+                            cash_flow_usdt=None if flow is None else ratio(flow),
+                            holding_usdt=None if holding is None else ratio(holding)))
+        previous = row
+    return dict(status="pending" if pending else "available",
+                deviation_usdt=None if pending else ratio(net), records=records)
 
 
 @dataclass(frozen=True)

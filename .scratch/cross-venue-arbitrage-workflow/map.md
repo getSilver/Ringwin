@@ -52,6 +52,8 @@ Status: open
 
 [03](issues/03-pairing.md) 按核心登记资产匹配跨环境路线，为全部产品搭配生成两个方向并逐腿记录行情来源与缺项。覆盖容量由 [14](issues/14-coverage.md) 继续验证。
 
+[05](issues/05-stablecoin.md) 的扫描平价与核心混合结算币批准已通过定向验证。交易节点仍需接入并归档实际周期敞口与汇率证据。
+
 ## Not yet specified
 
 以分级负载测量确定持续覆盖规模和延迟目标。

@@ -278,6 +278,9 @@ class Cycle(c.Cycle):
         return super()._protected(facts, index, lots, reducing, limit)
 
     def apply(self, facts, *, quotes=(), estimator=None, limits=None):
+        return self._report_action(facts, self._step(facts, quotes=quotes, estimator=estimator, limits=limits))
+
+    def _step(self, facts, *, quotes=(), estimator=None, limits=None):
         observed = self._observe(facts)
         if observed is not None:
             return observed

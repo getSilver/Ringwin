@@ -5,6 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 from dataclasses import replace
+from fractions import Fraction
 import http.client
 import threading
 
@@ -12,6 +13,7 @@ import control_plane
 import control_plane_web
 
 from opportunity_scanner import scanner_console as c
+from strategies.cross_venue.arbitrage_economics import FxRate
 from test_arbitrage_scanner import fixture
 from test_arbitrage_evaluation import T
 
@@ -62,11 +64,15 @@ class ConsoleTests(unittest.TestCase):
             console, observations, plan, _ = self.make_console(directory, now)
             try:
                 run = console.start()
-                state = console.publish(run["session"], 1, observations, (plan,), at_ns=T)
-                self.assertEqual(state, console.publish(run["session"], 1, observations, (plan,), at_ns=T))
+                rate = FxRate(Fraction(998, 1000), T, "USDC-USDT spot")
+                state = console.publish(run["session"], 1, observations, (plan,), at_ns=T, fx_rate=rate)
+                self.assertEqual(state, console.publish(run["session"], 1, observations, (plan,), at_ns=T, fx_rate=rate))
+                with self.assertRaisesRegex(ValueError, "identity conflict"):
+                    console.publish(run["session"], 1, observations, (plan,), at_ns=T, fx_rate=replace(rate, source="other"))
                 with self.assertRaisesRegex(ValueError, "identity conflict"):
                     console.publish(run["session"], 1, observations, (), at_ns=T)
                 batch = console.history.query("batches")[0]["payload"]
+                self.assertIn("USDC-USDT spot", console.history.artifact(batch["evidence"][0]))
                 self.assertTrue(console.replay(batch["evidence"][0])["matches"])
                 now[0] = T+50
                 expired = console.view()
