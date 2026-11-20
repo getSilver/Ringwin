@@ -37,7 +37,6 @@ Status: open
 ## Frontier
 
 - [04 手动费率贯穿扫描和开仓复核](issues/04-fees.md)
-- [05 USDT/USDC 平价估值与汇差归因](issues/05-stablecoin.md)
 - [07 跨所策略以空交易名单启动](issues/07-empty-list.md)
 - [15 滚动归档并测出持续扫描容量](issues/15-capacity.md)
 
@@ -51,7 +50,7 @@ Status: open
 
 [03](issues/03-pairing.md) 按核心登记资产匹配跨环境路线，为全部产品搭配生成两个方向并逐腿记录行情来源与缺项。广域轮转和实际覆盖由 [14](issues/14-coverage.md) 验证。
 
-[05](issues/05-stablecoin.md) 的扫描平价与核心混合结算币批准已通过定向验证。交易节点仍需接入并归档实际周期敞口与汇率证据。
+[05](issues/05-stablecoin.md) 已完成扫描平价、核心混合结算币批准及实际周期汇差的离线验收。核心已提交账务和汇率引用可恢复重算。正式双 IOC 运行验收见 [11](issues/11-dual-ioc.md)。
 
 [07](issues/07-empty-list.md) 已通过空名单核心准入、持久恢复及存量敞口处置的离线验证。默认扫描启动器仍须接入策略实例权威连接，完成策略页验收。
 

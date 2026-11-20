@@ -10,7 +10,6 @@ import hashlib
 import copy
 import json
 import os
-import re
 from pathlib import Path
 import secrets
 import subprocess
@@ -20,6 +19,7 @@ import urllib.request
 from urllib.parse import urlsplit
 
 from strategies.cross_venue import arbitrage_economics as economics
+from strategies.cross_venue.arbitrage_fx_archive import read_fx_sample
 from opportunity_scanner.arbitrage_scanner import Observation, compatible_pairs, decode_depth_snapshot
 from opportunity_scanner.scanner_console import CanonicalSource, CatalogueEntry, ScannerConsole
 from opportunity_scanner.scanner_config import atomic_json, _object
@@ -374,23 +374,11 @@ class ScannerRuntime:
         return CatalogueEntry(row["venue"], int(row["observation_identity"]), row["product"], rules, row["environment"], row.get("specification"))
 
     def _fx_rate(self, at_ns):
-        try:
-            with (self.directory/"stablecoin-fx.json").open("rb") as stream:
-                raw = stream.read(2049)
-            if len(raw) > 2048:
-                return None
-            row = json.loads(raw, object_pairs_hook=_object)
-            if (type(row) is not dict or set(row) != {"at_ns", "source", "usdt_per_usdc"}
-                    or type(row["usdt_per_usdc"]) is not str
-                    or re.fullmatch(r"[0-9]{1,38}(?:[./][0-9]{1,38})?", row["usdt_per_usdc"]) is None
-                    or type(row["at_ns"]) is not str or re.fullmatch(r"[0-9]{1,20}", row["at_ns"]) is None):
-                return None
-            sampled = int(row["at_ns"])
-            age = self.utc_clock() - sampled
+        rate = read_fx_sample(self.directory/"stablecoin-fx.json")
+        if rate is not None:
+            age = self.utc_clock() - rate.at_ns
             if 0 <= age < self.console.max_age_ns and age <= at_ns:
-                return economics.FxRate(Fraction(row["usdt_per_usdc"]), at_ns-age, row["source"], sampled)
-        except (OSError, ValueError, TypeError, OverflowError, ZeroDivisionError, RecursionError):
-            return None
+                return replace(rate, at_ns=at_ns-age, market_at_ns=rate.at_ns)
         return None
 
     def _setting_adapter(self, setting):

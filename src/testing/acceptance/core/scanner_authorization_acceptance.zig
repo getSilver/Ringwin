@@ -113,7 +113,11 @@ test "scanner revoked pair preserves reducing cancel confirm create amendment" {
     try exercisePairMutation(.replacement_reduction);
 }
 
-fn exercisePairMutation(comptime scenario: enum { ordinary, partial, replacement, replacement_reduction }) !void {
+test "strategy FX projects committed mixed settlement cash after durable recovery" {
+    try exercisePairMutation(.stablecoin_fx);
+}
+
+fn exercisePairMutation(comptime scenario: enum { ordinary, partial, replacement, replacement_reduction, stablecoin_fx }) !void {
     const memory = try std.testing.allocator.create(durable.MemoryAdapter);
     defer std.testing.allocator.destroy(memory);
     memory.* = .init();
@@ -121,7 +125,7 @@ fn exercisePairMutation(comptime scenario: enum { ordinary, partial, replacement
     const owner = try std.testing.allocator.create(demo.Owner);
     defer std.testing.allocator.destroy(owner);
     try demo.Owner.bootstrapInto(owner, memory.interface(), undefined, .{ .domain = .decision_log, .id = 91 });
-    try existing.initializePythonOwner(owner);
+    if (scenario == .stablecoin_fx) try existing.initializeMixedStablecoinOwner(owner) else try existing.initializePythonOwner(owner);
     try configurePairAssetsForScenario(owner, false);
     var request: approval.Request = .{ .identity = 98765, .strategy = 9, .portfolio = 10, .activation = 1, .config_version = 1, .expected_version = 0, .legs = .{
         .{ .venue = 1, .environment = .simulation, .account = 20, .instrument = 101, .rules_version = 2 },
@@ -150,6 +154,7 @@ fn exercisePairMutation(comptime scenario: enum { ordinary, partial, replacement
     _ = try owner.apply(fixture.atGroup(46, .{ .identity = 11000, .payload = .{ .oms_intent_group = group } }));
     if (owner.shard.oms.order_count != 2) std.debug.print("scanner opening rejected: {s}\n", .{@tagName(owner.shard.last_reject_reason)});
     try std.testing.expectEqual(@as(u16, 2), owner.shard.oms.order_count);
+    if (scenario == .stablecoin_fx) return exerciseCommittedFx(owner, memory.interface());
     for ([_]u128{ 20, 30 }, 0..) |account, index| _ = try owner.apply(fixture.atGroup(47, .{ .identity = 12000 + index, .account_scope = account, .payload = .{ .oms_execution_report = .{ .report_id = 12000 + index, .order_id = index + 1, .revision = 1, .status = .accepted, .cumulative_quantity = 0, .remaining_quantity = 10000 } } }));
     if (scenario == .partial) _ = try owner.apply(fixture.atGroup(47, .{ .identity = 12500, .account_scope = 20, .payload = .{ .oms_execution_report = .{ .report_id = 12500, .order_id = 1, .revision = 1, .status = .partially_filled, .cumulative_quantity = 9000, .remaining_quantity = 1000 } } }));
     var amendment: trading.oms.IntentGroup = .{ .first_intent_sequence = 13000, .count = 1 };
@@ -271,6 +276,85 @@ fn exercisePairMutation(comptime scenario: enum { ordinary, partial, replacement
     try recovered.replayCommittedIngress(stream, .{ .ptr = recovered, .consume_fn = Sweep.consume });
     try recovered.checkpoint();
     try expectOpeningRejected(recovered, group, 14000, 55);
+}
+
+fn exerciseCommittedFx(owner: *demo.Owner, store: durable.Store) !void {
+    const fx = @import("../../../runtime/strategy_fx_projection.zig");
+    const allocator = std.testing.allocator;
+    const order = owner.shard.oms.orderById(2).?;
+    const at = fixture.atGroup(47, .{ .identity = 0, .payload = .recovery_completed }).core.source_time;
+    var fill = fixture.canonicalAt(47, 2, .{ .fill = .{
+        .identity = 71,
+        .order = order.id,
+        .client_order_id = order.client_order_id,
+        .venue_order = try trading.canonical.VenueOrderRef.init(21, "fx-order"),
+        .venue_trade = try trading.canonical.VenueTradeRef.init(21, "fx-fill"),
+        .instrument = 102,
+        .exchange_account = 30,
+        .side = .sell,
+        .quantity = .{ .instrument = 102, .rules_version = 2, .lots = 10000 },
+        .price = order.limit_price,
+        .fee = .{ .asset = 3, .atoms = 10 },
+        .liquidity = .taker,
+        .venue_fill_time_utc_ns = at,
+    } });
+    fill.venue.envelope.exchange_account = 30;
+    fill.venue.envelope.venue = 21;
+    _ = try owner.apply(fill);
+    _ = try owner.apply(fill);
+    const funding_at = at + 10 * std.time.ns_per_ms;
+    var funding = fixture.canonicalAt(48, 3, .{ .funding_settlement = .{
+        .identity = 72,
+        .exchange_account = 30,
+        .instrument = 102,
+        .rules_version = 2,
+        .venue_bill_id = 72,
+        .amount = .{ .asset = 3, .atoms = 1_000_000_010 },
+        .settlement_time_utc_ns = funding_at,
+    } });
+    funding.venue.envelope.exchange_account = 30;
+    funding.venue.envelope.venue = 21;
+    funding.venue.envelope.instrument = 102;
+    funding.venue.envelope.asset = 3;
+    _ = try owner.apply(funding);
+    var before = try fx.project(allocator, try owner.source(), &owner.decision_journal, 9, 11000);
+    defer before.deinit(allocator);
+    try std.testing.expect(before.complete);
+    try std.testing.expectEqual(@as(usize, 2), before.flows.items.len);
+    try std.testing.expectEqual(@as(i128, -10), before.flows.items[0].atoms);
+    try std.testing.expectEqual(@as(i128, 1_000_000_010), before.flows.items[1].atoms);
+    try owner.checkpoint();
+    const recovered = try allocator.create(demo.Owner);
+    defer allocator.destroy(recovered);
+    try demo.Owner.recoverInto(recovered, store, undefined, owner.stream);
+    var after = try fx.project(allocator, try recovered.source(), &recovered.decision_journal, 9, 11000);
+    defer after.deinit(allocator);
+    try std.testing.expectEqual(before.complete, after.complete);
+    try std.testing.expectEqualDeep(before.flows.items, after.flows.items);
+    const reject_write = struct {
+        fn commit(_: *anyopaque, _: trading.CorePayload) !void {
+            return error.UnexpectedFxWrite;
+        }
+    }.commit;
+    var authority: @import("../../../strategy/strategy_package_authority.zig").Authority = .{
+        .shard = &recovered.shard,
+        .journal = &recovered.decision_journal,
+        .context = recovered,
+        .commit = reject_write,
+        .strategy = 9,
+        .config_version = 1,
+        .schema_registry = 1,
+        .decision_domain = recovered.shard.operational_state.target_identity,
+        .fencing = recovered.shard.fencing_token,
+        .shard_id = 1,
+        .max_outputs = 2,
+    };
+    const wire = try authority.request(allocator, "{\"operation\":\"cycle_fx_projection\",\"strategy_identity\":\"00000000000000000000000000000009\",\"cycle_first_sequence\":11000}", &@splat(0), std.testing.io);
+    defer allocator.free(wire);
+    const expected = try after.json(allocator);
+    defer allocator.free(expected);
+    try std.testing.expectEqualStrings(expected, wire);
+    std.debug.print("\nstrategy_fx_projection={s}\n", .{wire});
 }
 
 fn expectOpeningRejected(owner: *demo.Owner, original: trading.oms.IntentGroup, sequence: u64, now: u64) !void {

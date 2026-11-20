@@ -94,6 +94,7 @@ pub const Authority = struct {
         config_json: []const u8 = "",
         pair_request: ?@import("../trading/pair_trading_authorization.zig").Request = null,
         scope_accounts: []const []const u8 = &.{},
+        cycle_first_sequence: u64 = 0,
         evidence: ?struct { host_generation: u64, cursor: u64, next_input_batch: u64 } = null,
     };
 
@@ -180,6 +181,13 @@ pub const Authority = struct {
         if (value.strategy_identity.len != 32 or try std.fmt.parseInt(u128, value.strategy_identity, 16) != self.strategy)
             return error.StrategyIdentityMismatch;
         const op = value.operation;
+        if (std.mem.eql(u8, op, "cycle_fx_projection")) {
+            var projected = try @import("../runtime/strategy_fx_projection.zig").project(
+                gpa, self.shard, self.journal, self.strategy, value.cycle_first_sequence,
+            );
+            defer projected.deinit(gpa);
+            return projected.json(gpa);
+        }
         if (std.mem.eql(u8, op, "pair_trading_list")) {
             const applies = self.shard.pairTradingScopeBound(self.strategy) or try self.crossesVenues(value.scope_accounts);
             return std.json.Stringify.valueAlloc(gpa, .{ .empty = if (applies) self.shard.pairTradingListEmpty(self.strategy) else null }, .{});

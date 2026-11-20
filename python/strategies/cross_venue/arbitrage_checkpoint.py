@@ -50,7 +50,8 @@ def _content(value, *, packaged):
                 if not (isinstance(v, b.InstrumentRules)
                         and f.name in ("approved_base_pair", "quote_unit", "settlement", "registered_base")
                         and getattr(v, f.name) is None)
-                and not (isinstance(v, cycle.Facts) and f.name == "fx_exposures" and not v.fx_exposures)]]
+                and not (isinstance(v, cycle.Facts) and (
+                    f.name == "fx_exposures" and not v.fx_exposures or f.name == "fx_complete" and v.fx_complete))]]
         if type(v) is float:
             return ["binary64_bits_v1", s.encode_number(v)]
         if type(v) is Fraction:

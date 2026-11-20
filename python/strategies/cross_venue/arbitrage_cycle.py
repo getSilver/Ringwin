@@ -183,6 +183,7 @@ class Facts:
     residual_refs: tuple
     possible_base: tuple = ()
     fx_exposures: tuple = ()
+    fx_complete: bool = True
 
     def __post_init__(self):
         b.uint(self.cursor, 1)
@@ -213,6 +214,8 @@ class Facts:
             raise b.Rejected("fx_exposure_cutoff")
         if self.fx_exposures:
             e.actual_fx_report(self.fx_exposures)
+        if type(self.fx_complete) is not bool:
+            raise b.Rejected("fx_exposure_coverage")
         for flag in (self.opening_allowed, self.reducing_allowed, self.model_warning):
             if type(flag) is not bool:
                 raise b.Rejected("permission_evidence")
@@ -388,9 +391,11 @@ class Cycle:
             raise b.Rejected("cycle_facts")
         if facts.cursor < self.cursor:
             return Action(self.plan, self.cursor, "stale_cursor")
+        control_facts = replace(facts, fx_exposures=(), fx_complete=True) if facts.fx_exposures or not facts.fx_complete else facts
         if facts.cursor == self.cursor:
             from strategies.cross_venue.arbitrage_checkpoint import matches_content
-            if not matches_content(facts, self.last_facts_digest):
+            if not (matches_content(control_facts, self.last_facts_digest)
+                    or matches_content(facts, self.last_facts_digest)):
                 raise b.Rejected("cursor_content_conflict")
             return Action(self.plan, self.cursor, "duplicate_cursor")
         if facts.at_ns < self.last_at_ns:
@@ -432,7 +437,7 @@ class Cycle:
         adjusted = e.exact(facts.nav_atoms-facts.external_allocation_atoms)
         self.cursor, self.last_at_ns = facts.cursor, facts.at_ns
         from strategies.cross_venue.arbitrage_checkpoint import content
-        self.last_facts_digest = content(facts)
+        self.last_facts_digest = content(control_facts)
         self.cycle_ref, self.reservation_ref = facts.cycle_ref, facts.reservation_ref
         self.last_economic_ref = facts.economic_ref
         for cause, ref in facts.risk_causes:
@@ -455,16 +460,19 @@ class Cycle:
         if not isinstance(facts, Facts) or facts.cycle_ref != self.cycle_ref:
             raise b.Rejected("cycle_fact_scope")
         entry = facts.economic_entry
+        fx = e.actual_fx_report(facts.fx_exposures)
+        if not facts.fx_complete:
+            fx.update(status="pending", deviation_usdt=None)
         return dict(cycle_ref=facts.cycle_ref, economic_ref=facts.economic_ref, cursor=str(facts.cursor),
                     quote_asset=str(self.plan.policy.quote_asset),
                     settled_parity_atoms=None if entry is None else str(entry.r_done_atoms),
-                    actual_fx=e.actual_fx_report(facts.fx_exposures))
+                    actual_fx=fx)
 
     def apply(self, facts, *, estimator=None, limits=None):
         return self._report_action(facts, self._step(facts, estimator=estimator, limits=limits))
 
     def _report_action(self, facts, action):
-        if facts.cycle_ref == self.cycle_ref and (facts.fx_exposures or any(
+        if facts.cycle_ref == self.cycle_ref and (not facts.fx_complete or facts.fx_exposures or any(
                 leg.rules.settlement_unit and leg.rules.settlement_unit[0] == "USDC" for leg in self.plan.legs)):
             return replace(action, profit=self.profit_report(facts))
         return action
