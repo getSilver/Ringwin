@@ -13,7 +13,7 @@ import strategy_host as host
 from strategies.cross_venue import arbitrage_checkpoint as recovery
 import test_arbitrage_host as fixture
 from strategies.cross_venue import arbitrage_cycle as cycle
-from test_arbitrage_cycle import plan as cycle_plan, facts, done, T, entry, market, estimator_for, path, LIMITS
+from test_arbitrage_cycle import plan as cycle_plan, facts, done, T, entry, market, estimator_for, path, LIMITS, with_price_units
 from test_arbitrage_evaluation import wire, MODEL, EXACT
 from test_arbitrage_probability import calibration
 from strategies.cross_venue import arbitrage_baseline as baseline
@@ -221,7 +221,9 @@ def core_runtime(container, definition=2, maker_mode=False, public_books=False):
                 if any(order.status == "unknown" for order in orders) else ())
         estimator = core_estimator(position, book, current.plan) if position is not None else None
         return current.apply(projection, estimator=estimator, limits=LIMITS)
-    return recovery.ComponentRuntime(container, core_templates(maker_mode, 2 if definition == 3 else 1), apply,
+    def apply_with_price_units(objects, record):
+        return with_price_units(apply(objects, record), base_scale=4)
+    return recovery.ComponentRuntime(container, core_templates(maker_mode, 2 if definition == 3 else 1), apply_with_price_units,
         expected={k: dict(fixture.meta(), definition=definition)[k] for k in ("schema_registry", "strategy", "definition", "config_version",
                                                "state_schema", "state_schema_version")})
 
@@ -433,6 +435,10 @@ class CycleRecoveryTests(unittest.TestCase):
         self.assertEqual(int.from_bytes(frame[108:124], "little"), 99)
         self.assertEqual(struct.unpack_from("<Q", frame, 136)[0], 3)
         _, restored = recovery.restore(frames[4][3][8:], fixture.components())
+        self.assertEqual(struct.unpack_from("<HII", frame, 98), (2, 2, 208))
+        for offset, intent in zip((200, 304), restored["cycle"].issued[-2:]):
+            self.assertEqual(struct.unpack_from("<qQ", frame, offset),
+                             (intent.limit_ticks, restored["cycle"].plan.legs[intent.leg].rules.version))
         self.assertEqual(restored["cycle"].first_exit, ("take_profit", 13))
         self.assertEqual(restored["cycle"].target_atoms, 40_000_000)
         self.assertEqual(restored["cycle"].next_sequence, 5)

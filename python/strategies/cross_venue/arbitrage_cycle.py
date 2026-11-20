@@ -269,12 +269,25 @@ class Action:
             raise b.Rejected("output_cursor")
         def args(intent):
             leg = self.plan.legs[intent.leg]
+            if type(intent.limit_ticks) is not int or not 0 < intent.limit_ticks < 1 << 63:
+                raise b.Rejected(f"leg_{intent.leg}_limit_price_ticks")
+            if leg.rules.version >= 1 << 32:
+                raise b.Rejected(f"leg_{intent.leg}_limit_price_rules_version")
+            if leg.rules.quote_unit is None or leg.rules.registered_base is None:
+                raise b.Rejected(f"leg_{intent.leg}_limit_price_tick_unit")
+            quote_scale = leg.rules.quote_unit[1]
+            base_scale = leg.rules.registered_base[1]
+            # Convert the atom ratio to the venue tick coefficient at scale 18.
+            tick = leg.rules.tick_quote_atoms_per_base_atom * 10**(18 + base_scale - quote_scale)
+            if tick.denominator != 1 or not 0 < tick.numerator < 1 << 127:
+                raise b.Rejected(f"leg_{intent.leg}_limit_price_tick_unit")
             direction = -leg.direction if intent.reducing else leg.direction
             return SimpleNamespace(strategy_identity=str(self.plan.strategy), activation_identity=str(activation),
                 config_version=self.plan.config_version, side="buy" if direction == 1 else "sell",
                 time_in_force=intent.time_in_force, portfolio_reduce_only=intent.reducing, intent_sequence=intent.sequence,
                 portfolio_identity=self.plan.portfolio, exchange_account_identity=leg.account,
-                instrument_identity=leg.rules.instrument, quantity=intent.lots, limit_price=intent.limit_ticks)
+                instrument_identity=leg.rules.instrument, quantity=intent.lots, limit_price=intent.limit_ticks,
+                limit_price_rules_version=leg.rules.version, limit_price_tick_coefficient=tick.numerator)
         first = args(self.intents[0])
         if len(self.intents) == 2:
             return host.output_group_frame(batch, first, session, self.intents[0].sequence, args(self.intents[1]))

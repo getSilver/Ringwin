@@ -409,3 +409,127 @@ test "06 dual IOC every dispatch intent and outcome append or commit boundary fa
         } else try expectRecoveredNoResend(&h);
     };
 }
+
+test "versioned Host limit price reaches both Gateway routes with each leg tick" {
+    const host = @import("../../../strategy/strategy_host_gateway.zig");
+    const RejectReason = @import("../../../trading/trading_shard_event.zig").RejectReason;
+    const allocator = std.testing.allocator;
+    const memory = try allocator.create(durable.MemoryAdapter);
+    defer allocator.destroy(memory);
+    memory.* = .init();
+    defer memory.deinit();
+    const owner = try allocator.create(demo.Owner);
+    defer allocator.destroy(owner);
+    try demo.Owner.bootstrapInto(owner, memory.interface(), undefined, .{ .domain = .decision_log, .id = 91 });
+    try accounts.initializePythonOwner(owner);
+
+    const accounts_to_send = [_]u128{ 20, 30 };
+    const instruments = [_]u128{ 101, 102 };
+    const tick_atoms = [_]i128{ 10_000, 25_000 };
+    const requested_ticks = [_]i64{ 10_000, 4_002 };
+    var orders: [2]host.OutputOrder = undefined;
+    for (accounts_to_send, instruments, tick_atoms, requested_ticks, 0..) |account, instrument, tick, ticks, i| {
+        const entry = owner.shard.pairInstrument(account, instrument).?;
+        var rules = entry.rules;
+        rules.version += 1;
+        rules.price_constraints.max_decimal_places = 2;
+        var margin = entry.margin;
+        margin.version += 1;
+        margin.price_tick_atoms = tick;
+        margin.venue_initial_margin_ppm = 100;
+        margin.internal_initial_margin_ppm = 200;
+        margin.internal_maintenance_margin_ppm = 50;
+        margin.fee_ppm = 0;
+        var profile = entry.capability.?;
+        profile.version += 1;
+        profile.rules_version = rules.version;
+        for ([_]trading.CorePayload{ .{ .instrument_rules_activated = rules }, .{ .margin_rules_activated = margin }, .{ .capability_profile_activation = profile } }) |payload|
+            _ = try owner.apply(fixture.atGroup(44, .{ .identity = owner.shard.authoritativeBarrier() + 1, .account_scope = account, .payload = payload }));
+        const price: canonical.InstrumentPrice = .{ .instrument = instrument, .rules_version = 2, .ticks = ticks };
+        var book = fixture.canonicalAt(44, 2, .{ .l2_book_snapshot = .{
+            .instrument = instrument,
+            .sequence = 2,
+            .best_bid = .{ .instrument = instrument, .rules_version = 2, .ticks = ticks - 1 },
+            .best_ask = price,
+            .best_bid_quantity = .{ .instrument = instrument, .rules_version = 2, .lots = 100_000 },
+            .best_ask_quantity = .{ .instrument = instrument, .rules_version = 2, .lots = 100_000 },
+        } });
+        book.venue.envelope.scope = .instrument;
+        book.venue.envelope.exchange_account = null;
+        book.venue.envelope.instrument = instrument;
+        book.venue.envelope.venue = profile.venue;
+        book.venue.envelope.identity.stream = 1000 + instrument;
+        book.venue.envelope.source_stream = @intCast(1000 + instrument);
+        _ = try owner.apply(book);
+        _ = try owner.apply(fixture.atGroup(44, .{
+            .identity = owner.shard.authoritativeBarrier() + 1,
+            .account_scope = account,
+            .payload = .{ .mark_price = .{ .instrument = instrument, .price_atoms = tick * ticks } },
+        }));
+        orders[i] = .{ .portfolio_identity = 10, .exchange_account_identity = account, .instrument_identity = instrument, .side = if (i == 0) .buy else .sell, .time_in_force = .immediate_or_cancel, .quantity = 1, .exact_limit_price = .{ .ticks = ticks, .rules_version = 2, .tick_coefficient = tick * 1_000_000_000_000 } };
+    }
+
+    const barrier = owner.shard.authoritativeBarrier();
+    const config: host.Config = .{
+        .schema_registry = trading.schema_registry_identity,
+        .decision_domain = 1,
+        .session = .{ .fencing = 1, .shard = 1, .generation = 1 },
+        .authorization = .{ .strategy_identity = 9, .config_version = 1, .activation_identity = 1, .activation_barrier = barrier },
+    };
+    _ = try owner.apply(fixture.atGroup(45, .{ .identity = barrier + 1, .payload = .{ .host_activated = .{
+        .strategy_identity = 9,
+        .config_version = 1,
+        .activation_identity = 1,
+        .activation_barrier = barrier,
+        .session = config.session,
+        .state_digest = owner.shard.canonicalStateDigest(),
+    } } }));
+    var ingress = try host.Gateway.init(config, &.{host.Subscription.of(9, &.{.mark_price})});
+    var frame: [host.max_group_frame_len]u8 = undefined;
+    for ([_]RejectReason{ .limit_price_rules_mismatch, .limit_price_tick_unit_mismatch, .limit_price_unrepresentable, .none }, 1..) |reason, sequence| {
+        var members = orders;
+        switch (reason) {
+            .limit_price_rules_mismatch => members[1].exact_limit_price.?.rules_version = 1,
+            .limit_price_tick_unit_mismatch => members[1].exact_limit_price.?.tick_coefficient = 10_000_000_000_000_000,
+            .limit_price_unrepresentable => members[1].exact_limit_price.?.ticks = 4_001,
+            .none => members[1].exact_limit_price.?.ticks = 4_002,
+            else => unreachable,
+        }
+        const cursor = owner.shard.authoritativeBarrier() + 1;
+        try ingress.recordPublished(sequence, cursor, 100);
+        if (sequence == 1) try ingress.activate(&owner.shard, &owner.decision_journal);
+        const first_intent = sequence * 2 - 1;
+        const decision = ingress.ingest(try host.encodeOutputGroupFrame(&frame, config, sequence, cursor, first_intent, &members), 100);
+        try std.testing.expect(decision == .accepted_group);
+        _ = try owner.apply(fixture.atGroup(45, .{ .identity = cursor, .payload = decision.corePayload() }));
+        try std.testing.expectEqual(reason, owner.shard.last_reject_reason);
+        if (reason != .none) {
+            try std.testing.expectEqual(@as(u16, 0), owner.shard.oms.command_history_count);
+            try std.testing.expectEqual(@as(u8, 0), owner.shard.cycles.count);
+            try std.testing.expectEqual(first_intent + 1, owner.shard.trace.events[owner.shard.trace.len - 1].identity);
+        }
+    }
+    try std.testing.expectEqual(@as(u16, 2), owner.shard.oms.command_history_count);
+
+    const gateway = try allocator.create(execution.Gateway);
+    defer allocator.destroy(gateway);
+    gateway.init();
+    try gateway.bootstrapDurableDispatch(memory.interface(), undefined, .{ .domain = .control, .id = 92 });
+    try gateway.pinDeploymentDigest(owner.shard.deployment.header.?.expected_digest);
+    var adapters = [_]Adapter{ .{ .account = 20 }, .{ .account = 30 } };
+    for (&adapters, [_]u64{ 1, 21 }) |*adapter, identity| try gateway.add(.{
+        .account = adapter.account,
+        .adapter = adapter.interface(),
+        .venue_identity = identity,
+        .capability = .{ .version = 2, .rules_version = 2, .config_version = 1, .session = 1 },
+        .supported_products = execution.productMask(.isolated_linear),
+    });
+    try observe(gateway, &owner.shard);
+    const now = owner.shard.oms.findCommand(1).?.authority.dispatch_deadline_monotonic_ns - 1;
+    for (&adapters, tick_atoms, [_]i128{ 100_000_000, 100_050_000 }, 1..) |*adapter, tick, expected, command| {
+        try std.testing.expectEqual(.accepted, try gateway.sendFromShard(&owner.shard, command, now));
+        const price = adapter.command.?.limit_price.?;
+        try std.testing.expectEqual(@as(u64, 2), price.rules_version);
+        try std.testing.expectEqual(expected, price.ticks * tick);
+    }
+}

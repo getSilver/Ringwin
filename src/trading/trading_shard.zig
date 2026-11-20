@@ -3173,6 +3173,10 @@ pub const TradingShard = struct {
     }
 
     fn rejectSubmittedIntent(self: *TradingShard, group: oms_module.IntentGroup, kind: EventKind, reason: RejectReason) !void {
+        try self.rejectSubmittedMember(group, kind, group.first_intent_sequence, reason);
+    }
+
+    fn rejectSubmittedMember(self: *TradingShard, group: oms_module.IntentGroup, kind: EventKind, sequence: u64, reason: RejectReason) !void {
         self.oms.rememberRejectedGroup(group) catch |err| switch (err) {
             error.IdentitySetFull => {
                 try self.rejectIntent(.strategy_intent_rejected, group.first_intent_sequence, .identity_capacity_exhausted);
@@ -3180,7 +3184,7 @@ pub const TradingShard = struct {
             },
             else => return err,
         };
-        try self.rejectIntent(kind, group.first_intent_sequence, reason);
+        try self.rejectIntent(kind, sequence, reason);
     }
 
     fn hostIntentIdentityToken(intent: host_gateway.OrderIntent) canonical.ClientOrderId {
@@ -3193,6 +3197,10 @@ pub const TradingShard = struct {
         hash.update(&u64_bytes);
         for ([_]u128{ intent.activation_identity, intent.portfolio_identity, intent.exchange_account_identity }) |identity| {
             std.mem.writeInt(u128, &u128_bytes, identity, .little);
+            hash.update(&u128_bytes);
+        }
+        if (intent.exact_limit_price) |exact| {
+            std.mem.writeInt(i128, &u128_bytes, exact.tick_coefficient, .little);
             hash.update(&u128_bytes);
         }
         var digest: [Sha256.digest_length]u8 = undefined;
@@ -3211,11 +3219,7 @@ pub const TradingShard = struct {
             .side = if (intent.side == .buy) .buy else .sell,
             .portfolio_reduce_only = intent.portfolio_reduce_only,
             .quantity = intent.quantity,
-            .limit_price = .{
-                .instrument = intent.instrument_identity,
-                .rules_version = 0,
-                .ticks = intent.limit_price_micros,
-            },
+            .limit_price = intent.originalPrice(),
             .order_type = switch (intent.order_type) {
                 .limit => .limit,
                 .post_only => .post_only,
@@ -3292,40 +3296,40 @@ pub const TradingShard = struct {
                 return null;
             }
         }
+        for (parsed.members[0..parsed.count]) |member| {
+            const exact = member.exact_limit_price orelse continue;
+            const entry = self.pairInstrument(member.exchange_account_identity, member.instrument_identity) orelse {
+                try self.rejectSubmittedMember(group, .strategy_intent_rejected, member.intent_sequence, .identity_mismatch);
+                return null;
+            };
+            if (self.hostExactPriceRejection(entry, exact)) |rejection| {
+                try self.rejectSubmittedMember(group, .strategy_intent_rejected, member.intent_sequence, rejection);
+                return null;
+            }
+        }
         return self.handleDomainGroup(input, group);
+    }
+
+    fn hostExactPriceRejection(self: *const TradingShard, entry: InstrumentEntry, price: host_gateway.ExactLimitPrice) ?RejectReason {
+        if (price.rules_version != entry.rules.version) return .limit_price_rules_mismatch;
+        const asset = self.asset_registry.get(entry.rules.settlement_asset) orelse return .limit_price_tick_unit_mismatch;
+        if (!std.meta.eql(entry.rules.price_constraints, canonical.PriceConstraints{}) and
+            entry.rules.price_atomic_scale != asset.definition.atomic_scale) return .limit_price_tick_unit_mismatch;
+        const tick: canonical.Decimal = .{ .coefficient = price.tick_coefficient, .scale = host_gateway.ExactLimitPrice.tick_scale };
+        const tick_atoms = tick.exactAtoms(asset.definition.atomic_scale) catch return .limit_price_tick_unit_mismatch;
+        if (!entry.margin_configured or tick_atoms != entry.margin.price_tick_atoms) return .limit_price_tick_unit_mismatch;
+        if (price.ticks > asset.definition.max_price_ticks) return .limit_price_unrepresentable;
+        entry.rules.price_constraints.validate(price.ticks, tick_atoms, asset.definition.atomic_scale) catch return .limit_price_unrepresentable;
+        return null;
     }
 
     fn submitOrderIntent(self: *TradingShard, intent: host_gateway.OrderIntent, input: CoreEvent, cursor_floor: ?u64) !?OrderCommand {
         const authority = self.strategyAuthority(intent.strategy_identity);
         const now_monotonic_ns = if (input.time_presence.monotonic) input.monotonic_time else 0;
         if (!self.genesisReadyForPortfolio(intent.portfolio_identity)) return error.GenesisIncomplete;
-        var group: oms_module.IntentGroup = .{ .first_intent_sequence = intent.intent_sequence, .count = 1 };
-        group.members[0] = .{
-            .intent_sequence = intent.intent_sequence,
-            .strategy_instance = intent.strategy_identity,
-            .portfolio = intent.portfolio_identity,
-            .operation = .place,
-            .instrument = intent.instrument_identity,
-            .side = if (intent.side == .buy) .buy else .sell,
-            .portfolio_reduce_only = intent.portfolio_reduce_only,
-            .quantity = intent.quantity,
-            .limit_price = .{
-                .instrument = intent.instrument_identity,
-                .rules_version = 0,
-                .ticks = intent.limit_price_micros,
-            },
-            .order_type = switch (intent.order_type) {
-                .limit => .limit,
-                .post_only => .post_only,
-            },
-            .time_in_force = switch (intent.time_in_force) {
-                .good_til_canceled => .good_til_canceled,
-                .immediate_or_cancel => .immediate_or_cancel,
-                .post_only => .post_only,
-            },
-        };
-        var original_group = group;
-        original_group.members[0].client_order_id = hostIntentIdentityToken(intent);
+        const original_group = originalHostIntentGroup(intent);
+        var group = original_group;
+        group.members[0].client_order_id = .{};
         switch (try self.oms.groupIdentityStatus(original_group)) {
             .duplicate => return null,
             .conflict => {
@@ -3368,9 +3372,8 @@ pub const TradingShard = struct {
             return null;
         }
         const instrument_config = self.instrumentEntry(intent.instrument_identity).?;
-        group.members[0].limit_price.rules_version = instrument_config.rules.version;
         if (!oms_module.exactOrderSpec(group.members[0].order_type, group.members[0].time_in_force, false) or
-            intent.quantity <= 0 or intent.limit_price_micros <= 0)
+            intent.quantity <= 0 or (intent.exact_limit_price == null and intent.limit_price_micros <= 0))
         {
             try self.rejectSubmittedIntent(original_group, .strategy_intent_rejected, .unsupported_order_spec);
             return null;
@@ -3382,15 +3385,27 @@ pub const TradingShard = struct {
             },
             else => {},
         };
-        group.members[0].limit_price.ticks = priceTicks(try self.abiPriceAtoms(intent.limit_price_micros, instrument_config.rules.settlement_asset), instrument_config.margin.price_tick_atoms) catch {
-            try self.rejectSubmittedIntent(original_group, .strategy_intent_rejected, .unsupported_order_spec);
-            return null;
+        const tick_atoms = instrument_config.margin.price_tick_atoms;
+        const price_atoms = if (intent.exact_limit_price) |exact| blk: {
+            if (self.hostExactPriceRejection(instrument_config, exact)) |rejection| {
+                try self.rejectSubmittedIntent(original_group, .strategy_intent_rejected, rejection);
+                return null;
+            }
+            break :blk try std.math.mul(i128, exact.ticks, tick_atoms);
+        } else blk: {
+            const atoms = try self.abiPriceAtoms(intent.limit_price_micros, instrument_config.rules.settlement_asset);
+            group.members[0].limit_price.ticks = priceTicks(atoms, tick_atoms) catch {
+                try self.rejectSubmittedIntent(original_group, .strategy_intent_rejected, .unsupported_order_spec);
+                return null;
+            };
+            group.members[0].limit_price.rules_version = instrument_config.rules.version;
+            break :blk atoms;
         };
         try self.trace.append(.order_intent, intent.intent_sequence);
 
         const requested_notional = try notionalAtomsScaled(
             intent.quantity,
-            try self.abiPriceAtoms(intent.limit_price_micros, instrument_config.rules.settlement_asset),
+            price_atoms,
             instrument_config.rules.quantity_denominator,
             instrument_config.rules.quantity_numerator,
         );
@@ -4863,7 +4878,7 @@ pub const TradingShard = struct {
                 for (qualified.members[0..qualified.count], 0..) |intent, index| if (intent.exchange_account == member.exchange_account) {
                     indices[subset.count] = index;
                     subset.members[subset.count] = intent;
-                    if (input.payload == .external_intent_group) {
+                    if (input.payload == .external_intent_group and intent.limit_price.rules_version == 0) {
                         const configured = self.instrumentEntry(intent.instrument) orelse return error.UnknownOmsInstrument;
                         subset.members[subset.count].limit_price.rules_version = configured.rules.version;
                         subset.members[subset.count].limit_price.ticks = try priceTicks(try self.abiPriceAtoms(std.math.cast(i64, intent.limit_price.ticks) orelse return error.Overflow, configured.rules.settlement_asset), configured.margin.price_tick_atoms);

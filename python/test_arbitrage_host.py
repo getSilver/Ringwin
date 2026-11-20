@@ -20,7 +20,7 @@ import strategy_host as host
 from test_arbitrage_checkpoint import meta
 from test_arbitrage_state_space import parameters
 from test_arbitrage_admission import signal_policy
-from test_arbitrage_cycle import plan, facts, done, T, entry, market, estimator_for, path, LIMITS
+from test_arbitrage_cycle import plan, facts, done, T, entry, market, estimator_for, path, LIMITS, with_price_units
 from test_arbitrage_evaluation import calibration, policy as evaluation_policy, EXACT
 
 
@@ -133,7 +133,9 @@ def apply_event(objects, record):
 
 
 def runtime_factory(container, version=1):
-    return recovery.ComponentRuntime(container, components(version), apply_event,
+    def apply_with_price_units(objects, record):
+        return with_price_units(apply_event(objects, record))
+    return recovery.ComponentRuntime(container, components(version), apply_with_price_units,
         expected=dict(schema_registry=host.SCHEMA_REGISTRY, strategy=9, definition=2,
                       config_version=version, state_schema=host.CROSS_VENUE_STATE_SCHEMA,
                       state_schema_version=2))

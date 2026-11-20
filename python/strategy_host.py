@@ -130,14 +130,16 @@ def output_frame(batch, args, session, intent_sequence=None, limit_price=None):
     schema_registry = int.from_bytes(batch[16:32], "little")
     strategy_identity = int(args.strategy_identity, 0)
     activation_identity = int(args.activation_identity, 0)
-    frame = bytearray(208)
+    rules_version = getattr(args, "limit_price_rules_version", None)
+    member_len = 80 if rules_version is None else 104
+    frame = bytearray(128 + member_len)
     frame[:4] = b"QSHO"
     struct.pack_into("<HHII", frame, 4, 1, 128, 0, len(frame))
     frame[16:32] = schema_registry.to_bytes(16, "little")
     struct.pack_into("<QIIQ", frame, 32, session[0], session[1], 0, session[2])
     struct.pack_into("<Q", frame, 56, source_batch)
     frame[64:80] = strategy_identity.to_bytes(16, "little")
-    struct.pack_into("<QQHHII", frame, 80, strategy_cursor, args.config_version, 1, 1, 1, 80)
+    struct.pack_into("<QQHHII", frame, 80, strategy_cursor, args.config_version, 1, 1, 1, member_len)
     frame[108:124] = activation_identity.to_bytes(16, "little")
     side = 1 if args.side == "buy" else 2
     time_in_force = {"gtc": 1, "ioc": 2, "post-only": 3}[args.time_in_force]
@@ -145,7 +147,7 @@ def output_frame(batch, args, session, intent_sequence=None, limit_price=None):
         "<HBBBBH",
         frame,
         128,
-        1,
+        1 if rules_version is None else 2,
         side,
         2 if args.time_in_force == "post-only" else 1,
         time_in_force,
@@ -157,6 +159,9 @@ def output_frame(batch, args, session, intent_sequence=None, limit_price=None):
     frame[160:176] = getattr(args, "exchange_account_identity", 2).to_bytes(16, "little")
     frame[176:192] = args.instrument_identity.to_bytes(16, "little")
     struct.pack_into("<qq", frame, 192, args.quantity, args.limit_price if limit_price is None else limit_price)
+    if rules_version is not None:
+        struct.pack_into("<Q", frame, 208, rules_version)
+        frame[216:232] = args.limit_price_tick_coefficient.to_bytes(16, "little", signed=True)
     struct.pack_into("<I", frame, 124, crc32c(frame[:124] + frame[128:]))
     return bytes(frame)
 
@@ -169,9 +174,11 @@ def output_group_frame(batch, args, session, first_sequence, second_args=None):
         second[32:48] = getattr(args, "second_exchange_account_identity", 4).to_bytes(16, "little")
         second[48:64] = (getattr(args, "second_instrument_identity", None) or args.instrument_identity).to_bytes(16, "little")
         second[2] = 2
+    if len(first) - 128 != len(second):
+        raise ValueError("mixed group price units")
     frame = bytearray(first + second)
     struct.pack_into("<I", frame, 12, len(frame))
-    struct.pack_into("<HII", frame, 98, 2, 2, 160)
+    struct.pack_into("<HII", frame, 98, 2, 2, 2 * len(second))
     struct.pack_into("<I", frame, 124, crc32c(frame[:124] + frame[128:]))
     return bytes(frame)
 

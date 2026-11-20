@@ -213,7 +213,12 @@ pub fn main(init: std.process.Init) !void {
     _ = args.next();
     const python = args.next() orelse "python";
     const script = args.next() orelse "python/strategy_host.py";
+    const selection = args.next();
     if (args.next() != null) return error.UnknownArgument;
+    if (selection) |value| {
+        if (!std.mem.eql(u8, value, "--public-depth-only")) return error.UnknownArgument;
+        return runCycleRecovery(init, python, .holding, .keep, .public_depth);
+    }
     try runCycleRecovery(init, python, .holding, .keep, .public_depth);
     try runCheck(init, python, script);
     try runPortableCheckpoint(init, python, script);
@@ -693,7 +698,12 @@ fn runCycleRecovery(init: std.process.Init, python: []const u8, phase: CyclePhas
         try dual.observe(dispatcher, &owner.shard);
         const dispatch_now = owner.shard.oms.findCommand(1).?.authority.dispatch_deadline_monotonic_ns - std.time.ns_per_s;
         for ([_]u64{ 1, 2 }) |command| try std.testing.expectEqual(@import("../../execution/venue_adapter.zig").SendResult.accepted, try dispatcher.sendFromShard(&owner.shard, command, dispatch_now));
-        for (adapters) |target| try std.testing.expectEqual(@as(usize, 1), target.sends);
+        for (adapters, [_]i128{ 100, 110 }) |target, ticks| {
+            try std.testing.expectEqual(@as(usize, 1), target.sends);
+            const price = target.command.?.limit_price.?;
+            try std.testing.expectEqual(@as(u64, 1), price.rules_version);
+            try std.testing.expectEqual(ticks, price.ticks);
+        }
     }
     for ([_]u128{ 20, 30 }, [_]u128{ 101, 102 }, [_]u64{ 1, 21 }, 0..) |account, instrument, venue, index| {
         const order = owner.shard.oms.orderById(index + 1).?;

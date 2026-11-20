@@ -831,6 +831,41 @@ test "qualified SPOT IOC intent crosses Gateway and cash risk before OrderComman
     const ingress = try std.testing.allocator.create(TradingShardHostIngress);
     defer std.testing.allocator.destroy(ingress);
     try TradingShardHostIngress.initHealthySpotFixtureForInto(ingress, authorization);
+    _ = try apply(&ingress.run, atGroup(15, .{ .identity = 1001, .payload = .{ .capability_profile_activation = .{
+        .exchange_account = 2,
+        .instrument = 3,
+        .venue = 1,
+        .environment = .simulation,
+        .product = .spot,
+        .version = 1,
+        .rules_version = 1,
+        .config_version = 1,
+        .adapter_session = 1,
+        .max_dispatch_age_ns = std.time.ns_per_s,
+        .supports_place = true,
+        .supports_cancel = true,
+        .supports_native_amend = false,
+        .supports_venue_reduce_only = false,
+        .supports_post_only = false,
+        .supports_market_protection = false,
+    } } }));
+    const available: canonical.AssetAmount = .{ .asset = 1, .atoms = 25_000_000_000 };
+    const zero: canonical.AssetAmount = .{ .asset = 1, .atoms = 0 };
+    var snapshot: canonical.AccountBootstrapSnapshot = .{
+        .identity = 1,
+        .exchange_account = 2,
+        .scope = .{ .balances_complete = true, .positions_complete = true, .margins_complete = true },
+        .source_stream = 2,
+        .source_sequence = 1,
+        .balance_count = 1,
+        .position_count = 0,
+        .margin_count = 0,
+    };
+    snapshot.balances[0] = .{ .asset = 1, .total = available, .available = available, .held = zero, .cash_balance = available, .liability = zero, .isolated_liability = zero, .cross_liability = zero };
+    var baseline = canonicalAt(15, 1, .{ .account_bootstrap_snapshot = snapshot });
+    baseline.venue.envelope.identity.stream = 2;
+    baseline.venue.envelope.source_stream = 2;
+    _ = try apply(&ingress.run, baseline);
     const cursor: u64 = @intCast(ingress.run.shard.authoritativeBarrier() + 1);
     var gateway = try host_gateway.Gateway.init(config, &subscriptions);
     try gateway.recordPublished(1, cursor, 100);
@@ -839,7 +874,7 @@ test "qualified SPOT IOC intent crosses Gateway and cash risk before OrderComman
     const frame = try host_gateway.encodeOutputOrderFrame(&frame_storage, config, 1, cursor, 7, .{
         .time_in_force = .immediate_or_cancel,
         .quantity = 5_000,
-        .limit_price_micros = 63_500_000_000,
+        .exact_limit_price = .{ .ticks = 63_500_000_000, .rules_version = 1, .tick_coefficient = 1_000_000_000_000 },
     });
     const decision = gateway.ingest(frame, 100);
     try std.testing.expect(decision == .accepted);
@@ -847,6 +882,34 @@ test "qualified SPOT IOC intent crosses Gateway and cash risk before OrderComman
     try std.testing.expectEqual(host_gateway.TimeInForce.immediate_or_cancel, command.time_in_force);
     try std.testing.expectEqual(@as(i128, 5_000), command.quantity.lots);
     try std.testing.expectEqual(@as(i128, 3_177_382), command.reservation.atoms);
+    try std.testing.expectEqual(@as(i128, 63_500_000_000), command.limit_price.ticks);
+    try std.testing.expectEqual(@as(u64, 1), command.limit_price.rules_version);
+    const execution = @import("../../execution/execution_gateway.zig");
+    const allocator = std.testing.allocator;
+    const memory = try allocator.create(durable.MemoryAdapter);
+    defer allocator.destroy(memory);
+    memory.* = .init();
+    defer memory.deinit();
+    const dispatcher = try allocator.create(execution.Gateway);
+    defer allocator.destroy(dispatcher);
+    dispatcher.init();
+    try dispatcher.bootstrapDurableDispatch(memory.interface(), undefined, .{ .domain = .control, .id = 92 });
+    var adapter: @import("../acceptance/core/dual_ioc_dispatch_acceptance.zig").Adapter = .{ .account = 2 };
+    try dispatcher.add(.{ .account = 2, .adapter = adapter.interface(), .venue_identity = 1, .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1 } });
+    const shard = &ingress.run.shard;
+    try dispatcher.observeAuthorityFromShard(shard, .{
+        .account = 2,
+        .effective_trading_authority = shard.operational_state.effectiveTradingAuthority(),
+        .reservation_identity = shard.oms.findCommand(command.command_id).?.reservation_identity,
+        .reservation = shard.oms.findCommand(command.command_id).?.reservation,
+        .primary_lease_expires_at_monotonic_ns = 100 * std.time.ns_per_s,
+        .fencing_token = 1,
+        .exchange_position = shard.currentNetExchangePosition(3).?,
+        .authority_barrier = shard.authoritativeBarrier(),
+    });
+    const now = shard.oms.findCommand(command.command_id).?.authority.dispatch_deadline_monotonic_ns - 1;
+    try std.testing.expectEqual(.accepted, try dispatcher.sendFromShard(shard, command.command_id, now));
+    try std.testing.expectEqual(command.limit_price, adapter.command.?.limit_price.?);
     try ingress.verifyReplay();
 }
 

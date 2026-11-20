@@ -24,6 +24,14 @@ def plan(**changes):
     return c.Plan(**values)
 
 
+def with_price_units(action, base_scale=0):
+    if action is None:
+        return None
+    legs = tuple(replace(leg, rules=replace(leg.rules, quote_unit=("USDT", 6),
+        registered_base=(leg.rules.base_asset, base_scale))) for leg in action.plan.legs)
+    return replace(action, plan=replace(action.plan, legs=legs))
+
+
 def facts(cursor=2, **changes):
     values = dict(cursor=cursor, at_ns=T+cursor, cycle_ref="core-cycle", reservation_ref="core-reservation",
                   admission="accepted", orders=(), positions=(F(0), F(0)), safe_reduce_lots=(0, 0),
@@ -78,13 +86,15 @@ class CycleTests(unittest.TestCase):
         batch = bytearray(96)
         struct.pack_into("<Q", batch, 72, 1)
         struct.pack_into("<Q", batch, 88, 1)
-        encoded = action.encode(bytes(batch), (1, 0, 1), activation=5)
-        self.assertEqual(len(encoded), 288)
-        self.assertEqual(struct.unpack_from("<HII", encoded, 98), (2, 2, 160))
-        self.assertEqual(struct.unpack_from("<qq", encoded, 192), (10, 1001))
-        self.assertEqual(struct.unpack_from("<qq", encoded, 272), (10, 1099))
+        encoded = with_price_units(action).encode(bytes(batch), (1, 0, 1), activation=5)
+        self.assertEqual(len(encoded), 336)
+        self.assertEqual(struct.unpack_from("<HII", encoded, 98), (2, 2, 208))
+        self.assertEqual(struct.unpack_from("<qqQ", encoded, 192), (10, 1001, 1))
+        self.assertEqual(struct.unpack_from("<qqQ", encoded, 296), (10, 1099, 1))
+        self.assertEqual(int.from_bytes(encoded[216:232], "little", signed=True), 10**17)
+        self.assertEqual(int.from_bytes(encoded[320:336], "little", signed=True), 10**17)
         self.assertEqual(encoded[130], 1)
-        self.assertEqual(encoded[210], 2)
+        self.assertEqual(encoded[234], 2)
         self.assertEqual(struct.unpack_from("<I", encoded, 124)[0], host.crc32c(encoded[:124]+encoded[128:]))
         self.assertEqual(cycle.start(cursor=1, at_ns=T).queries, (1, 2))
 
@@ -114,9 +124,27 @@ class CycleTests(unittest.TestCase):
         action = c.Cycle(frozen).start(cursor=1, at_ns=T)
         batch = bytearray(96)
         struct.pack_into("<Q", batch, 88, 1)
-        encoded = action.encode(bytes(batch), (1, 0, 1), activation=5)
+        encoded = with_price_units(action).encode(bytes(batch), (1, 0, 1), activation=5)
         self.assertEqual(struct.unpack_from("<q", encoded, 192)[0], 10)
-        self.assertEqual(struct.unpack_from("<q", encoded, 272)[0], 9)
+        self.assertEqual(struct.unpack_from("<q", encoded, 296)[0], 9)
+
+    def test_single_limit_price_carries_rules_version_and_reports_unencodable_ticks(self):
+        cycle = c.Cycle(plan())
+        cycle.start(cursor=1, at_ns=T)
+        frame = facts(orders=(done(1, 0, 10), done(2, 1, 6)), positions=(F(10), F(6)),
+                      safe_reduce_lots=(10, 6))
+        action = cycle.apply(frame)
+        batch = bytearray(96)
+        struct.pack_into("<Q", batch, 88, action.cursor)
+        encoded = with_price_units(action).encode(bytes(batch), (1, 0, 1), activation=5)
+        self.assertEqual(struct.unpack_from("<HII", encoded, 98), (1, 1, 104))
+        self.assertEqual(struct.unpack_from("<H", encoded, 128), (2,))
+        self.assertEqual(struct.unpack_from("<qQ", encoded, 200), (action.intents[0].limit_ticks, 1))
+        with self.assertRaisesRegex(ValueError, "leg_1_limit_price_tick_unit"):
+            action.encode(bytes(batch), (1, 0, 1), activation=5)
+        invalid = replace(action, intents=(replace(action.intents[0], limit_ticks=1 << 63),))
+        with self.assertRaisesRegex(ValueError, "leg_1_limit_price_ticks"):
+            with_price_units(invalid).encode(bytes(batch), (1, 0, 1), activation=5)
 
     def test_unknown_preserves_original_identities_and_blocks_even_profitable_exit(self):
         cycle = c.Cycle(plan())

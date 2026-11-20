@@ -336,6 +336,9 @@ pub const RejectReason = enum(u8) {
     admission_capacity_exhausted,
     invalid_scope,
     arithmetic_overflow,
+    limit_price_rules_mismatch,
+    limit_price_tick_unit_mismatch,
+    limit_price_unrepresentable,
 };
 
 pub const TimerRequest = struct {
@@ -892,7 +895,13 @@ pub fn encodeInput(destination: []u8, input: CoreEvent) !EncodedInput {
             try encoded.put(u8, @intFromEnum(value.time_in_force));
             try encoded.put(u8, @intFromBool(value.portfolio_reduce_only));
             try encoded.put(i64, value.quantity);
-            try encoded.put(i64, value.limit_price_micros);
+            const price = value.originalPrice();
+            try encoded.put(i64, @intCast(price.ticks));
+            if (value.exact_limit_price) |exact| {
+                if (exact.rules_version == 0 or value.limit_price_micros != 0) return error.InvalidIntentPriceRules;
+                try encoded.put(u64, exact.rules_version);
+                try encoded.put(i128, exact.tick_coefficient);
+            }
         },
         .strategy_intent_rejected => |value| {
             try encoded.put(u16, @intFromEnum(value.reason));
@@ -1339,35 +1348,48 @@ pub fn decodeInput(record: journal.Record) !CoreEvent {
             .quantity = try readInputValue(i64, record.payload, &offset),
             .limit_price_micros = try readInputValue(i64, record.payload, &offset),
         } },
-        .external_order_intent => .{ .external_order_intent = .{
-            .strategy_identity = try readInputValue(u128, record.payload, &offset),
-            .intent_sequence = try readInputValue(u64, record.payload, &offset),
-            .strategy_cursor = try readInputValue(u64, record.payload, &offset),
-            .config_version = try readInputValue(u64, record.payload, &offset),
-            .activation_identity = try readInputValue(u128, record.payload, &offset),
-            .portfolio_identity = try readInputValue(u128, record.payload, &offset),
-            .exchange_account_identity = try readInputValue(u128, record.payload, &offset),
-            .instrument_identity = try readInputValue(u128, record.payload, &offset),
-            .side = std.enums.fromInt(
-                host_gateway.Side,
-                try readInputValue(u8, record.payload, &offset),
-            ) orelse return error.UnknownIntentSide,
-            .order_type = std.enums.fromInt(
-                host_gateway.OrderType,
-                try readInputValue(u8, record.payload, &offset),
-            ) orelse return error.UnknownIntentOrderType,
-            .time_in_force = std.enums.fromInt(
-                host_gateway.TimeInForce,
-                try readInputValue(u8, record.payload, &offset),
-            ) orelse return error.UnknownIntentTimeInForce,
-            .portfolio_reduce_only = switch (try readInputValue(u8, record.payload, &offset)) {
-                0 => false,
-                1 => true,
-                else => return error.InvalidIntentBoolean,
-            },
-            .quantity = try readInputValue(i64, record.payload, &offset),
-            .limit_price_micros = try readInputValue(i64, record.payload, &offset),
-        } },
+        .external_order_intent => blk: {
+            var value: host_gateway.OrderIntent = .{
+                .strategy_identity = try readInputValue(u128, record.payload, &offset),
+                .intent_sequence = try readInputValue(u64, record.payload, &offset),
+                .strategy_cursor = try readInputValue(u64, record.payload, &offset),
+                .config_version = try readInputValue(u64, record.payload, &offset),
+                .activation_identity = try readInputValue(u128, record.payload, &offset),
+                .portfolio_identity = try readInputValue(u128, record.payload, &offset),
+                .exchange_account_identity = try readInputValue(u128, record.payload, &offset),
+                .instrument_identity = try readInputValue(u128, record.payload, &offset),
+                .side = std.enums.fromInt(
+                    host_gateway.Side,
+                    try readInputValue(u8, record.payload, &offset),
+                ) orelse return error.UnknownIntentSide,
+                .order_type = std.enums.fromInt(
+                    host_gateway.OrderType,
+                    try readInputValue(u8, record.payload, &offset),
+                ) orelse return error.UnknownIntentOrderType,
+                .time_in_force = std.enums.fromInt(
+                    host_gateway.TimeInForce,
+                    try readInputValue(u8, record.payload, &offset),
+                ) orelse return error.UnknownIntentTimeInForce,
+                .portfolio_reduce_only = switch (try readInputValue(u8, record.payload, &offset)) {
+                    0 => false,
+                    1 => true,
+                    else => return error.InvalidIntentBoolean,
+                },
+                .quantity = try readInputValue(i64, record.payload, &offset),
+                .limit_price_micros = try readInputValue(i64, record.payload, &offset),
+            };
+            if (offset != record.payload.len) {
+                const version = try readInputValue(u64, record.payload, &offset);
+                if (version == 0) return error.InvalidIntentPriceRules;
+                value.exact_limit_price = .{
+                    .ticks = value.limit_price_micros,
+                    .rules_version = version,
+                    .tick_coefficient = try readInputValue(i128, record.payload, &offset),
+                };
+                value.limit_price_micros = 0;
+            }
+            break :blk .{ .external_order_intent = value };
+        },
         .strategy_intent_rejected => .{ .strategy_intent_rejected = .{
             .reason = std.enums.fromInt(
                 host_gateway.RejectReason,

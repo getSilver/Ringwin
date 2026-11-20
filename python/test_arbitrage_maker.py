@@ -9,7 +9,7 @@ from strategies.cross_venue import arbitrage_cycle as c
 from strategies.cross_venue import arbitrage_evaluation as v
 from strategies.cross_venue import arbitrage_checkpoint as recovery
 from test_arbitrage_checkpoint import meta
-from test_arbitrage_cycle import plan, facts, done, T, entry, market, path, estimator_for, LIMITS
+from test_arbitrage_cycle import plan, facts, done, T, entry, market, path, estimator_for, LIMITS, with_price_units
 from test_arbitrage_evaluation import calibration, EXACT
 
 
@@ -69,7 +69,7 @@ class MakerTests(unittest.TestCase):
                          [(1, 0, 10, 1000, "post-only")])
         batch = bytearray(96)
         struct.pack_into("<Q", batch, 88, 1)
-        encoded = action.encode(bytes(batch), (1, 0, 1), activation=5)
+        encoded = with_price_units(action).encode(bytes(batch), (1, 0, 1), activation=5)
         self.assertEqual(tuple(encoded[131:133]), (2, 3))
         self.assertFalse(cycle.start(cursor=1, at_ns=T, market=market(0, 1100), quotes=(quote(),)).intents)
         with self.assertRaises(ValueError):

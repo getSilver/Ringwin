@@ -10,6 +10,36 @@ const batch_header_len: usize = 128;
 const event_header_len: usize = 64;
 const output_header_len: usize = 128;
 const order_intent_len: usize = 80;
+const versioned_order_intent_len = order_intent_len + @sizeOf(u64) + @sizeOf(i128);
+
+fn validMemberLength(len: usize) bool {
+    return len == order_intent_len or len == versioned_order_intent_len;
+}
+
+pub const ExactLimitPrice = struct {
+    ticks: i64,
+    rules_version: u64,
+    tick_coefficient: i128,
+
+    // The coefficient represents one venue tick in decimal price units.
+    pub const tick_scale = 18;
+};
+
+fn memberExactPrice(payload: []const u8) !?ExactLimitPrice {
+    switch (get(u16, payload, 0)) {
+        1 => if (payload.len == order_intent_len) return null,
+        2 => if (payload.len == versioned_order_intent_len) {
+            const version = get(u64, payload, order_intent_len);
+            if (version != 0) return .{
+                .ticks = get(i64, payload, 72),
+                .rules_version = version,
+                .tick_coefficient = get(i128, payload, order_intent_len + @sizeOf(u64)),
+            };
+        },
+        else => {},
+    }
+    return error.Malformed;
+}
 const max_events: usize = 64;
 const max_seen_intents: usize = 64;
 const stale_intent_ns: i64 = 100_000_000;
@@ -82,7 +112,8 @@ pub const OutputOrder = struct {
     time_in_force: TimeInForce = .good_til_canceled,
     portfolio_reduce_only: bool = false,
     quantity: i64,
-    limit_price_micros: i64,
+    limit_price_micros: i64 = 0,
+    exact_limit_price: ?ExactLimitPrice = null,
 };
 
 pub const OrderIntent = struct {
@@ -99,7 +130,18 @@ pub const OrderIntent = struct {
     time_in_force: TimeInForce,
     portfolio_reduce_only: bool,
     quantity: i64,
-    limit_price_micros: i64,
+    limit_price_micros: i64 = 0,
+    exact_limit_price: ?ExactLimitPrice = null,
+
+    pub fn originalPrice(self: OrderIntent) @import("../model/canonical_event.zig").InstrumentPrice {
+        // The legacy value remains raw so deduplication binds the original request.
+        const exact = self.exact_limit_price orelse return .{
+            .instrument = self.instrument_identity,
+            .rules_version = 0,
+            .ticks = self.limit_price_micros,
+        };
+        return .{ .instrument = self.instrument_identity, .rules_version = exact.rules_version, .ticks = exact.ticks };
+    }
 };
 
 pub const RejectReason = enum(u16) {
@@ -135,6 +177,7 @@ pub const Decision = union(enum) {
 };
 
 pub const max_group_members = 4;
+// Keep the persisted candidate capacity. A versioned group fits up to three members.
 pub const max_group_frame_len = output_header_len + max_group_members * order_intent_len;
 
 /// Owned, bounded bytes. The original envelope is journaled with the candidate;
@@ -161,12 +204,18 @@ pub fn decodeIntentGroup(frame: []const u8) !IntentGroup {
         !std.mem.eql(u8, frame[0..4], &output_magic) or
         get(u16, frame, 4) != 1 or get(u16, frame, 6) != output_header_len or
         get(u32, frame, 8) != 0 or get(u32, frame, 12) != frame.len or
-        get(u32, frame, 44) != 0 or get(u16, frame, 96) != 1 or get(u16, frame, 98) != 2 or
+        get(u32, frame, 44) != 0 or get(u16, frame, 96) != 1 or
         wireCrc(frame) != get(u32, frame, 124)) return error.Malformed;
     const count = get(u32, frame, 100);
-    if (count < 2 or count > max_group_members or
-        get(u32, frame, 104) != count * order_intent_len or
-        frame.len != output_header_len + count * order_intent_len or
+    switch (get(u16, frame, 98)) {
+        1 => if (count != 1 or frame.len != output_header_len + versioned_order_intent_len) return error.Malformed,
+        2 => if (count < 2 or count > max_group_members) return error.Malformed,
+        else => return error.Malformed,
+    }
+    const member_len = (frame.len - output_header_len) / count;
+    if (!validMemberLength(member_len) or
+        get(u32, frame, 104) != count * member_len or
+        frame.len != output_header_len + count * member_len or
         get(u64, frame, 56) == 0 or get(u128, frame, 64) == 0) return error.Malformed;
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     hasher.update("HostIntentGroupBusinessV1\x00");
@@ -182,8 +231,8 @@ pub fn decodeIntentGroup(frame: []const u8) !IntentGroup {
     const first = get(u64, frame, 136);
     if (first == 0) return error.Malformed;
     for (group.members[0..count], 0..) |*member, index| {
-        const payload = frame[output_header_len + index * order_intent_len ..][0..order_intent_len];
-        if (get(u16, payload, 0) != 1 or payload[5] > 1 or get(u16, payload, 6) != 0 or
+        const payload = frame[output_header_len + index * member_len ..][0..member_len];
+        if (payload[5] > 1 or get(u16, payload, 6) != 0 or
             get(u64, payload, 8) != (std.math.add(u64, first, index) catch return error.Malformed) or
             get(u128, payload, 16) == 0 or get(u128, payload, 32) == 0 or get(u128, payload, 48) == 0 or
             get(i64, payload, 64) <= 0 or get(i64, payload, 72) <= 0) return error.Malformed;
@@ -201,7 +250,8 @@ pub fn decodeIntentGroup(frame: []const u8) !IntentGroup {
             .time_in_force = std.enums.fromInt(TimeInForce, payload[4]) orelse return error.Malformed,
             .portfolio_reduce_only = payload[5] == 1,
             .quantity = get(i64, payload, 64),
-            .limit_price_micros = get(i64, payload, 72),
+            .limit_price_micros = if (payload.len == order_intent_len) get(i64, payload, 72) else 0,
+            .exact_limit_price = try memberExactPrice(payload),
         };
     }
     return group;
@@ -409,8 +459,12 @@ pub const Gateway = struct {
             self.authority_shard.?.strategyAuthority(self.config.authorization.strategy_identity).host_activation_fact_sequence != self.activation_sequence or
             self.authority_journal.?.last_sequence != self.authority_shard.?.authoritativeBarrier()))
             self.beginRecovery();
-        if (frame.len >= output_header_len and get(u16, frame, 98) == 2)
-            return self.ingestGroup(frame, now_ns);
+        if (frame.len >= output_header_len) {
+            const schema = get(u16, frame, 98);
+            const domain_single = schema == 1 and frame.len == output_header_len + versioned_order_intent_len and
+                (if (self.authority_shard) |shard| shard.decision_domain_identity != 0 else false);
+            if (schema == 2 or domain_single) return self.ingestGroup(frame, now_ns);
+        }
         const identity = if (frame.len >= output_header_len)
             get(u128, frame, 64)
         else
@@ -453,14 +507,16 @@ pub const Gateway = struct {
         @memcpy(candidate.bytes[0..frame.len], frame);
         // Reuse the established single-intent envelope validation, including
         // activation, published cursor and freshness, without touching its cache.
-        var single: [output_header_len + order_intent_len]u8 = undefined;
-        @memcpy(&single, frame[0..single.len]);
-        put(u32, &single, 12, single.len);
-        put(u16, &single, 98, 1);
-        put(u32, &single, 100, 1);
-        put(u32, &single, 104, order_intent_len);
-        put(u32, &single, 124, wireCrc(&single));
-        _ = self.parse(&single, now_ns) catch |err| {
+        var buffer: [output_header_len + versioned_order_intent_len]u8 = undefined;
+        const member_len = (frame.len - output_header_len) / group.count;
+        const single = buffer[0 .. output_header_len + member_len];
+        @memcpy(single, frame[0..single.len]);
+        put(u32, single, 12, @intCast(single.len));
+        put(u16, single, 98, 1);
+        put(u32, single, 100, 1);
+        put(u32, single, 104, @intCast(member_len));
+        put(u32, single, 124, wireCrc(single));
+        _ = self.parse(single, now_ns) catch |err| {
             const reason = reasonForError(err);
             // Only an authorized, structurally complete business identity may
             // be consumed. Persist stale/cursor rejection with all members.
@@ -471,12 +527,12 @@ pub const Gateway = struct {
     }
 
     fn parse(self: Gateway, frame: []const u8, now_ns: i64) !OrderIntent {
-        if (frame.len != output_header_len + order_intent_len or
+        if (frame.len < output_header_len or !validMemberLength(frame.len - output_header_len) or
             !std.mem.eql(u8, frame[0..4], &output_magic) or
             get(u16, frame, 4) != 1 or get(u16, frame, 6) != output_header_len or
             get(u32, frame, 8) != 0 or get(u32, frame, 12) != frame.len or
             get(u32, frame, 44) != 0 or get(u32, frame, 100) != 1 or
-            get(u32, frame, 104) != order_intent_len or
+            get(u32, frame, 104) != frame.len - output_header_len or
             wireCrc(frame) != get(u32, frame, 124))
             return error.Malformed;
         if (get(u64, frame, 32) != self.config.session.fencing or
@@ -511,8 +567,7 @@ pub const Gateway = struct {
 
         const payload = frame[128..];
         if (self.authority_shard.?.strategyAuthority(self.config.authorization.strategy_identity).portfolio_identity != get(u128, payload, 16)) return error.Unauthorized;
-        if (get(u16, payload, 0) != 1 or
-            std.enums.fromInt(Side, payload[2]) == null or
+        if (std.enums.fromInt(Side, payload[2]) == null or
             std.enums.fromInt(OrderType, payload[3]) == null or
             std.enums.fromInt(TimeInForce, payload[4]) == null or
             payload[5] > 1 or get(u16, payload, 6) != 0 or
@@ -532,7 +587,8 @@ pub const Gateway = struct {
             .time_in_force = std.enums.fromInt(TimeInForce, payload[4]).?,
             .portfolio_reduce_only = payload[5] == 1,
             .quantity = get(i64, payload, 64),
-            .limit_price_micros = get(i64, payload, 72),
+            .limit_price_micros = if (payload.len == order_intent_len) get(i64, payload, 72) else 0,
+            .exact_limit_price = try memberExactPrice(payload),
         };
     }
 };
@@ -560,14 +616,16 @@ pub fn encodeOutputOrderFrame(
     intent_sequence: u64,
     order: OutputOrder,
 ) ![]u8 {
-    const total_len = output_header_len + order_intent_len;
+    const exact = order.exact_limit_price;
+    const member_len = if (exact == null) order_intent_len else versioned_order_intent_len;
+    const total_len = output_header_len + member_len;
     if (destination.len < total_len) return error.FrameTooLarge;
     const frame = destination[0..total_len];
     @memset(frame, 0);
     @memcpy(frame[0..4], &output_magic);
     put(u16, frame, 4, 1);
     put(u16, frame, 6, output_header_len);
-    put(u32, frame, 12, total_len);
+    put(u32, frame, 12, @intCast(total_len));
     put(u128, frame, 16, config.schema_registry);
     put(u64, frame, 32, config.session.fencing);
     put(u32, frame, 40, config.session.shard);
@@ -579,10 +637,10 @@ pub fn encodeOutputOrderFrame(
     put(u16, frame, 96, 1);
     put(u16, frame, 98, 1);
     put(u32, frame, 100, 1);
-    put(u32, frame, 104, order_intent_len);
+    put(u32, frame, 104, @intCast(member_len));
     put(u128, frame, 108, config.authorization.activation_identity);
     const payload = frame[128..];
-    put(u16, payload, 0, 1);
+    put(u16, payload, 0, if (exact == null) 1 else 2);
     payload[2] = @intFromEnum(order.side);
     payload[3] = @intFromEnum(order.order_type);
     payload[4] = @intFromEnum(order.time_in_force);
@@ -592,21 +650,30 @@ pub fn encodeOutputOrderFrame(
     put(u128, payload, 32, order.exchange_account_identity);
     put(u128, payload, 48, order.instrument_identity);
     put(i64, payload, 64, order.quantity);
-    put(i64, payload, 72, order.limit_price_micros);
+    if (exact) |price| {
+        put(i64, payload, 72, price.ticks);
+        put(u64, payload, order_intent_len, price.rules_version);
+        put(i128, payload, order_intent_len + @sizeOf(u64), price.tick_coefficient);
+    } else {
+        put(i64, payload, 72, order.limit_price_micros);
+    }
     put(u32, frame, 124, wireCrc(frame));
     return frame;
 }
 
 pub fn encodeOutputGroupFrame(destination: []u8, config: Config, source_batch: u64, cursor: u64, first_sequence: u64, orders: []const OutputOrder) ![]u8 {
     if (orders.len < 2 or orders.len > max_group_members or first_sequence == 0) return error.InvalidIntentGroup;
-    const len = output_header_len + orders.len * order_intent_len;
-    if (destination.len < len) return error.FrameTooLarge;
+    const exact = orders[0].exact_limit_price != null;
+    const member_len = if (exact) versioned_order_intent_len else order_intent_len;
+    const len = output_header_len + orders.len * member_len;
+    if (destination.len < len or len > max_group_frame_len) return error.FrameTooLarge;
     const frame = destination[0..len];
-    var single: [output_header_len + order_intent_len]u8 = undefined;
+    var single: [output_header_len + versioned_order_intent_len]u8 = undefined;
     for (orders, 0..) |order, index| {
+        if ((order.exact_limit_price != null) != exact) return error.InvalidIntentGroup;
         const encoded = try encodeOutputOrderFrame(&single, config, source_batch, cursor, try std.math.add(u64, first_sequence, index), order);
         if (index == 0) @memcpy(frame[0..output_header_len], encoded[0..output_header_len]);
-        @memcpy(frame[output_header_len + index * order_intent_len ..][0..order_intent_len], encoded[output_header_len..]);
+        @memcpy(frame[output_header_len + index * member_len ..][0..member_len], encoded[output_header_len..]);
     }
     put(u32, frame, 12, @intCast(len));
     put(u16, frame, 98, 2);
