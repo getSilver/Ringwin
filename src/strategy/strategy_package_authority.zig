@@ -93,6 +93,7 @@ pub const Authority = struct {
         binary_sha256: []const u8 = "",
         config_json: []const u8 = "",
         pair_request: ?@import("../trading/pair_trading_authorization.zig").Request = null,
+        scope_accounts: []const []const u8 = &.{},
         evidence: ?struct { host_generation: u64, cursor: u64, next_input_batch: u64 } = null,
     };
 
@@ -179,6 +180,10 @@ pub const Authority = struct {
         if (value.strategy_identity.len != 32 or try std.fmt.parseInt(u128, value.strategy_identity, 16) != self.strategy)
             return error.StrategyIdentityMismatch;
         const op = value.operation;
+        if (std.mem.eql(u8, op, "pair_trading_list")) {
+            const applies = self.shard.pairTradingScopeBound(self.strategy) or try self.crossesVenues(value.scope_accounts);
+            return std.json.Stringify.valueAlloc(gpa, .{ .empty = if (applies) self.shard.pairTradingListEmpty(self.strategy) else null }, .{});
+        }
         if (std.mem.eql(u8, op, "pair_authorization_version")) {
             const version = try std.fmt.allocPrint(gpa, "{d}", .{self.shard.pair_authorizations.version});
             defer gpa.free(version);
@@ -331,6 +336,8 @@ pub const Authority = struct {
                 const strategy = self.shard.strategyAuthority(self.strategy);
                 if (strategy.strategy_config_version != self.config_version or !strategy.strategy_active)
                     return error.StrategyBindingMismatch;
+                if (try self.crossesVenues(value.scope_accounts) and !self.shard.pairTradingScopeBound(self.strategy))
+                    try self.commit(self.context, .{ .pair_trading_scope_bound = self.strategy });
                 try self.commit(self.context, .{ .control_command = command });
                 if (!self.shard.operational_state.effectiveTradingAuthority()) return error.TradingSafetyGateClosed;
                 const barrier = self.shard.authoritativeBarrier();
@@ -442,6 +449,21 @@ pub const Authority = struct {
 
     pub fn revoke(self: *Authority) !void {
         try self.revokeFor(.fault);
+    }
+
+    fn crossesVenues(self: *const Authority, accounts: []const []const u8) !bool {
+        if (accounts.len < 2) return false;
+        if (accounts.len > self.shard.deployment.accounts.len) return error.InvalidAuthorityPlacement;
+        var first: ?u64 = null;
+        var crosses = false;
+        for (accounts) |identity| {
+            const account = self.shard.deployment.account(try AuthoritySet.nativeIdentity(identity)) orelse
+                return error.InvalidAuthorityPlacement;
+            if (first) |venue| {
+                crosses = crosses or account.venue != venue;
+            } else first = account.venue;
+        }
+        return crosses;
     }
 
     fn revokeFor(self: *Authority, reason: @import("../trading/trading_shard_event.zig").HostRevocationReason) !void {

@@ -57,9 +57,16 @@ pub const State = struct {
         return true;
     }
 
-    pub fn requiresApproval(self: *const State, strategy: u128) bool {
+    pub fn hasHistory(self: *const State, strategy: u128) bool {
         for (self.records[0..self.count]) |record| if (record.request.strategy == strategy) return true;
         return false;
+    }
+
+    pub fn isCurrent(self: *const State, index: usize) bool {
+        const request = self.records[index].request;
+        if (!request.enabled) return false;
+        for (self.records[index + 1 .. self.count]) |later| if (sameSelector(request, later.request)) return false;
+        return true;
     }
 
     pub fn allowedRequest(self: *const State, group: oms.IntentGroup, config_version: u64) ?Request {
@@ -70,13 +77,7 @@ pub const State = struct {
             const request = self.records[i].request;
             if (request.strategy != group.members[0].strategy_instance or request.portfolio != group.members[0].portfolio or
                 request.config_version != config_version) continue;
-            // A later revocation of this exact selector supersedes the old grant.
-            var superseded = false;
-            for (self.records[i + 1 .. self.count]) |later| if (sameSelector(request, later.request)) {
-                superseded = true;
-                break;
-            };
-            if (superseded or !request.enabled) continue;
+            if (!self.isCurrent(i)) continue;
             var matched = true;
             for (group.members[0..group.count]) |member| {
                 const leg: usize = if (member.exchange_account == request.legs[0].account and member.instrument == request.legs[0].instrument) 0 else if (member.exchange_account == request.legs[1].account and member.instrument == request.legs[1].instrument) 1 else {
@@ -103,12 +104,7 @@ pub const State = struct {
             i -= 1;
             const request = self.records[i].request;
             if (!request.enabled or request.strategy != intent.strategy_instance or request.portfolio != intent.portfolio or request.config_version != config_version) continue;
-            var superseded = false;
-            for (self.records[i + 1 .. self.count]) |later| if (sameSelector(request, later.request)) {
-                superseded = true;
-                break;
-            };
-            if (superseded) continue;
+            if (!self.isCurrent(i)) continue;
             var matches_cycle = true;
             for (request.legs) |leg| {
                 var found = false;

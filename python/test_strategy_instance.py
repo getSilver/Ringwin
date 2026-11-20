@@ -14,6 +14,7 @@ import sys
 import tempfile
 import textwrap
 import time
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 import zipfile
@@ -689,19 +690,20 @@ finally:
             self.assertEqual(status, 200, enabled)
             self.assertTrue(enabled["ok"], enabled)
         authority.request(dict(operation="advance"))
-        for identity, orders in ((9, 2), (19, 4)):
+        for identity in (9, 19):
             name = f"{identity:032x}"
             state = authority.request(dict(operation="status", strategy_identity=name))
             host = self.instances._hosts[name]
             result = self.instances.deliver(name, self.node_batch(state["cursor"], host["cursor"] + 1))
-            self.assertEqual(result[0]["orders"], orders, result)
+            self.assertEqual(result[0]["orders"], 0, result)
+            self.assertEqual(result[0]["last_rejection"], "authorization_closed", result)
             self.assertEqual(int.from_bytes(bytes.fromhex(self.native_frames[-1])[64:80], "little"), identity)
         self.instances._hosts[f"{9:032x}"]["job"].terminate()
         deadline = time.monotonic() + 5
         while any(r["trading_authorized"] for r in self.instances.view()) and time.monotonic() < deadline:
             time.sleep(0.02)
         late = authority.request(dict(operation="output", strategy_identity=f"{19:032x}", frame=self.native_frames[-1]))
-        self.assertEqual(late["orders"], 4)
+        self.assertEqual(late["orders"], 0)
         self.assertFalse(late["trading_authorized"])
 
     @unittest.skipUnless(os.name == "nt", "shared aggregate Job memory qualification is Windows-specific")
@@ -1168,7 +1170,7 @@ finally:
         with self.assertRaisesRegex(ValueError, "not Ready or Trading"):
             self.instances.deliver(identity, self.node_batch(cursor, first))
 
-    def test_complete_group_is_one_actual_frame_and_gateway_accepts_it_before_safety_revokes(self):
+    def test_complete_group_is_one_actual_frame_and_empty_list_rejects_it(self):
         self.assert_complete_group()
 
     def test_hyperliquid_uses_existing_web_package_host_authority_and_revocation(self):
@@ -1181,6 +1183,7 @@ finally:
         self.binding["strategy_identity"] = f"{9:032x}"
         ready = self.create()[1]["result"]
         self.assertEqual(ready["status"], "Ready", ready)
+        self.assertIs(ready["pair_trading_list_empty"], True, ready)
         identity = self.binding["strategy_identity"]
         with self.assertRaisesRegex(ValueError, "NoHostActivation"):
             authority.request(dict(operation="applied", strategy_identity=identity, cursor=ready["evidence"]["cursor"]))
@@ -1191,10 +1194,9 @@ finally:
         results = self.instances.deliver(identity, self.node_batch(cursor, first))
         self.assertEqual(len(self.native_frames), 1)
         self.assertEqual(len(bytes.fromhex(self.native_frames[0])), 288)
-        self.assertEqual(results[0]["orders"], 2, results)
-        self.assertEqual(results[0]["commands"], 2, results)
-        dispatch = authority.request(dict(operation="dispatch"))
-        self.assertEqual(dispatch, dict(dispatch="accepted", attempts=1), dispatch)
+        self.assertEqual(results[0]["orders"], 0, results)
+        self.assertEqual(results[0]["commands"], 0, results)
+        self.assertEqual(results[0]["last_rejection"], "authorization_closed", results)
         first_cursor = authority.request(dict(operation="advance"))["cursor"]
         last_cursor = authority.request(dict(operation="advance"))["cursor"]
         first_batch = self.node_batch(first_cursor, cursor + 1)
@@ -1216,9 +1218,8 @@ finally:
         self.assertFalse(record["trading_authorized"])
         self.assertEqual(record["status"], "Stopped")
         self.assertIn("revoked", record["reason"])
-        self.assertEqual(authority.request(dict(operation="dispatch")), dict(dispatch="NotSent", attempts=1))
         late = authority.request(dict(operation="output", strategy_identity=identity, frame=self.native_frames[0]))
-        self.assertEqual(late["orders"], 2)
+        self.assertEqual(late["orders"], 0)
 
     def test_risk_warning_and_node_placement_still_reject_unbound_instance_authority(self):
         self.native_authority()
@@ -1860,6 +1861,35 @@ class UnsupportedMemoryKernelTests(unittest.TestCase):
 
 
 class InstanceContractTests(unittest.TestCase):
+    def test_cross_venue_instance_view_reads_the_core_list_after_reloading(self):
+        identity = f"{9:032x}"
+        accounts = [f"{20:032x}", f"{30:032x}"]
+
+        class Authority:
+            empty = False
+
+            def request(self, request):
+                if request != dict(operation="pair_trading_list", strategy_identity=identity, scope_accounts=accounts):
+                    raise AssertionError(request)
+                if self.empty is None:
+                    raise OSError("authority disconnected")
+                return dict(empty=self.empty)
+
+        authority = Authority()
+        source = SimpleNamespace(authority=authority)
+        with tempfile.TemporaryDirectory() as directory:
+            manager = strategy_instance.InstanceManager(directory, None, source)
+            manager._save(dict(binding=dict(strategy_identity=identity, scopes=[
+                dict(venue="okx", exchange_account=accounts[0]),
+                dict(venue="bybit", exchange_account=accounts[1])]), status="Ready"))
+            self.assertIs(manager.view()[0]["pair_trading_list_empty"], False)
+            authority.empty = True
+            self.assertIs(manager.view()[0]["pair_trading_list_empty"], True)
+            restarted = strategy_instance.InstanceManager(directory, None, source)
+            self.assertIs(restarted.view()[0]["pair_trading_list_empty"], True)
+            authority.empty = None
+            self.assertIsNone(restarted.view()[0]["pair_trading_list_empty"])
+
     def test_fixed_api_rejects_a_partial_group(self):
         from strategy_api import IntentGroup, OrderIntent, validate_outputs
         intent = OrderIntent(1, 1, 2, 3, "buy", "gtc", False, 1, 100)

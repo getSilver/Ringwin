@@ -132,6 +132,7 @@ pub const EventKind = enum(u16) {
     residual_consumed,
     residual_state_committed,
     canonical_market_trade,
+    pair_trading_scope_bound,
 };
 
 pub const Fact = struct {
@@ -447,6 +448,7 @@ pub const PayloadTag = enum(u16) {
     cycle_closed,
     spot_residual_rule,
     pair_trading_authorization,
+    pair_trading_scope_bound,
 };
 
 pub const ReservationModel = enum(u8) { leveraged, cash };
@@ -642,6 +644,7 @@ pub const CorePayload = union(PayloadTag) {
     cycle_closed: @import("cycle_occupancy.zig").Closure,
     spot_residual_rule: @import("cycle_occupancy.zig").ResidualRule,
     pair_trading_authorization: @import("pair_trading_authorization.zig").Request,
+    pair_trading_scope_bound: u128,
 };
 
 /// Typed core-originated event carried by the authoritative CanonicalEvent.
@@ -684,6 +687,7 @@ pub fn encodeInput(destination: []u8, input: CoreEvent) !EncodedInput {
     try encoded.put(u8, @intFromBool(input.account_scope != null));
     if (input.account_scope) |account| try encoded.put(u128, account);
     switch (input.payload) {
+        .pair_trading_scope_bound => |strategy| try encoded.put(u128, strategy),
         .pair_trading_authorization => |value| {
             const bytes = try @import("../persistence/snapshot_codec.zig").encodeBare(encoded.bytes[encoded.len..], value);
             encoded.len += bytes.len;
@@ -1099,6 +1103,7 @@ pub fn decodeInput(record: journal.Record) !CoreEvent {
     ) orelse return error.UnknownInputType;
     const account_scope: ?u128 = if (try readInputBool(record.payload, &offset)) try readInputValue(u128, record.payload, &offset) else null;
     const payload: CorePayload = switch (tag) {
+        .pair_trading_scope_bound => .{ .pair_trading_scope_bound = try readInputValue(u128, record.payload, &offset) },
         .pair_trading_authorization => blk: {
             var value: @import("pair_trading_authorization.zig").Request = undefined;
             value = try @import("../persistence/snapshot_codec.zig").decodeBare(record.payload[offset..], @TypeOf(value));

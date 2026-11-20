@@ -382,6 +382,12 @@ fn decodeValueInto(reader: *Reader, destination: anytype) !void {
                     for (items[0..count]) |*item| try decodeValueInto(reader, item);
                     const Child = @typeInfo(field.type).array.child;
                     for (items[count..]) |*item| item.* = std.mem.zeroes(Child);
+                } else if (comptime index == info.fields.len - 1 and @hasDecl(T, "snapshot_optional_tail") and
+                    std.mem.eql(u8, field.name, T.snapshot_optional_tail))
+                {
+                    if (reader.position == reader.bytes.len) {
+                        @field(destination.*, field.name) = null;
+                    } else try decodeValueInto(reader, &@field(destination.*, field.name));
                 } else try decodeValueInto(reader, &@field(destination.*, field.name));
             }
             inline for (info.fields, 0..) |field, index| {
@@ -402,6 +408,21 @@ fn decodeValueInto(reader: *Reader, destination: anytype) !void {
         },
         else => @compileError("unsupported snapshot field type: " ++ @typeName(T)),
     }
+}
+
+test "snapshot codec decodes snapshots before an optional trailing field was introduced" {
+    const State = struct {
+        barrier: u64,
+        scope: ?u128,
+        pub const snapshot_optional_tail = "scope";
+    };
+    var bytes: [64]u8 = undefined;
+    const Legacy = struct { barrier: u64 };
+    const legacy = try encodeBare(&bytes, Legacy{ .barrier = 7 });
+    try std.testing.expectEqual(State{ .barrier = 7, .scope = null }, try decodeBare(legacy, State));
+    const encoded = try encodeBare(&bytes, State{ .barrier = 7, .scope = 9 });
+    try std.testing.expectEqual(State{ .barrier = 7, .scope = 9 }, try decodeBare(encoded, State));
+    try std.testing.expectError(error.InvalidSnapshotLength, decodeBare(encoded[0 .. encoded.len - 1], State));
 }
 
 test "snapshot codec rejects truncation CRC corruption and invalid enum values" {

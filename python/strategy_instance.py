@@ -329,7 +329,7 @@ class InstanceManager:
                     return
             self._successor_commands[progress["operation_identity"]] = json.loads(package.canonical(record))
 
-    def view(self):
+    def view(self, *, include_pair_trading_list=True):
         if not self._lock.acquire(blocking=False):
             return json.loads(package.canonical(list(self._records.values())))
         try:
@@ -347,9 +347,33 @@ class InstanceManager:
                             self._records[identity]["authority"] = authority
                     except (ValueError, OSError, KeyError) as error:
                         self._fail(identity, self._records[identity], str(error))
-            return json.loads(package.canonical(list(self._records.values())))
+            records = json.loads(package.canonical(list(self._records.values())))
+            if include_pair_trading_list:
+                for record in records:
+                    self._read_pair_trading_list(record)
+            return records
         finally:
             self._lock.release()
+
+    @staticmethod
+    def _scope_accounts(binding):
+        return sorted({scope["exchange_account"] for scope in binding["scopes"]})
+
+    def _read_pair_trading_list(self, record):
+        binding = record["binding"]
+        accounts = self._scope_accounts(binding)
+        if len(accounts) < 2:
+            return record
+        record["pair_trading_list_empty"] = None
+        if self.source.authority is not None:
+            try:
+                result = self.source.authority.request(dict(operation="pair_trading_list",
+                    strategy_identity=binding["strategy_identity"], scope_accounts=accounts))
+                if type(result.get("empty")) is bool:
+                    record["pair_trading_list_empty"] = result["empty"]
+            except (OSError, ValueError):
+                pass
+        return record
 
     def _revoke(self, identity, *, planned=False):
         if self.source.authority is not None:
@@ -366,7 +390,7 @@ class InstanceManager:
 
     def _watch(self):
         while not self._monitor_stop.wait(0.1):
-            self.view()
+            self.view(include_pair_trading_list=False)
 
     def _exchange(self, identity, command):
         host = self._hosts[identity]
@@ -465,6 +489,7 @@ class InstanceManager:
             package.uint(command["expires_at"])
             try:
                 result = self.source.authority.request(dict(operation="control", strategy_identity=identity,
+                    scope_accounts=self._scope_accounts(record["binding"]),
                     envelope=control_plane.sign_command(command, key).hex(), evidence=dict(record["evidence"],
                         cursor=self._hosts[identity]["cursor"], next_input_batch=self._hosts[identity]["next_input_batch"])))
                 if enabling:
@@ -542,8 +567,8 @@ class InstanceManager:
             previous = self._records.get(identity)
             if previous:
                 package.require(previous["binding"] == binding, "instance identity or ConfigVersion content conflict")
-                return previous
-            return self._run(binding)
+                return self._read_pair_trading_list(dict(previous))
+            return self._read_pair_trading_list(dict(self._run(binding)))
 
     def recover(self, identity):
         package.identity(identity)
@@ -561,7 +586,7 @@ class InstanceManager:
                             "config cutover result unknown; reconcile native version before recovery")
             package.require(identity not in self._hosts, "stop the existing Host before recovery")
             try:
-                return self._run(previous["binding"], previous)
+                return self._read_pair_trading_list(dict(self._run(previous["binding"], previous)))
             except (OSError, ValueError) as error:
                 record = dict(previous, status="Stopped", reason=str(error)[:2048], trading_authorized=False)
                 self._save(record)

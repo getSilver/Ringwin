@@ -6,6 +6,9 @@ const trading = @import("../../../trading/trading_shard.zig");
 const fixture = @import("../../support/trading_shard_fixture.zig");
 const existing = @import("multi_account_authority_acceptance.zig");
 const approval = @import("../../../trading/pair_trading_authorization.zig");
+const raw_ingress = @import("../../../persistence/raw_ingress.zig");
+const market = @import("../../../adapters/okx/okx_public_market.zig");
+const history = @import("../../../persistence/business_history.zig");
 
 pub fn configurePairAssets(owner: *demo.Owner) !void {
     return configurePairAssetsForScenario(owner, true);
@@ -124,7 +127,6 @@ fn exercisePairMutation(comptime scenario: enum { ordinary, partial, replacement
         .{ .venue = 1, .environment = .simulation, .account = 20, .instrument = 101, .rules_version = 2 },
         .{ .venue = 21, .environment = .simulation, .account = 30, .instrument = 102, .rules_version = 2 },
     }, .direction = 1, .mode = .taker_taker, .enabled = true };
-    _ = try owner.apply(fixture.atGroup(45, .{ .identity = 98765, .payload = .{ .pair_trading_authorization = request } }));
     for ([_]u128{ 101, 102 }, [_]u64{ 1, 21 }) |instrument, venue| {
         var book = fixture.canonicalAt(45, 2, .{ .l2_book_snapshot = .{ .instrument = instrument, .sequence = 2, .best_bid = .{ .instrument = instrument, .rules_version = 2, .ticks = 99 }, .best_ask = .{ .instrument = instrument, .rules_version = 2, .ticks = 100 }, .best_bid_quantity = .{ .instrument = instrument, .rules_version = 2, .lots = 100000 }, .best_ask_quantity = .{ .instrument = instrument, .rules_version = 2, .lots = 100000 } } });
         book.venue.envelope.scope = .instrument;
@@ -138,6 +140,13 @@ fn exercisePairMutation(comptime scenario: enum { ordinary, partial, replacement
     }
     var group: trading.oms.IntentGroup = .{ .first_intent_sequence = 11000, .count = 2 };
     for ([_]u128{ 20, 30 }, [_]u128{ 101, 102 }, 0..) |account, instrument, index| group.members[index] = .{ .exchange_account = account, .portfolio = 10, .intent_sequence = 11000 + index, .strategy_instance = 9, .operation = .place, .instrument = instrument, .side = if (index == 0) .buy else .sell, .quantity = 10000, .limit_price = .{ .instrument = instrument, .rules_version = 2, .ticks = 100 }, .time_in_force = .immediate_or_cancel };
+    if (scenario == .ordinary) {
+        try std.testing.expect(owner.shard.pairTradingListEmpty(9));
+        _ = try owner.apply(fixture.atGroup(45, .{ .identity = 98764, .payload = .{ .pair_trading_scope_bound = 9 } }));
+        try expectOpeningRejected(owner, group, 10000, 45);
+    }
+    _ = try owner.apply(fixture.atGroup(45, .{ .identity = 98765, .payload = .{ .pair_trading_authorization = request } }));
+    try std.testing.expect(!owner.shard.pairTradingListEmpty(9));
     _ = try owner.apply(fixture.atGroup(46, .{ .identity = 11000, .payload = .{ .oms_intent_group = group } }));
     if (owner.shard.oms.order_count != 2) std.debug.print("scanner opening rejected: {s}\n", .{@tagName(owner.shard.last_reject_reason)});
     try std.testing.expectEqual(@as(u16, 2), owner.shard.oms.order_count);
@@ -161,6 +170,10 @@ fn exercisePairMutation(comptime scenario: enum { ordinary, partial, replacement
     request.expected_version = 1;
     request.enabled = false;
     _ = try owner.apply(fixture.atGroup(48, .{ .identity = 98766, .payload = .{ .pair_trading_authorization = request } }));
+    if (scenario == .ordinary) {
+        try std.testing.expect(owner.shard.pairTradingListEmpty(9));
+        try expectOpeningRejected(owner, group, 12600, 48);
+    }
     if (scenario == .replacement or scenario == .replacement_reduction) {
         _ = try owner.apply(fixture.atGroup(49, .{ .identity = 14000, .account_scope = 20, .payload = .{ .oms_execution_report = .{ .report_id = 14000, .order_id = 1, .revision = 1, .status = .canceled, .cumulative_quantity = 0, .remaining_quantity = 10000 } } }));
         try std.testing.expectEqual(@as(u16, if (scenario == .replacement_reduction) 3 else 2), owner.shard.oms.order_count);
@@ -200,4 +213,72 @@ fn exercisePairMutation(comptime scenario: enum { ordinary, partial, replacement
     cancel.members[0].expected_revision = owner.shard.oms.orderById(1).?.revision;
     _ = try owner.apply(fixture.atGroup(52, .{ .identity = 13002, .payload = .{ .oms_intent_group = cancel } }));
     try std.testing.expectEqual(trading.oms.OrderState.pending_cancel, owner.shard.oms.orderById(1).?.state);
+
+    const order = owner.shard.oms.orderById(1).?;
+    var fill = fixture.canonicalAt(53, 3, .{ .fill = .{
+        .identity = 10,
+        .order = order.id,
+        .client_order_id = order.client_order_id,
+        .venue_order = try trading.canonical.VenueOrderRef.init(1, "pair-order"),
+        .venue_trade = try trading.canonical.VenueTradeRef.init(1, "pair-fill"),
+        .instrument = 101,
+        .exchange_account = 20,
+        .side = .buy,
+        .quantity = .{ .instrument = 101, .rules_version = 2, .lots = 5000 },
+        .price = group.members[0].limit_price,
+        .fee = .{ .asset = 1, .atoms = 0 },
+        .venue_fill_time_utc_ns = fixture.atGroup(53, .{ .identity = 0, .payload = .recovery_completed }).core.source_time,
+        .liquidity = .taker,
+    } });
+    fill.venue.envelope.exchange_account = 20;
+    _ = try owner.apply(fill);
+    try std.testing.expectEqual(@as(i64, 5000), owner.shard.accountState(20).?.economic_projection.portfolio.positionForInstrument(101).quantity);
+    _ = try owner.apply(fixture.atGroup(53, .{ .identity = 13060, .account_scope = 20, .payload = .{ .oms_execution_report = .{
+        .report_id = 13060,
+        .order_id = 1,
+        .revision = order.revision,
+        .status = .canceled,
+        .cumulative_quantity = 5000,
+        .remaining_quantity = 4000,
+    } } }));
+    var reduction: trading.oms.IntentGroup = .{ .first_intent_sequence = 13003, .count = 1 };
+    reduction.members[0] = group.members[0];
+    reduction.members[0].intent_sequence = 13003;
+    reduction.members[0].side = .sell;
+    reduction.members[0].quantity = 5000;
+    reduction.members[0].portfolio_reduce_only = true;
+    _ = try owner.apply(fixture.atGroup(54, .{ .identity = 13003, .payload = .{ .oms_intent_group = reduction } }));
+    if (owner.shard.oms.order_count != 3) std.debug.print("pair reduction rejected: {s}\n", .{@tagName(owner.shard.last_reject_reason)});
+    try std.testing.expectEqual(@as(u16, 3), owner.shard.oms.order_count);
+    try std.testing.expect(owner.shard.oms.orderById(3).?.portfolio_reduce_only);
+
+    const recovered = try std.testing.allocator.create(demo.Owner);
+    defer std.testing.allocator.destroy(recovered);
+    try demo.Owner.recoverInto(recovered, memory.interface(), undefined, owner.stream);
+    try recovered.pinDeploymentDigest(owner.deployment_anchor.?);
+    try std.testing.expect(recovered.shard.pairTradingScopeBound(9));
+    try std.testing.expect(recovered.shard.pairTradingListEmpty(9));
+    const stream: durable.StreamIdentity = .{ .domain = .raw_ingress, .id = 92 };
+    const acknowledgement = "offline transport acknowledgement";
+    var sink = try raw_ingress.DurableSink.init(memory.interface(), undefined, stream);
+    _ = try sink.interface().append(.{ .source_session = 1, .byte_len = acknowledgement.len, .sha256 = history.hash(acknowledgement), .receive_time_utc_ns = 1, .monotonic_time_ns = 1, .wall_time_utc_ns = 1 }, acknowledgement);
+    const Sweep = struct {
+        fn consume(_: *anyopaque, _: u64, _: market.RawIngressRecord, bytes: []const u8) !void {
+            try std.testing.expectEqualStrings(acknowledgement, bytes);
+        }
+    };
+    try recovered.bindRecoveryIngress(memory.interface(), stream);
+    try recovered.replayCommittedIngress(stream, .{ .ptr = recovered, .consume_fn = Sweep.consume });
+    try recovered.checkpoint();
+    try expectOpeningRejected(recovered, group, 14000, 55);
+}
+
+fn expectOpeningRejected(owner: *demo.Owner, original: trading.oms.IntentGroup, sequence: u64, now: u64) !void {
+    var group = original;
+    group.first_intent_sequence = sequence;
+    for (group.members[0..group.count], 0..) |*member, index| member.intent_sequence = sequence + index;
+    const orders = owner.shard.oms.order_count;
+    _ = try owner.apply(fixture.atGroup(now, .{ .identity = sequence, .payload = .{ .oms_intent_group = group } }));
+    try std.testing.expectEqual(@import("../../../trading/trading_shard_event.zig").RejectReason.authorization_closed, owner.shard.last_reject_reason);
+    try std.testing.expectEqual(orders, owner.shard.oms.order_count);
 }
