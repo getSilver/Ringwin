@@ -39,7 +39,7 @@ Status: open
 - [04 手动费率贯穿扫描和开仓复核](issues/04-fees.md)
 - [05 USDT/USDC 平价估值与汇差归因](issues/05-stablecoin.md)
 - [07 跨所策略以空交易名单启动](issues/07-empty-list.md)
-- [14 扩大扫描范围并展示实际覆盖](issues/14-coverage.md)
+- [15 滚动归档并测出持续扫描容量](issues/15-capacity.md)
 
 ## Decisions so far
 
@@ -49,13 +49,15 @@ Status: open
 
 扫描节点通过现有只读核心投影读取生效资产登记。候选和归档证据引用当时的登记版本，验收范围见 [02](issues/02-assets.md)。
 
-[03](issues/03-pairing.md) 按核心登记资产匹配跨环境路线，为全部产品搭配生成两个方向并逐腿记录行情来源与缺项。覆盖容量由 [14](issues/14-coverage.md) 继续验证。
+[03](issues/03-pairing.md) 按核心登记资产匹配跨环境路线，为全部产品搭配生成两个方向并逐腿记录行情来源与缺项。广域轮转和实际覆盖由 [14](issues/14-coverage.md) 验证。
 
 [05](issues/05-stablecoin.md) 的扫描平价与核心混合结算币批准已通过定向验证。交易节点仍需接入并归档实际周期敞口与汇率证据。
 
 [07](issues/07-empty-list.md) 已通过空名单核心准入、持久恢复及存量敞口处置的离线验证。默认扫描启动器仍须接入策略实例权威连接，完成策略页验收。
 
 [10](issues/10-limit-price.md) 已通过 Host 限价定向验收。Gateway 请求保留各腿 ticks 和规则版本，TradingShard 校验 tick 单位并逐腿记录拒绝原因。
+
+[14](issues/14-coverage.md) 已用 20 个盘口、10 条路线完成离线双腿轮转验收。持续归档和容量测量由 [15](issues/15-capacity.md) 接续。
 
 ## Not yet specified
 

@@ -37,6 +37,46 @@ class ScannerRuntime(PublicScannerRuntime):
 
 
 class PublicTransportTests(unittest.TestCase):
+    def test_rate_weight_and_retry_after_do_not_delay_another_venue(self):
+        from urllib.error import HTTPError
+
+        now = [1.0]
+        sent = []
+        class Response:
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                pass
+            def read(self, size):
+                return b"{}"
+
+        class Opener:
+            def open(self, request, timeout):
+                sent.append((request.host, now[0]))
+                if len(sent) == 2:
+                    raise HTTPError(request.full_url, 429, "limited", {"Retry-After": "5"}, None)
+                return Response()
+
+        def advance(seconds):
+            now[0] += seconds
+
+        transport = PublicTransport()
+        with patch("opportunity_scanner.scanner_runtime.time.monotonic", side_effect=lambda: now[0]), \
+                patch("opportunity_scanner.scanner_runtime.time.sleep", side_effect=advance), \
+                patch("opportunity_scanner.scanner_runtime.urllib.request.build_opener", return_value=Opener()):
+            hyperliquid = "https://api.hyperliquid.xyz/info"
+            transport.request(hyperliquid, {"type": "meta"})
+            with self.assertRaises(HTTPError):
+                transport.request(hyperliquid, {"type": "l2Book"})
+            self.assertAlmostEqual(sent[1][1] - sent[0][1], 1.2)
+            with self.assertRaisesRegex(OSError, "backing off"):
+                transport.request("https://api.hyperliquid-testnet.xyz/info", {"type": "l2Book"})
+            transport.request("https://www.okx.com/api/v5/market/books")
+            self.assertEqual(sent[-1][1], sent[1][1])
+            now[0] += 5
+            transport.request(hyperliquid, {"type": "l2Book"})
+            self.assertEqual(len(sent), 4)
+
     def test_public_requests_omit_user_agent_on_the_wire(self):
         from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
         captured = []
@@ -319,11 +359,7 @@ class DynamicCatalogueTests(unittest.TestCase):
         self.runtime.source.release("other-consumer")
         self.assertEqual(self.runtime.workers, {})
 
-    def test_subscription_capacity_never_leaves_partial_healthy_coverage(self):
-        self.runtime.discover(self.setting)
-        console = self.runtime.console
-        console.configure(dict(expected_version="0", scopes=[dict(scope(1, "demo"), quote_asset=None, new_instruments=True)]))
-        console.start(); self.runtime.step()
+    def test_wide_single_source_reports_selection_without_opening_unpaired_books(self):
         original = self.transport.request
         def large(url, *args, **kwargs):
             value = json.loads(original(url, *args, **kwargs))
@@ -334,15 +370,18 @@ class DynamicCatalogueTests(unittest.TestCase):
             return json.dumps(value)
         self.transport.request = large
         self.runtime.discover(self.setting)
-        state = self.runtime.status()["discovery"]["1:demo"]
-        self.assertEqual(state["state"], "failed")
-        self.assertIn("subscription capacity", state["error"])
-        self.assertFalse(state["complete"])
-        self.assertEqual(self.runtime.observations, {})
-        self.assertEqual(self.runtime.workers, {})
-        self.assertEqual(self.runtime.source.owners[console.session], set())
+        console = self.runtime.console
+        console.configure(dict(expected_version="0", scopes=[dict(scope(1, "demo"), quote_asset=None, new_instruments=True)]))
+        console.start()
+        self.runtime.step()
+        view = console.view()["market"]
+        self.assertEqual(view["discovery"]["1:demo"]["state"], "ready")
+        self.assertEqual(view["coverage"]["selected"], 17)
+        self.assertEqual(view["coverage"]["discovered"], 0)
+        self.assertEqual(view["coverage"]["unpaired_markets"], 17)
+        self.assertEqual(view["active_subscriptions"], 0)
 
-    def test_returning_other_consumer_subscription_cannot_bypass_active_capacity(self):
+    def test_returning_other_consumer_retains_ownership_with_a_wide_directory(self):
         self.runtime.discover(self.setting)
         source = self.runtime.source
         original_identity = next(i for i,e in source.registered.items() if e.kind == "spot")
@@ -364,9 +403,9 @@ class DynamicCatalogueTests(unittest.TestCase):
         returning[0] = True
         self.runtime.discover(self.setting)
         state = self.runtime.status()["discovery"]["1:demo"]
-        self.assertEqual(state["state"], "failed")
-        self.assertIn("subscription capacity", state["error"])
-        self.assertLessEqual(len(self.runtime.workers), 16)
+        self.assertEqual(state["state"], "ready")
+        self.runtime.step()
+        self.assertLessEqual(self.runtime.status()["active_subscriptions"], 16)
         self.assertEqual(source.owners["retained"], {original_identity})
         source.release("full")
         self.runtime.discover(self.setting)
@@ -587,7 +626,7 @@ class HyperliquidCatalogueTests(unittest.TestCase):
         self.transport.metadata_document["universe"].reverse()
         self.runtime.discover(self.setting)
         self.assertEqual({row["symbol"]: identity for identity, row in self.runtime.bindings.items()}, identities)
-        self.runtime.acquire(identities["ETH"])
+        self.runtime.source.acquire("native-capture-test", {identities["ETH"]})
         self.runtime.step()
         self.assertEqual(self.runtime.status()["failures"], {})
         self.assertTrue(self.runtime.status()["observations"][0]["continuous"])
@@ -628,12 +667,14 @@ class HyperliquidCatalogueTests(unittest.TestCase):
     def test_asset_rebind_preserves_registration_when_new_instruments_disabled(self):
         self.previous_isolated_asset_cache(include_eth=False)
         self.runtime.console.start()
+        self.runtime.step()
         self.assertEqual(self.runtime.status()["active_subscriptions"], 1)
         self.transport.metadata_document["universe"].append(dict(name="SOL", szDecimals=2, maxLeverage=25, marginTableId=53))
         self.runtime.discover(self.setting)
         self.assertEqual(len(self.runtime.console.config["registered"]), 1)
         self.assertEqual(len(self.runtime.console.view()["catalogue"]), 2)
         self.runtime.console.start()
+        self.runtime.step()
         self.assertEqual(self.runtime.status()["active_subscriptions"], 1)
         self.assertEqual({self.runtime.bindings[i]["symbol"] for i in self.runtime.source.owners[self.runtime.console.session]}, {"ETH"})
 
@@ -745,12 +786,12 @@ class HyperliquidCatalogueTests(unittest.TestCase):
                 book = self.transport.book
                 if mode == "book":
                     self.transport.book = lambda binding: json.dumps(dict(coin="BTC", time=self.now[1]//1_000_000, levels=[[], []]))
-                self.runtime.acquire(identity)
+                self.runtime.source.acquire("native-capture-test", {identity})
                 self.runtime.step()
                 status = self.runtime.status()
                 self.assertTrue(status["failures"], status)
                 self.assertFalse(any(o["continuous"] for o in status["observations"]))
-                self.runtime.release(identity)
+                self.runtime.source.release("native-capture-test")
                 row.clear(); row.update(original)
                 self.transport.metadata_document["universe"][0]["maxLeverage"] = 25
                 self.transport.book = book
@@ -858,7 +899,8 @@ class IntegrationTests(unittest.TestCase):
         self.runtime.asset_provider = lambda: document
         self.start()
         view = self.call("start")
-        self.assertEqual(len(view["market"]["observations"]), 2)
+        self.assertEqual(view["market"]["coverage"]["unpaired_markets"], 2)
+        self.assertEqual(view["market"]["observations"], [])
         self.assertEqual(view["snapshot"]["candidates"], [])
 
     def test_scaled_contract_name_cannot_inherit_registered_asset_by_prefix(self):
@@ -872,7 +914,8 @@ class IntegrationTests(unittest.TestCase):
         self.transport.request = scaled
         self.start()
         view = self.call("start")
-        self.assertEqual(len(view["market"]["observations"]), 2)
+        self.assertEqual(view["market"]["coverage"]["unpaired_markets"], 2)
+        self.assertEqual(view["market"]["observations"], [])
         self.assertEqual(view["snapshot"]["candidates"], [])
         hl = next(r for r in self.runtime.bindings.values() if r["venue"] == 21)
         self.assertIsNone(hl["asset_associations"]["base"])
@@ -884,7 +927,8 @@ class IntegrationTests(unittest.TestCase):
         self.transport.coin = "BTC"
         self.start()
         view = self.call("start")
-        self.assertEqual(len(view["market"]["observations"]), 2)
+        self.assertEqual(view["market"]["coverage"]["unpaired_markets"], 2)
+        self.assertEqual(view["market"]["observations"], [])
         self.assertEqual(view["snapshot"]["candidates"], [])
 
     def test_missing_quote_registration_reports_exact_source_code(self):
@@ -1026,6 +1070,122 @@ class IntegrationTests(unittest.TestCase):
         for thread in self.runtime.discovery_threads:
             thread.join(timeout=15)
         return body["result"]
+
+    def test_wide_scan_rotates_pairs_and_publishes_while_one_source_is_slow(self):
+        coins = [f"TOKEN{i}" for i in range(11)]
+        registry = registered_assets()
+        for i, coin in enumerate(coins, 100):
+            for venue in ("1", "21"):
+                template = next(row for row in registry["bindings"] if row["venue"] == venue)
+                registry["bindings"].append(dict(template, asset=str(i), code=coin))
+        self.runtime.asset_provider = lambda: registry
+        self.transport.supports_batch_quotes = True
+        original = self.transport.request
+
+        def wire(url, body=None, **kwargs):
+            if "market/tickers" in url:
+                return json.dumps(dict(code="0", data=[
+                    dict(instId=coin+"-USDT", bidPx="3100" if i == 0 else "2999",
+                         askPx="3101" if i == 0 else "3001") for i, coin in enumerate(coins)]))
+            if body == {"type": "allMids"}:
+                return json.dumps(dict.fromkeys(coins, "3000"))
+            if body == {"type": "meta"}:
+                doc = json.loads(original(url, body, **kwargs))
+                doc["universe"] = [dict(doc["universe"][0], name=coin) for coin in coins]
+                return json.dumps(doc)
+            if body and body["type"] == "l2Book":
+                return original(url, dict(body, coin="ETH"), **kwargs).replace("ETH", body["coin"])
+            if "/instruments?" in url:
+                doc = json.loads(original(url, body, **kwargs))
+                symbol = url.partition("&instId=")[2]
+                doc["data"] = [json.loads(json.dumps(doc["data"][0]).replace("ETH", coin))
+                               for coin in coins if not symbol or symbol.startswith(coin+"-")]
+                return json.dumps(doc)
+            return original(url, body, **kwargs)
+
+        self.transport.request = wire
+        self.save_settings()
+        excluded = next(row["identity"] for row in self.call("stop")["assets"] if row["code"] == coins[-1])
+        scopes = [dict(scope(venue), exclude_assets=[excluded]) for venue in (1, 21)]
+        self.call("configure", dict(expected_version="0", scopes=scopes))
+        self.call("start")
+        def coverage():
+            return self.http("/api/scanner", headers=self.headers)[1]["result"]["market"]["coverage"]
+
+        self.tick()
+        initial = coverage()
+        self.assertEqual((initial["selected"], initial["discovered"], initial["pending_depth"]), (20, 10, 1))
+        self.assertEqual(initial["backlog"], 10)
+
+        started, release = threading.Event(), threading.Event()
+        books = {}
+        book = self.transport.book
+        metadata = self.transport.metadata
+        def delayed(row):
+            if row["venue"] == 1 and row["symbol"] == "TOKEN0-USDT":
+                started.set()
+                if not release.wait(15):
+                    raise TimeoutError("fixture release missing")
+            return metadata(row)
+
+        def capture(row):
+            payload = book(row)
+            books[row["venue"], row["symbol"]] = payload
+            return payload
+
+        self.transport.metadata = delayed
+        self.transport.book = capture
+        try:
+            self.runtime.step(blocking=False)
+            self.assertTrue(started.wait(5))
+            for _ in range(30):
+                self.runtime.step(blocking=False)
+                progress = coverage()
+                if progress["fresh"]:
+                    break
+                threading.Event().wait(.05)
+            self.assertGreater(progress["fresh"], 0)
+            self.assertGreater(progress["backlog"], 0)
+            self.assertFalse(release.is_set())
+        finally:
+            release.set()
+
+        active = []
+        for _ in range(15):
+            self.tick()
+            active.append(self.runtime.status()["active_subscriptions"])
+            if coverage()["full_round_ns"] is not None:
+                break
+        completed = coverage()
+        self.assertIsNotNone(completed["full_round_ns"])
+        self.assertEqual(completed["fresh"], 10)
+        self.assertTrue(all(row["sampled_at_ns"] for row in completed["routes"]))
+        self.assertGreater(max(active), 0)
+        self.assertLessEqual(max(active), 16)
+        self.assertEqual({coin.split("-")[0] for _, coin in books}, set(coins[:-1]))
+        digest, = self.runtime.console.last_evidence
+        self.assertTrue(self.runtime.console.replay(digest)["matches"])
+        samples = {str(row["pair"]): row["sampled_at_ns"] for row in completed["routes"]}
+        self.now[0] += 1_000_000
+        current = self.call("start")
+        self.call("configure", dict(expected_version=current["config_version"], scopes=scopes))
+        reset = coverage()
+        self.assertEqual(reset["fresh"], 10)
+        self.assertEqual(reset["backlog"], 10)
+        self.assertIsNone(reset["full_round_ns"])
+
+        self.transport.book = lambda row: books[row["venue"], row["symbol"]]
+        for _ in range(6):
+            self.tick()
+        repeated = coverage()
+        self.assertEqual({str(row["pair"]): row["sampled_at_ns"] for row in repeated["routes"]}, samples)
+        self.assertEqual(repeated["backlog"], 10)
+        self.now[0] += 6_000_000_000
+        expired = coverage()
+        self.assertEqual(expired["fresh"], 0)
+        self.assertGreater(expired["expired"], 0)
+        self.assertEqual(expired["expired"] + expired["unevaluable"], 10)
+        self.assertFalse(any(row["status"] == "evaluated" for row in self.call("start")["snapshot"]["candidates"]))
 
     def test_formal_runtime_native_http_evaluates_and_archive_replays(self):
         self._assert_formal_evaluation("HYPE")
@@ -1177,9 +1337,13 @@ class IntegrationTests(unittest.TestCase):
         self.assertFalse(poller.is_alive())
         for thread in self.runtime.discovery_threads: thread.join(timeout=15)
         self.assertEqual(self.runtime.console.snapshot["candidates"], [])
-        self.tick()
-        view = self.runtime.console.view()
-        self.assertEqual({r["environment"] for r in view["market"]["observations"]}, {"demo", "production"})
+        for _ in range(3):
+            self.tick()
+            view = self.runtime.console.view()
+            environments = {r["environment"] for r in view["market"]["observations"]}
+            if environments == {"demo", "production"} and view["snapshot"]["candidates"]:
+                break
+        self.assertEqual(environments, {"demo", "production"}, view["market"]["failures"])
         self.assertEqual(len(view["snapshot"]["candidates"]), 6)
         self.assertTrue(all(r["legs"][0]["requested_environment"] == "demo" for r in view["snapshot"]["candidates"]))
         self.assertIs(self.runtime.workers[old], workers[old])
@@ -1542,10 +1706,11 @@ class IntegrationTests(unittest.TestCase):
         self.transport.catalogue = catalogue
         self.runtime.discover(hl); self.tick()
         view = self.call("start")
-        self.assertEqual(len(view["market"]["observations"]), 2)
+        self.assertEqual(view["market"]["coverage"]["unpaired_markets"], 2)
+        self.assertEqual(view["market"]["observations"], [])
         self.assertEqual(view["snapshot"]["candidates"], [])
 
-    def test_verified_underlying_pairs_but_wrapped_or_unknown_labels_never_pair(self):
+    def test_only_registered_underlyings_pair_including_mixed_stablecoin_quotes(self):
         self.transport.coin = "BTC"
         self.start()
         view = self.call("start")
@@ -1569,9 +1734,10 @@ class IntegrationTests(unittest.TestCase):
                 self.runtime.console.configure(dict(expected_version=self.runtime.console.config["version"], scopes=[scope(1), scope(21)]))
                 self.call("start"); self.tick()
                 view = self.call("start")
-                self.assertEqual(len(view["market"]["observations"]), 2, view["market"])
-                self.assertTrue(all(o["continuous"] for o in view["market"]["observations"]))
-                self.assertEqual(view["snapshot"]["candidates"], [])
+                matched = coin in ("HYPE", "PURR")
+                self.assertEqual(view["market"]["coverage"]["unpaired_markets"], 0 if matched else 2)
+                self.assertEqual(len(view["market"]["observations"]), 2 if matched else 0)
+                self.assertEqual(len(view["snapshot"]["candidates"]), 6 if matched else 0)
                 row = next(r for r in self.runtime.bindings.values() if r["venue"] == 21)
                 self.assertEqual(row["specification"]["quote"], "USDC" if coin in ("HYPE", "PURR") else "USDT")
 
@@ -1626,6 +1792,8 @@ class IntegrationTests(unittest.TestCase):
         self.assertTrue(all(c["reason"] == "expired" for c in expired["snapshot"]["candidates"]))
         self.assertTrue(all(not o["continuous"] for o in expired["market"]["observations"]))
         self.call("stop")
+        self.assertEqual(self.runtime.source.owners["other-public-consumer"], shared)
+        self.tick()
         self.assertEqual(self.runtime.status()["active_subscriptions"],len(shared))
         self.runtime.source.release("other-public-consumer")
         self.assertEqual(self.runtime.status()["active_subscriptions"],0)

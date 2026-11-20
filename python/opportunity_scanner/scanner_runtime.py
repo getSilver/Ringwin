@@ -3,6 +3,7 @@
 Public protocol transport is replaceable; asset bindings come from node-owned
 activated-registry projection. No credentials or execution capability.
 """
+from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import replace
 from fractions import Fraction
 import hashlib
@@ -16,9 +17,10 @@ import subprocess
 import threading
 import time
 import urllib.request
+from urllib.parse import urlsplit
 
 from strategies.cross_venue import arbitrage_economics as economics
-from opportunity_scanner.arbitrage_scanner import Observation, decode_depth_snapshot
+from opportunity_scanner.arbitrage_scanner import Observation, compatible_pairs, decode_depth_snapshot
 from opportunity_scanner.scanner_console import CanonicalSource, CatalogueEntry, ScannerConsole
 from opportunity_scanner.scanner_config import atomic_json, _object
 from opportunity_scanner.scanner_history import History
@@ -31,6 +33,9 @@ MAX_FRAME = 120 * 1024
 MAX_CATALOGUE = 8192
 MAX_DISCOVERY_BYTES = 4 * 1024 * 1024
 MAX_HL_METADATA_BYTES = 1024 * 1024
+ACTIVE_BOOKS = 16
+VENUE_CONCURRENCY = 2
+DISPLAY_PAIRS = 42  # Six candidate variants per pair, below the snapshot limit.
 CATALOGUE_REFRESH_NS = 30_000_000_000
 CATALOGUE_TTL_NS = 90_000_000_000
 # Stable historical identities, never an admission list or a worker configuration.
@@ -43,6 +48,8 @@ class NativeScannerAdapter:
     metadata_limit = MAX_FRAME
     channel_capacity = 256*1024
     settlement_code = None
+    batch_quotes = False
+    shared_metadata = False
 
     def settings(self):
         return dict(type=self.kind, label=self.label, venue=str(self.venue),
@@ -61,6 +68,7 @@ class NativeScannerAdapter:
 class OkxScannerAdapter(NativeScannerAdapter):
     kind, label, venue = "okx", "OKX", 1
     products = ("spot", "linear")
+    batch_quotes = True
     routes = {"production": ("https://www.okx.com", "production"),
               "demo": ("https://www.okx.com", "production")}
 
@@ -72,6 +80,14 @@ class OkxScannerAdapter(NativeScannerAdapter):
         if operation == "catalogue":
             return transport.request(url, max_bytes=MAX_DISCOVERY_BYTES)
         return transport.request(url + "&instId=" + symbol)
+
+    def quotes(self, transport, endpoint, product):
+        kind = "SPOT" if product == "spot" else "SWAP"
+        value = json.loads(transport.request(endpoint + "/api/v5/market/tickers?instType=" + kind,
+                                             max_bytes=MAX_DISCOVERY_BYTES))
+        if value["code"] != "0":
+            raise ValueError("OKX ticker batch rejected")
+        return {row["instId"]: (row["bidPx"], row["askPx"]) for row in value["data"]}
 
     def validate_saved_binding(self, row, assets):
         if "okx_binding" not in row:
@@ -118,6 +134,7 @@ class OkxScannerAdapter(NativeScannerAdapter):
 class HyperliquidScannerAdapter(NativeScannerAdapter):
     kind, label, venue = "hyperliquid", "Hyperliquid", 21
     products = ("linear",)
+    batch_quotes = True
     routes = {"production": ("https://api.hyperliquid.xyz", "production"),
               "testnet": ("https://api.hyperliquid-testnet.xyz", "testnet")}
     metadata_limit = MAX_HL_METADATA_BYTES
@@ -128,7 +145,12 @@ class HyperliquidScannerAdapter(NativeScannerAdapter):
             return transport.request(endpoint + "/info", {"type": "l2Book", "coin": symbol})
         return transport.request(endpoint + "/info", {"type": "meta"}, max_bytes=self.metadata_limit)
 
+    def quotes(self, transport, endpoint, product):
+        values = json.loads(transport.request(endpoint + "/info", {"type": "allMids"}))
+        return {symbol: (mid, mid) for symbol, mid in values.items()}
+
     settlement_code = "USDC"
+    shared_metadata = True
 
     def validate_saved_binding(self, row, assets):
         binding = row["binding"]
@@ -182,18 +204,59 @@ DEFAULT_SCANNER_ADAPTERS = (OkxScannerAdapter(), HyperliquidScannerAdapter())
 class PublicTransport:
     def __init__(self, adapters=DEFAULT_SCANNER_ADAPTERS):
         self.adapters = {adapter.venue: adapter for adapter in adapters}
+        self._request_lock = threading.Lock()
+        self._request_after = {}
+        self._retry_after = {}
+        self._backoff = {}
 
     def request(self, url, body=None, *, max_bytes=MAX_FRAME):
+        # Conservative per-IP spacing, including catalogue/metadata requests.
+        # Hyperliquid charges 20 weight for metadata and 2 for book and mids.
+        endpoint = urlsplit(url).netloc
+        hl = endpoint in ("api.hyperliquid.xyz", "api.hyperliquid-testnet.xyz")
+        budget = "hyperliquid" if hl else "okx" if endpoint.endswith(".okx.com") else endpoint
+        weight = 2 if hl and body and body.get("type") in ("l2Book", "allMids") else 20 if hl else 1
+        spacing = .06 * weight if hl else .10
+        while True:
+            with self._request_lock:
+                now = time.monotonic()
+                if now < max(self._retry_after.get(budget, 0), self._retry_after.get(endpoint, 0)):
+                    raise OSError("public source temporarily backing off")
+                delay = self._request_after.get(budget, 0) - now
+                if delay <= 0:
+                    self._request_after[budget] = now + spacing
+                    break
+            time.sleep(delay)
         data = None if body is None else json.dumps(body, separators=(",", ":")).encode()
         request = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
         # urllib's default client signature is rejected by the OKX public gateway.
         opener = urllib.request.build_opener()
         opener.addheaders = []
-        with opener.open(request, timeout=3) as response:
-            payload = response.read(max_bytes + 1)
+        try:
+            with opener.open(request, timeout=3) as response:
+                payload = response.read(max_bytes + 1)
+        except OSError as error:
+            with self._request_lock:
+                retry_key = budget if getattr(error, "code", None) == 429 else endpoint
+                delay = min(30, 2 * self._backoff.get(retry_key, .25))
+                retry = getattr(error, "headers", None)
+                seconds = retry.get("Retry-After", "") if retry else ""
+                if len(seconds) <= 6 and seconds.isdecimal():
+                    delay = max(delay, min(300, int(seconds)))
+                self._backoff[retry_key] = min(delay, 30)
+                self._retry_after[retry_key] = max(self._retry_after.get(retry_key, 0), time.monotonic() + delay)
+            raise
+        with self._request_lock:
+            for key in (endpoint, budget):
+                if time.monotonic() >= self._retry_after.get(key, 0):
+                    self._backoff.pop(key, None)
         if len(payload) > max_bytes:
             raise ValueError("public transport capacity exceeded")
         return payload.decode("utf-8")
+
+    def quote_batch(self, source):
+        venue, endpoint, product = source
+        return self.adapters[venue].quotes(self, endpoint, product)
 
     def catalogue(self, setting, product):
         return self.adapters[int(setting["venue"])].request(self, "catalogue", setting["environment"], product)
@@ -265,7 +328,18 @@ class ScannerRuntime:
         self.source.runtime_status = self.status
         self.workers, self.observations, self.evidence, self.failures = {}, {}, {}, {}
         self.blocked = set()
-        self.cursor = 0
+        self.pending, self.generations, self.touched = {}, {}, {}
+        self.quotes, self.quote_pending = {}, {}
+        self.book_requests, self.metadata_requests = {}, {}
+        self.coverage_key = None
+        self.coverage_routes, self.attempted = {}, {}
+        self.skew_retried = set()
+        self.paired_markets = set()
+        self.diagnostic_markets = set()
+        self.round_remaining = set()
+        self.round_started_ns = self.round_duration_ns = None
+        self.executor = ThreadPoolExecutor(max_workers=ACTIVE_BOOKS, thread_name_prefix="scanner-market")
+        self.cursor = self.dispatch = 0
         self.console = ScannerConsole(self.source, History(), clock=clock,
             config_path=self.directory/"scanner-config.json")
         self.console.fee_schedules = self.fees
@@ -640,14 +714,18 @@ class ScannerRuntime:
         # Source owns subscription serialization. Network work occurs outside its lock.
         with self.lock:
             if identity not in self.workers:
-                if len(self.workers) >= 16:
-                    raise ValueError("scanner active subscription capacity (16); narrow the asset scope")
                 self.workers[identity] = None
+                self.generations[identity] = object()
                 self.blocked.discard(identity)
 
     def release(self, identity):
         with self.lock:
             worker = self.workers.pop(identity, None)
+            generation = self.generations.pop(identity, None)
+            self.touched.pop(identity, None)
+            pending = self.pending.get(identity)
+            if pending and pending[0] is generation:
+                worker = None  # The in-flight job owns the worker until it returns.
             self.blocked.discard(identity)
             self.observations.pop(identity, None)
             self.evidence.pop(identity, None)
@@ -705,117 +783,368 @@ class ScannerRuntime:
         """Read and validate committed RawIngress through the native replay interface."""
         with self.poll_lock:
             return {str(identity): self._input(worker, "audit", "")
-                    for identity, worker in tuple(self.workers.items()) if worker is not None}
+                    for identity, worker in tuple(self.workers.items()) if worker is not None and identity not in self.pending}
 
-    def step(self):
+    def step(self, *, blocking=True):
+        """Advance scheduling. The service publishes without waiting on network jobs."""
         self._refresh_catalogues()
         with self.poll_lock:
-            self._step()
+            self._collect_samples()
+            futures = self._schedule_samples()
+        if blocking and futures:
+            wait(futures)
+        with self.poll_lock:
+            self._collect_samples()
+            self._publish()
 
-    def _step(self):
-        """One bounded poll; deterministic transport/clock may drive this in acceptance."""
-        session = self.console.session
-        version = self.console.config["version"]
+    def _quote_source(self, row):
+        return row["venue"], self.adapters[row["venue"]].routes[row["environment"]][0], row["product"]
+
+    def _shared_request(self, cache, key, fetch):
         with self.lock:
-            selected = tuple(self.workers.items())
-        for identity, worker in selected:
-            with self.lock:
-                if identity in self.source.unavailable or identity in self.blocked or identity not in self.workers or self.workers[identity] is not worker:
-                    continue
-            row = self.bindings[identity]
+            request = cache.get(key)
+            owner = request is None
+            if owner:
+                request = cache[key] = Future()
+        if owner:
             try:
-                if worker is None:
-                    worker = self._open(identity)
-                    with self.lock:
-                        if identity not in self.workers:
-                            self._close_worker(worker)
-                            continue
-                        self.workers[identity] = worker
-                    result = self._input(worker, "metadata", self.transport.metadata(row))
-                    if result["failure"]:
-                        raise ValueError(result["failure"])
-                    worker[2]["next_metadata_ns"] = self.clock()+30_000_000_000
-                    worker[2]["epoch"] += 1
-                    result = self._input(worker, "subscribe", json.dumps({"event":"polling_started"}))
-                if self.clock() >= worker[2]["next_metadata_ns"]:
-                    result = self._input(worker, "metadata", self.transport.metadata(row))
-                    worker[2]["next_metadata_ns"] = self.clock()+30_000_000_000
-                    if result["failure"]:
-                        raise ValueError(result["failure"])
-                result = self._input(worker, "book", self.transport.book(row))
+                request.set_result(fetch())
+            except Exception as error:
+                request.set_exception(error)
+        return request.result()
+
+    def _book(self, row):
+        key = (*self._quote_source(row), row["symbol"])
+        return self._shared_request(self.book_requests, key, lambda: self.transport.book(row))
+
+    def _metadata(self, row):
+        source = self._quote_source(row)
+        adapter = self.adapters[row["venue"]]
+        symbol = None if adapter.shared_metadata else row["symbol"]
+        return self._shared_request(self.metadata_requests, (*source, symbol), lambda: self.transport.metadata(row))
+
+    def _sample(self, identity, row, worker):
+        try:
+            if worker is None:
+                worker = self._open(identity, row=row)
+                result = self._input(worker, "metadata", self._metadata(row))
                 if result["failure"]:
                     raise ValueError(result["failure"])
-                payload = result["depth"]
-                with self.lock:
-                    if identity not in self.workers or self.workers.get(identity) is not worker:
-                        continue  # Late input from a released incarnation.
-                    if payload is not None:
-                        entry = self.source.registered[identity]
-                        self.observations[identity] = Observation(entry.venue, entry.account, entry.kind, entry.rules,
-                            bytes.fromhex(payload), result["healthy"], entry.environment)
-                    self.evidence[identity] = dict(result, venue=str(row["venue"]), instrument=row["instrument"], raw_path=worker[3], requested_environment=row["environment"],
-                        actual_environment=self.adapters[row["venue"]].routes[row["environment"]][1], input_kind=getattr(self.transport, "input_kind", "venue_public"))
-                    self.evidence[identity]["asset_basis"] = self._asset_basis(row)
-                    self.failures.pop(identity, None)
-            except (OSError, ValueError, KeyError) as error:
-                with self.lock:
-                    if identity not in self.workers or self.workers.get(identity) is not worker:
-                        continue
+                worker[2]["next_metadata_ns"] = self.clock()+30_000_000_000
+                worker[2]["epoch"] += 1
+                self._input(worker, "subscribe", json.dumps({"event":"polling_started"}))
+            if self.clock() >= worker[2]["next_metadata_ns"]:
+                result = self._input(worker, "metadata", self._metadata(row))
+                worker[2]["next_metadata_ns"] = self.clock()+30_000_000_000
+                if result["failure"]:
+                    raise ValueError(result["failure"])
+            result = self._input(worker, "book", self._book(row))
+            if result["failure"]:
+                raise ValueError(result["failure"])
+            return worker, result, None
+        except Exception as error:
+            return worker, None, (str(error) or type(error).__name__)[:2048]
+
+    def _collect_samples(self):
+        with self.lock:
+            for source, future in tuple(self.quote_pending.items()):
+                if not future.done():
+                    continue
+                self.quote_pending.pop(source)
+                try:
+                    self.quotes[source] = self.clock(), future.result()
+                except (OSError, ValueError, KeyError, TypeError):
+                    self.quotes[source] = self.clock(), {}
+            for identity, (generation, future) in tuple(self.pending.items()):
+                if not future.done():
+                    continue
+                self.pending.pop(identity)
+                worker, result, error = future.result()
+                if self.generations.get(identity) is not generation:
+                    if worker:
+                        self._close_worker(worker)
+                    continue
+                if error is not None:
                     old = self.observations.get(identity)
                     if old:
                         self.observations[identity] = replace(old, continuous=False)
-                    self.failures[identity] = str(error)[:2048]
-                    if "Unavailable" in str(error) or "capacity exhausted" in str(error):
+                    self.failures[identity] = error
+                    if "Unavailable" in error or "capacity exhausted" in error:
                         self.blocked.add(identity)
+                    if worker:
+                        self._close_worker(worker)
                     self.workers[identity] = None
-                if worker:
+                    continue
+                self.workers[identity] = worker
+                row = self.bindings[identity]
+                if result["depth"] is not None:
+                    previous = self.observations.get(identity)
+                    if (previous and result["healthy"] and self.evidence[identity]["raw_sha256"] == result["raw_sha256"]):
+                        # A reopened worker can accept the last frame in a new native epoch.
+                        # Preserve its canonical time and matching archive evidence.
+                        self.failures.pop(identity, None)
+                        continue
+                    self.observations[identity] = replace(self._observation(identity),
+                        book=bytes.fromhex(result["depth"]), continuous=result["healthy"])
+                elif not result["healthy"] and identity in self.observations:
+                    self.observations[identity] = replace(self.observations[identity], continuous=False)
+                self.evidence[identity] = dict(result, venue=str(row["venue"]), instrument=row["instrument"],
+                    raw_path=worker[3], requested_environment=row["environment"],
+                    actual_environment=self.adapters[row["venue"]].routes[row["environment"]][1],
+                    input_kind=getattr(self.transport, "input_kind", "venue_public"), asset_basis=self._asset_basis(row))
+                self.failures.pop(identity, None)
+
+    def _observation(self, identity):
+        entry = self.source.registered[identity]
+        binding = self.bindings[identity]
+        endpoint, actual = self.adapters[entry.venue].routes[entry.environment]
+        associations = binding.get("asset_associations", {})
+        assets = tuple(associations.get(role) for role in ("base", "quote"))
+        registered_assets = (tuple((int(asset["asset"]), asset["atomic_scale"]) for asset in assets)
+                             if all(assets) else None)
+        return Observation(entry.venue, entry.account, entry.kind, entry.rules, None, False, entry.environment,
+            market_source=(actual, endpoint, getattr(self.transport, "input_kind", "venue_public")),
+            registered_assets=registered_assets)
+
+    def _quote_edge(self, pair, now):
+        if not economics.compatible_quotes(*(self.source.registered[i].rules for i in pair)):
+            return None
+        prices = []
+        for identity in pair:
+            row = self.bindings[identity]
+            at, values = self.quotes.get(self._quote_source(row), (0, {}))
+            if not 0 <= now-at < self.console.max_age_ns:
+                return None
+            try:
+                bid, ask = map(Fraction, values[row["symbol"]])
+                if not 0 < bid <= ask:
+                    return None
+                prices.append((bid, ask))
+            except (ValueError, KeyError, TypeError, ZeroDivisionError):
+                return None
+        (bid, ask), (other_bid, other_ask) = prices
+        return max(other_bid/ask, bid/other_ask) - 1
+
+    def _refresh_coverage_scope(self, selected, now):
+        console = self.console
+        key = (console.session, console.config["version"], frozenset(selected),
+               tuple((identity, self.generations.get(identity)) for identity in sorted(selected)))
+        if key == self.coverage_key:
+            return
+        previous = dict(self.coverage_key[3]) if self.coverage_key and self.coverage_key[0] == console.session else {}
+        self.coverage_key = key
+        self.coverage_routes = {
+            pair: self.coverage_routes.get(pair)
+            if all(i in previous and previous[i] is self.generations.get(i) for i in pair) else None
+            for pair in compatible_pairs(self._observation(i) for i in selected)
+        }
+        self.paired_markets = {identity for pair in self.coverage_routes for identity in pair}
+        # Keep small one-Venue diagnostic scopes usable.
+        self.diagnostic_markets = (selected if len(selected) <= ACTIVE_BOOKS
+                                   and len({i[0] for i in selected}) == 1 else set())
+        self.attempted = {}
+        self.skew_retried.clear()
+        self.round_remaining = set(self.coverage_routes)
+        self.round_started_ns = now
+        self.round_duration_ns = None
+
+    def _schedule_samples(self):
+        with self.console.lock, self.source.lock, self.lock:
+            console = self.console
+            selected = console._selected(include_unavailable=True) if console.desired == "running" else set()
+            now = self.clock()
+            self._refresh_coverage_scope(selected, now)
+            external = {identity for owner, identities in self.source.owners.items() if owner != console.session for identity in identities}
+            for cache in (self.book_requests, self.metadata_requests):
+                for key, request in tuple(cache.items()):
+                    if request.done():
+                        del cache[key]
+            wanted_markets = self.paired_markets | self.diagnostic_markets | external
+            for identity in self.workers.keys() - wanted_markets - self.pending.keys():
+                worker = self.workers[identity]
+                if worker is not None:
                     self._close_worker(worker)
-        with self.lock:
-            observations = self.observations.copy()
-            market_errors = self.failures.copy()
-            evidence = {str(k): v for k, v in self.evidence.items()}
-            self.cursor += 1
-            cursor = self.cursor
-        # Publish with evidence through the same console public seam. No HTTP input route.
+                    self.workers[identity] = None
+            inflight = {}
+            for identity in self.pending:
+                inflight[identity[0]] = inflight.get(identity[0], 0) + 1
+            futures = []
+            wide = len(self.paired_markets) > ACTIVE_BOOKS
+            if wide and getattr(self.transport, "supports_batch_quotes",
+                    getattr(self.transport, "input_kind", "") != "synthetic_protocol_fixture"):
+                for source in sorted({self._quote_source(self.bindings[i]) for i in self.paired_markets
+                                      if self.adapters[i[0]].batch_quotes}):
+                    if (source not in self.quote_pending and source[0] not in
+                            {item[0] for item in self.quote_pending}
+                            and now - self.quotes.get(source, (-2_000_000_000, {}))[0] >= 2_000_000_000):
+                        future = self.executor.submit(self.transport.quote_batch, source)
+                        self.quote_pending[source] = future
+                        futures.append(future)
+            edges = {pair: self._quote_edge(pair, now) for pair in self.coverage_routes} if wide else {}
+            # A single paired retry can repair skew introduced by worker startup.
+            # Subsequent attempts resume their normal position in the rotation.
+            retries = {pair for pair in self.round_remaining - self.skew_retried
+                       if pair in self.attempted
+                       and all(self.workers.get(i) is not None and i not in self.pending
+                               and i in self.observations and self.observations[i].continuous for i in pair)
+                       and abs(decode_depth_snapshot(self.observations[pair[0]].book)["visible_at_ns"]
+                               - decode_depth_snapshot(self.observations[pair[1]].book)["visible_at_ns"]) > console.max_skew_ns}
+            # Low-edge routes with recent depth yield their repeat poll to other routes.
+            routes = [pair for pair, sampled in self.coverage_routes.items()
+                      if pair in self.round_remaining or sampled is None or now-sampled >= console.max_age_ns//2
+                      or edges.get(pair) is None or edges[pair] > 0]
+            routes.sort(key=lambda pair: (pair not in retries, self.attempted.get(pair, -1),
+                                          -(edges.get(pair) or 0), pair))
+            outstanding = set(self.pending)
+            active = outstanding | {i for i, worker in self.workers.items() if worker is not None}
+            scheduled = set()
+            singles = sorted((self.diagnostic_markets | external) - self.paired_markets,
+                             key=lambda i: (self.touched.get(i, -1), i))
+            for pair in (*routes, *((i,) for i in singles)):
+                if len(pair) == 2 and any(i in outstanding or i in self.blocked or i in self.source.unavailable for i in pair):
+                    continue
+                wanted = [i for i in pair if i in self.workers and i not in self.pending
+                          and i not in scheduled and i not in self.blocked and i not in self.source.unavailable]
+                if not wanted or any(inflight.get(i[0], 0) >= VENUE_CONCURRENCY for i in wanted):
+                    continue
+                if len(pair) == 2 and any(self._quote_source(self.bindings[i]) in self.quote_pending
+                        and self._quote_source(self.bindings[i]) not in self.quotes for i in wanted):
+                    continue
+                idle = active - set(self.pending) - set(pair)
+                needed = max(0, len(active.union(wanted)) - ACTIVE_BOOKS)
+                if needed > len(idle):
+                    continue
+                for victim in sorted(idle, key=lambda i: (self.touched.get(i, 0), i))[:needed]:
+                    self._close_worker(self.workers[victim])
+                    self.workers[victim] = None
+                    active.remove(victim)
+                if wanted and len(pair) == 2:
+                    self.dispatch += 1
+                    self.attempted[pair] = self.dispatch
+                if pair in retries and len(wanted) == 2:
+                    self.skew_retried.add(pair)
+                for identity in wanted:
+                    active.add(identity)
+                    scheduled.add(identity)
+                    self.touched[identity] = now
+                    inflight[identity[0]] = inflight.get(identity[0], 0) + 1
+                    future = self.executor.submit(self._sample, identity, self.bindings[identity], self.workers[identity])
+                    self.pending[identity] = self.generations[identity], future
+                    futures.append(future)
+            return futures
+
+    def _coverage(self, now, *, advance=False):
+        selected = self.coverage_key[2] if self.coverage_key else ()
+        routes = self.coverage_routes
+        times = {i: decode_depth_snapshot(o.book)["visible_at_ns"] for i, o in self.observations.items()}
+        counts = dict(pending=0, pending_depth=0, fresh=0, expired=0, unevaluable=0)
+        recent = []
+        for pair, sampled in routes.items():
+            a, z = (times.get(i) for i in pair)
+            if (a is not None and z is not None and abs(a-z) <= self.console.max_skew_ns
+                    and all(self.observations[i].continuous for i in pair)):
+                cutoff = min(a, z)
+                if sampled is None or cutoff > sampled:
+                    sampled = cutoff
+                    if advance:
+                        routes[pair] = cutoff
+                        if cutoff >= self.round_started_ns:
+                            self.round_remaining.discard(pair)
+            if any(i in self.failures or i in self.source.unavailable or
+                   (i in self.observations and not self.observations[i].continuous) for i in pair):
+                state = "unevaluable"
+            elif sampled is not None and a is not None and z is not None and min(a, z) == sampled and (
+                    0 <= now-sampled < self.console.max_age_ns and abs(a-z) <= self.console.max_skew_ns
+                    and all(self.observations[i].continuous and
+                            self.observations[i].rules.valid_from_ns <= now < self.observations[i].rules.valid_until_ns for i in pair)):
+                state = "fresh"
+            elif sampled is not None:
+                state = "expired"
+            elif a is not None and z is not None:
+                state = "unevaluable"
+            else:
+                edge = self._quote_edge(pair, now)
+                state = "pending_depth" if edge is not None and edge > 0 else "pending"
+            counts[state] += 1
+            recent.append((pair, sampled, state))
+        if advance and routes and not self.round_remaining:
+            self.round_duration_ns = now-self.round_started_ns
+            self.round_started_ns = now
+            self.round_remaining = set(routes)
+            self.skew_retried.clear()
+        recent.sort(key=lambda item: (item[2] != "fresh", -(item[1] or 0), item[0]))
+        metrics = dict(selected=len(selected), discovered=len(routes),
+            unpaired_markets=len(set(selected) - self.paired_markets),
+            backlog=len(self.round_remaining), active=len(self.pending),
+            full_round_ns=str(self.round_duration_ns) if self.round_duration_ns is not None else None,
+            **counts)
+        return metrics, recent[:256]
+
+    def _publish(self):
+        # Scope changes and publication serialize on the console lock.
         with self.console.lock:
-            if self.console.desired == "running" and self.console.session == session and self.console.config["version"] == version:
+            if self.console.desired == "running" and not self.console.settings_pending:
+                session = self.console.session
                 at_ns = self.clock()
                 selected_ids = self.console._selected()
-                selected_observations = []
-                with self.source.lock:
-                    for identity in sorted(selected_ids):
-                        entry = self.source.registered[identity]
-                        endpoint, actual = self.adapters[entry.venue].routes[entry.environment]
-                        source = (actual, endpoint, getattr(self.transport, "input_kind", "venue_public"))
-                        observation = observations.get(identity)
-                        binding = self.bindings[identity]
-                        if observation is None:
-                            observation = Observation(entry.venue, entry.account, entry.kind, entry.rules,
-                                None, False, entry.environment)
-                            evidence.setdefault(str(identity), dict(asset_basis=self._asset_basis(binding)))
-                        associations = binding.get("asset_associations", {})
-                        assets = tuple(associations.get(role) for role in ("base", "quote"))
-                        registered_assets = (tuple((int(asset["asset"]), asset["atomic_scale"]) for asset in assets)
-                                             if all(assets) else None)
-                        selected_observations.append(replace(observation, market_source=source,
-                            market_error=market_errors.get(identity), registered_assets=registered_assets))
+                with self.source.lock, self.lock:
+                    self._refresh_coverage_scope(self.console._selected(include_unavailable=True), at_ns)
+                    _, recent = self._coverage(at_ns, advance=True)
+                    pairs, ids = [], set()
+                    for pair, _, _ in recent:
+                        if set(pair) <= selected_ids and len(ids.union(pair)) <= 64:
+                            pairs.append(pair)
+                            ids.update(pair)
+                        if len(pairs) == DISPLAY_PAIRS:
+                            break
+                    pairs = tuple(pairs)
+                    selected_observations = tuple(replace(
+                        self.observations[i] if i in self.observations else self._observation(i), market_error=self.failures.get(i))
+                        for i in sorted(ids))
+                    fresh_ids = (selected_ids - self.paired_markets - self.diagnostic_markets) | {
+                        i for i, o in self.observations.items() if o.continuous and
+                        0 <= at_ns-decode_depth_snapshot(o.book)["visible_at_ns"] < self.console.max_age_ns}
+                    # Archive only evidence for pairs represented by the snapshot.
+                    evidence = {str(i): self.evidence[i] for i in sorted(ids) if i in self.evidence}
+                    for i in ids:
+                        evidence.setdefault(str(i), dict(asset_basis=self._asset_basis(self.bindings[i])))
                 plans, failures, versions = self.evaluation.build(
                     tuple(o for o in selected_observations if o.book is not None), at_ns=at_ns,
-                    max_age_ns=self.console.max_age_ns, max_skew_ns=self.console.max_skew_ns, bindings=self.bindings)
+                    max_age_ns=self.console.max_age_ns, max_skew_ns=self.console.max_skew_ns,
+                    bindings=self.bindings, pairs=pairs)
                 evidence["evaluation"] = dict(self.evaluation.state, input_versions=versions)
-                self.console.publish(session, cursor, tuple(selected_observations), plans, at_ns=at_ns,
-                    evidence=evidence, plan_failures=failures, input_versions=versions, fx_rate=self._fx_rate(at_ns))
+                self.cursor += 1
+                self.console.publish(session, self.cursor, selected_observations, plans, at_ns=at_ns,
+                    evidence=evidence, plan_failures=failures, input_versions=versions, fx_rate=self._fx_rate(at_ns),
+                    pairs=pairs, fresh_ids=fresh_ids)
 
     def status(self):
         observations = []
-        for identity, o in self.observations.copy().items():
+        with self.console.lock, self.source.lock, self.lock:
+            coverage = None
+            if self.console.desired == "running" and not self.console.settings_pending:
+                now = self.clock()
+                self._refresh_coverage_scope(self.console._selected(include_unavailable=True), now)
+                coverage, recent = self._coverage(now)
+                coverage["routes"] = [dict(pair=[list(map(str, i)) for i in pair], status=state,
+                    sampled_at_ns=str(sampled) if sampled is not None else None,
+                    sample_age_ms=(now-sampled)//1_000_000 if sampled is not None else None)
+                    for pair, sampled, state in recent]
+            scales = {int(a["identity"]): a["atomic_scale"] for a in self.source.assets}
+            bases = {identity: row.get("asset_basis") for identity, row in self.evidence.items()}
+            active = {i for i, worker in self.workers.items() if worker is not None} | set(self.pending)
+            visible = sorted(active)
+            books = [(i, self.observations[i]) for i in visible if i in self.observations]
+            evidence = [self.evidence[i] for i in visible if i in self.evidence]
+            failures = {str(k): v for k, v in self.failures.items()}
+        for identity, o in books:
             book = decode_depth_snapshot(o.book)
             ratio = lambda value: [str(value.numerator), str(value.denominator)]
-            scale = next(a["atomic_scale"] for a in self.source.assets if int(a["identity"]) == o.rules.base_asset)
+            scale = scales[o.rules.base_asset]
             healthy = o.continuous and self.clock()-book["visible_at_ns"] < self.console.max_age_ns
             observations.append(dict(venue=str(o.venue), account=str(o.account), instrument=str(o.rules.instrument), environment=o.environment,
                 base_asset=str(o.rules.base_asset), quote_asset=str(o.rules.quote_asset), continuous=healthy,
-                asset_basis=self.evidence.get(identity, {}).get("asset_basis"),
+                asset_basis=bases.get(identity),
                 bid_quote_atoms=ratio(book["bids"][0][0]*o.rules.tick_quote_atoms_per_base_atom*10**scale),
                 ask_quote_atoms=ratio(book["asks"][0][0]*o.rules.tick_quote_atoms_per_base_atom*10**scale),
                 bid_depth_atoms=ratio(sum(o.rules.notional(t,l) for t,l in book["bids"])) if all(l is not None for _,l in book["bids"]) else None,
@@ -823,19 +1152,19 @@ class ScannerRuntime:
                 bid_levels=len(book["bids"]), ask_levels=len(book["asks"]),
                 truncated=book["bids_truncated"] or book["asks_truncated"],
                 visible_at_ns=str(book["visible_at_ns"]), rules_version=str(o.rules.version)))
-        return dict(discovery=copy.deepcopy(self.discovery_status), active_subscriptions=len(self.workers), routes=[
+        return dict(discovery=copy.deepcopy(self.discovery_status), active_subscriptions=len(active), coverage=coverage, routes=[
                         dict(venue=str(adapter.venue), requested_environment=environment, actual_environment=actual,
                              endpoint=url, products=list(adapter.products))
                         for adapter in self.adapters.values() for environment, (url, actual) in adapter.routes.items()],
-                    failures={str(k): v for k, v in self.failures.copy().items()}, observations=observations,
-                    evidence=list(self.evidence.copy().values()), trading_qualified=False,
+                    failures=failures, observations=observations,
+                    evidence=evidence, trading_qualified=False,
                     evaluation=copy.deepcopy(self.evaluation.state),
                     missing_evaluation=list(self.evaluation.state["missing"]))
 
     def _run(self):
         while not self.closing.wait(.5) and not self.console.shutdown.is_set():
             try:
-                self.step()
+                self.step(blocking=False)
             except Exception as error:
                 with self.console.lock:
                     self.console.stop()
@@ -852,5 +1181,8 @@ class ScannerRuntime:
             self.thread.join(timeout=20)
             if self.thread.is_alive():
                 raise OSError("public scanner worker did not stop")
-        for identity in tuple(self.workers):
-            self.release(identity)
+        self.executor.shutdown(wait=True)
+        with self.poll_lock:
+            self._collect_samples()
+            for identity in tuple(self.workers):
+                self.release(identity)

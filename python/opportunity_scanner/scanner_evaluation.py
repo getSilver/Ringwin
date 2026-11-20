@@ -101,10 +101,10 @@ class EvaluationInputs:
             raise b.Rejected("model_warming:"+point.reason)
         return point
 
-    def build(self, observations, *, at_ns, max_age_ns, max_skew_ns, bindings):
+    def build(self, observations, *, at_ns, max_age_ns, max_skew_ns, bindings, pairs=None):
         """Return plans AND concrete per-candidate admission failures for one cutoff."""
         self._remember(observations)
-        pairs = s.compatible_pairs(observations)
+        pairs = s.compatible_pairs(observations, selected_pairs=pairs)
         keys = [key for pair, legs in pairs.items() for key in s.pair_keys(pair, legs)]
         if len(keys) > 256:
             raise b.Rejected("scan_candidate_capacity")

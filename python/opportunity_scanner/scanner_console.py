@@ -232,7 +232,7 @@ class ScannerConsole:
                 environment=row["environment"]))
         return scanner.Scope(max(1, int(config["version"])), members=tuple(members))
 
-    def _selected(self):
+    def _selected(self, *, include_unavailable=False):
         if self.settings_pending:
             raise ValueError("exchange settings reconciliation pending")
         scope = self._scope()
@@ -248,7 +248,7 @@ class ScannerConsole:
                     raise ValueError("scanner scope requires saved exchange setting")
         with self.source.lock:
             for identity, observed in self.source.registered.items():
-                if identity in self.source.unavailable:
+                if not include_unavailable and identity in self.source.unavailable:
                     continue
                 for row, member in zip(self.config["scopes"], scope.members):
                     # Depth is evaluated per fresh publication, not on catalogue admission.
@@ -256,7 +256,8 @@ class ScannerConsole:
                              and observed.environment == row["environment"])
                     if match and (identity in permitted or row["new_instruments"]) and (
                             not member.include_assets or observed.rules.exposure_asset in member.include_assets
-                            ) and observed.rules.exposure_asset not in member.exclude_assets:
+                            ) and observed.rules.exposure_asset not in member.exclude_assets and (
+                            member.quote_asset is None or observed.rules.quote_asset == member.quote_asset):
                         result.add(identity)
         return result
 
@@ -461,14 +462,15 @@ class ScannerConsole:
             return self.view()
 
     def publish(self, session, cursor, observations, plans=(), *, at_ns, evidence=None,
-                plan_failures=None, input_versions=None, fx_rate=None):
+                plan_failures=None, input_versions=None, fx_rate=None, pairs=None, fresh_ids=None):
         """Node-only full canonical input; no HTTP route accepts observations/plans."""
         with self.lock:
             if self.desired != "running" or session != self.session:
                 raise ValueError("inactive scanner session")
             if type(cursor) is not int or not 1 <= cursor < 1 << 63:
                 raise ValueError("scanner cursor")
-            digest = checkpoint.content((observations, plans, at_ns, self.config, plan_failures or {}, input_versions, fx_rate))
+            digest = checkpoint.content((observations, plans, at_ns, self.config, plan_failures or {}, input_versions, fx_rate, pairs,
+                                         tuple(sorted(fresh_ids)) if fresh_ids is not None else None))
             if cursor == self.cursor:
                 if self.last_publication != digest:
                     raise ValueError("scanner input identity conflict")
@@ -484,11 +486,11 @@ class ScannerConsole:
             fresh = {x.identity for x in observations if x.book is not None and x.continuous and
                      at_ns - self.max_age_ns < scanner.decode_depth_snapshot(x.book)["visible_at_ns"] <= at_ns}
             self.warming.intersection_update(selected)
-            self.warming.difference_update(fresh)
+            self.warming.difference_update(fresh if fresh_ids is None else fresh_ids)
             try:
                 snapshot = scanner.scan(observations, plans, at_ns=at_ns, cursor=cursor,
                     max_age_ns=self.max_age_ns, max_skew_ns=self.max_skew_ns, scope=self._scope(),
-                    plan_failures=plan_failures, input_versions=input_versions, fx_rate=fx_rate)
+                    plan_failures=plan_failures, input_versions=input_versions, fx_rate=fx_rate, selected_pairs=pairs)
                 snapshot["candidates"] = [r for r in snapshot["candidates"] if all(tuple(map(int, x)) in selected for x in r["pair"])]
             except Exception as error:
                 self.phase = "Faulted"
@@ -511,7 +513,8 @@ class ScannerConsole:
                                     at_ns=str(at_ns), cursor=str(cursor), max_age_ns=str(self.max_age_ns),
                                     max_skew_ns=str(self.max_skew_ns), snapshot=snapshot,
                                     selected_identities=[list(map(str, x)) for x in sorted(selected)],
-                                    supplied_evidence=evidence or {}))
+                                    supplied_evidence=evidence or {},
+                                    **({"pairs": freeze(pairs)} if pairs is not None else {})))
             if len(material.encode()) > MAX_BYTES:
                 self._gap("scanner archive capacity")
                 raise ValueError("scanner archive capacity")
@@ -652,7 +655,8 @@ class ScannerConsole:
             at_ns=int(archive["at_ns"]), cursor=int(archive["cursor"]),
             max_age_ns=int(archive["max_age_ns"]), max_skew_ns=int(archive["max_skew_ns"]), scope=self._scope(archive["config"]),
             plan_failures=archive.get("plan_failures", {}), input_versions=archive.get("input_versions"),
-            legacy=archive["schema"] == "scanner_inputs_v1", fx_rate=archive.get("fx_rate"))
+            legacy=archive["schema"] == "scanner_inputs_v1", fx_rate=archive.get("fx_rate"),
+            selected_pairs=archive.get("pairs"))
         registered = {tuple(map(int, x)) for x in archive["selected_identities"]}
         result["candidates"] = [r for r in result["candidates"] if all(tuple(map(int, x)) in registered for x in r["pair"])]
         return dict(replayable=True, matches=result == archive["snapshot"], snapshot=result)

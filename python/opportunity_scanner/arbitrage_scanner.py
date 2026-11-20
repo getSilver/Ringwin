@@ -209,9 +209,25 @@ def candidate_id(pair, direction, mode, maker_leg):
     return hashlib.sha256(json.dumps([SCHEMA, key], separators=(",", ":")).encode("ascii")).hexdigest()
 
 
-def compatible_pairs(observations, *, legacy=False):
+def compatible_pairs(observations, *, legacy=False, selected_pairs=None):
+    indexed = {x.identity: x for x in observations}
+    if selected_pairs is None:
+        # Every compatibility rule requires the same exposure or a shared
+        # registered base. Keep unrelated catalogue entries out of the join.
+        groups = {}
+        for item in indexed.values():
+            groups.setdefault(("exposure", item.rules.exposure_asset), []).append(item.identity)
+            if not legacy:
+                bases = {item.rules.registered_base, item.registered_assets[0] if item.registered_assets else None}
+                for base in bases - {None}:
+                    groups.setdefault(("registered", base), []).append(item.identity)
+        selected_pairs = {pair for group in groups.values() for pair in combinations(sorted(group), 2)
+                          if pair[0][0] != pair[1][0]}
     pairs = {}
-    for a, z in combinations(sorted(observations, key=lambda x: x.identity), 2):
+    for key in sorted(selected_pairs):
+        if any(identity not in indexed for identity in key):
+            continue
+        a, z = (indexed[identity] for identity in key)
         if (a.venue == z.venue or (legacy and a.environment != z.environment)
                 or a.account == z.account or a.rules.instrument == z.rules.instrument):
             continue
@@ -244,7 +260,7 @@ def _valid_failure(failure):
 
 
 def scan(observations, plans, *, at_ns, cursor, max_age_ns, max_skew_ns, scope=None,
-         plan_failures=None, input_versions=None, legacy=False, fx_rate=None):
+         plan_failures=None, input_versions=None, legacy=False, fx_rate=None, selected_pairs=None):
     """Full replacement snapshot; omitted/expired rows cannot retain eligibility.
 
     Plans are frozen research scenario inputs, not scanner-generated forecasts.
@@ -266,7 +282,7 @@ def scan(observations, plans, *, at_ns, cursor, max_age_ns, max_skew_ns, scope=N
         raise b.Rejected("duplicate_observation")
     if scope is not None and not isinstance(scope, Scope):
         raise b.Rejected("scan_scope")
-    pairs = compatible_pairs(observations, legacy=legacy)
+    pairs = compatible_pairs(observations, legacy=legacy, selected_pairs=selected_pairs)
     plan_failures = {} if plan_failures is None else plan_failures
     if type(plan_failures) is not dict or len(plan_failures) > 256 or any(
             type(key) is not str or not _valid_failure(failure) for key, failure in plan_failures.items()):
