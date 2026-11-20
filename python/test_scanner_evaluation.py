@@ -6,7 +6,7 @@ from pathlib import Path
 import math
 import unittest
 
-from opportunity_scanner import arbitrage_scanner as s
+from opportunity_scanner import arbitrage_scanner as s, scanner_archive
 from opportunity_scanner.scanner_evaluation import EvaluationInputs, publish_inputs, SCHEMA
 from strategies.cross_venue import arbitrage_evaluation as v
 from strategies.cross_venue import arbitrage_economics as e
@@ -58,7 +58,7 @@ def native_inputs(observations, at, clock_id):
     """Synthetic research evidence bound to actual native-decoded rules and books."""
     legs = []
     books = tuple(s.decode_depth_snapshot(o.book) for o in observations)
-    quantity = 10*observations[0].rules.base_atoms_per_lot
+    quantity = 1600*observations[0].rules.base_atoms_per_lot
     lots = tuple(int(quantity/o.rules.base_atoms_per_lot) for o in observations)
     for i, o in enumerate(observations):
         fee = e.FeeRule(o.rules.instrument, o.rules.version, o.rules.quote_asset, 0, 0, 0, END)
@@ -69,7 +69,7 @@ def native_inputs(observations, at, clock_id):
         math.log(float(v._mid(books[1], legs[1].rules)/v._mid(books[0], legs[0].rules))))
     entry = v.Entry("matched", tuple(legs), (), at, True, (), (), point)
     frames = []
-    for delay in (0,1,100,105):
+    for delay in (0, 1, 2_000_000_000, 2_100_000_000):
         payloads = []
         for i, o in enumerate(observations):
             book = dict(books[i], visible_at_ns=at+delay)
@@ -82,11 +82,13 @@ def native_inputs(observations, at, clock_id):
                           ("filled","filled"), ("native-exit:0","native-exit:1"))
     pair = tuple(o.identity for o in observations)
     from test_arbitrage_evaluation import policy
-    plan_policy = policy(scope=s.candidate_id(pair,1,"taker_taker",None), at_ns=at,
-        prediction_end_ns=at+100, risk_deadline_ns=at+100, reference_exit_ns=at+100,
+    training_end = 2_200_000_000
+    forecast = b.AR1(1, training_end, 0., .8, .01, 1e-12, 1e-15, 0.)
+    plan_policy = policy(model_hash=forecast.content_hash, scope=s.candidate_id(pair,1,"taker_taker",None), at_ns=at,
+        prediction_end_ns=at+2_000_000_000, risk_deadline_ns=at+2_000_000_000, reference_exit_ns=at+2_000_000_000,
         base_asset=legs[0].rules.exposure_asset, quote_asset=legs[0].rules.quote_asset,
         original_base=quantity, reference_notional_atoms=int(legs[0].entry_notional),
-        min_profit_atoms=1, absolute_minimum_atoms=1, max_book_age_ns=b.SECOND,
+        min_profit_atoms=1, absolute_minimum_atoms=1, max_book_age_ns=5*b.SECOND,
         normal_limits=(1,10**15), risk_limits=(1,10**15))
     closing = v.value_exit(entry,frames[2],plan_policy,normal=True)
     assert closing.net_atoms is not None, closing
@@ -98,18 +100,19 @@ def native_inputs(observations, at, clock_id):
         books=tuple(v._scaled_book(payload,F(1),-at,dict(bids=F(1),asks=F(1))) for payload in m.books)) for m in frames))
     scope = v.probability_scope(plan_policy,target,quantity,at)
     bounds = v.RebaseBounds(F(9,10),F(11,10),.01,F(1,100),F(100),F(2))
-    artifact = replace(calibration(stage="hold",scope=scope,margin=F(7,100),model_hash=plan_policy.model_hash),valid_until_ns=END)
-    estimator = v.Estimator(b.AR1(1,200,0.,.8,.01,1e-12,1e-15,0.),200,
+    artifact = calibration(stage="hold", scope=scope, margin=F(7,100), model_hash=plan_policy.model_hash,
+                           training_end_ns=training_end, valid_until_ns=END)
+    estimator = v.Estimator(forecast, training_end,
                             (v.ConditionalRow(scope,(historical,),artifact,EXACT,bounds),))
     simulation_hash = estimator.probability_model_hash(plan_policy)
     estimator = replace(estimator,rows=tuple(replace(row,calibration=replace(row.calibration,
         simulation_hash=simulation_hash)) for row in estimator.rows))
-    entry_calibration = replace(calibration(scope=scope,margin=F(7,100),model_hash=plan_policy.model_hash,
-        simulation_hash=simulation_hash),valid_until_ns=END)
+    entry_calibration = calibration(scope=scope, margin=F(7,100), model_hash=plan_policy.model_hash,
+        simulation_hash=simulation_hash, training_end_ns=training_end, valid_until_ns=END)
     case = dict(key=(pair,1,"taker_taker",None),policy=plan_policy,estimator=estimator,
         calibration=entry_calibration,simulation_error=EXACT,limits=LIMITS,bounds=bounds,scenarios=(scenario,),
         target_lots=lots,entry_fees=tuple(leg.exit_fee for leg in legs),entry_limits=(10**15,1),
-        fee_valuations=(F(1),F(1)),fee_balances=(0,0),funds_available=(10**20,10**20),
+        fee_valuations=(F(1),F(1)),fee_balances=(0,0),funds_available=(10**23,10**23),
         capital_factors=(F(1),F(1)),capital_buffers=(0,0),funds_valid_until_ns=END,
         entry_minimum_notionals=(10**19,10**19),
         risk_valid_until_ns=END,risk_allowed=True,
@@ -135,6 +138,7 @@ class EvaluationInputTests(unittest.TestCase):
         self.assertEqual(len(plans), 1, self.source.state)
         self.assertNotIn(s.candidate_id(*plans[0].key), failures)
         plan = plans[0]
+        self.assertEqual(scanner_archive.thaw(scanner_archive.freeze(plan)), plan)
         expected = v.evaluate(plan.scenarios, plan.policy, plan.estimator, plan.calibration,
                               plan.simulation_error, plan.limits)
         result = s.scan(observations, plans, at_ns=NOW, cursor=1, max_age_ns=1000,

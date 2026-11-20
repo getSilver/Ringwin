@@ -7,13 +7,14 @@ from strategies.cross_venue import arbitrage_probability as p
 from strategies.cross_venue import arbitrage_baseline as b
 
 
-def calibration(stage="entry", calibrated=F(3, 4), margin=F(6, 100), blocks=500, scope="fixture", model_hash="11"*32, simulation_hash="22"*32):
-    records = tuple(p.Block(str(i), 210+i*10, 220+i*10, F(4, 5),
+def calibration(stage="entry", calibrated=F(3, 4), margin=F(6, 100), blocks=500, scope="fixture",
+                model_hash="11"*32, simulation_hash="22"*32, *, training_end_ns=200, valid_until_ns=1_000_000):
+    records = tuple(p.Block(str(i), training_end_ns+10+i*10, training_end_ns+20+i*10, F(4, 5),
                             tuple(j < calibrated.numerator for j in range(calibrated.denominator)))
                     for i in range(blocks))
     return p.calibrate(records, version=1, stage=stage, mode="taker_taker", scope=scope,
-                       model_hash=model_hash, training_end_ns=200, embargo_ns=10,
-                       label_span_ns=10, valid_from_ns=220+blocks*10, valid_until_ns=1_000_000,
+                       model_hash=model_hash, training_end_ns=training_end_ns, embargo_ns=10,
+                       label_span_ns=10, valid_from_ns=training_end_ns+20+blocks*10, valid_until_ns=valid_until_ns,
                        bin_edges=(F(0), F(1)), min_blocks=100, min_labels=100,
                        confidence_error=F(1, 20), declared_margin=margin,
                        independence_ref="fixture-independent-blocks", covers_mc=False, simulation_hash=simulation_hash)

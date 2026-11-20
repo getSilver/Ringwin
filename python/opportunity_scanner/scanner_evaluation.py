@@ -146,20 +146,8 @@ class EvaluationInputs:
                 failures[identity] = "evaluation_case_missing"
             for case in cases:
                 try:
-                    if fee_version is not None:
-                        current_fees = fee_rules[key[0]]
-                        asset_ids = tuple(fee.fee_asset for fee in current_fees)
-                        if (tuple(fee.fee_asset for fee in case["entry_fees"]) != asset_ids
-                                or any(tuple(leg.exit_fee.fee_asset for leg in sc.entry.legs) != asset_ids
-                                       for sc in case["scenarios"] if sc.entry.legs)):
-                            raise b.Rejected("fees_asset_evidence_missing")
-                        case = dict(case, entry_fees=current_fees,
-                            versions=dict(case["versions"], fees=fee_version),
-                            scenarios=tuple(replace(sc, entry=replace(sc.entry,
-                                legs=tuple(replace(leg, exit_fee=current_fees[i])
-                                           for i, leg in enumerate(sc.entry.legs)))) for sc in case["scenarios"]))
                     plan = self._plan(case, pairs[key[0]], at_ns, max_age_ns, max_skew_ns, bindings,
-                                      doc["valid_until_ns"])
+                                      doc["valid_until_ns"], fee_rules.get(key[0]))
                     if fee_version is not None:
                         plan = replace(plan, fee_version=fee_version)
                     if any(old.key == plan.key and old.policy.original_base == plan.policy.original_base for old in plans):
@@ -168,10 +156,13 @@ class EvaluationInputs:
                         break
                     plans.append(plan)
                     versions.setdefault(identity, {})[str(plan.policy.original_base)] = dict(
-                        case["versions"], package=str(doc["version"]), package_digest=self.digest)
+                        case["versions"], package=str(doc["version"]), package_digest=self.digest,
+                        **({"fees": fee_version} if fee_version is not None else {}))
                 except LegUnavailable as error:
                     failures[identity] = dict(leg=error.leg, reason=str(error))
-                except (ValueError, TypeError, KeyError, OverflowError, ZeroDivisionError) as error:
+                except KeyError as error:
+                    failures[identity] = f"{error.args[0]}_missing"[:256]
+                except (ValueError, TypeError, OverflowError, ZeroDivisionError) as error:
                     failures[identity] = str(error)[:256]
             if any(plan.key == key for plan in plans):
                 failures.pop(identity, None)
@@ -180,7 +171,7 @@ class EvaluationInputs:
             version=str(doc["version"]), digest=self.digest, missing=missing, plans=len(plans))
         return tuple(plans), failures, versions
 
-    def _plan(self, case, legs, at, max_age, max_skew, bindings, package_end):
+    def _plan(self, case, legs, at, max_age, max_skew, bindings, package_end, current_fees):
         components = {"policy": v.Policy, "estimator": v.Estimator, "calibration": p.Calibration,
                       "simulation_error": p.SimulationError, "limits": v.Limits, "bounds": v.RebaseBounds}
         for name, cls in components.items():
@@ -236,10 +227,22 @@ class EvaluationInputs:
         if point.grid_ns < estimator.training_end_ns:
             raise b.Rejected("model_warming:training_grid")
         v._validate_scenarios(case["scenarios"])
+        if any(not isinstance(fee, e.FeeRule) for fee in case["entry_fees"]):
+            raise b.Rejected("fees_scope")
+        if current_fees is not None:
+            asset_ids = tuple(fee.fee_asset for fee in current_fees)
+            if (tuple(fee.fee_asset for fee in case["entry_fees"]) != asset_ids
+                    or any(tuple(leg.exit_fee.fee_asset for leg in scenario.entry.legs) != asset_ids
+                           for scenario in case["scenarios"] if scenario.entry.legs)):
+                raise b.Rejected("fees_asset_evidence_missing")
+            case = dict(case, entry_fees=current_fees, scenarios=tuple(
+                replace(scenario, entry=replace(scenario.entry, legs=tuple(
+                    replace(leg, exit_fee=current_fees[i]) for i, leg in enumerate(scenario.entry.legs))))
+                for scenario in case["scenarios"]))
         occupied, end = 0, min(package_end, case["funds_valid_until_ns"], case["risk_valid_until_ns"],
                                case["calibration"].valid_until_ns)
         target = e.strategy_units(tuple(o.rules for o in legs), policy.base_asset, policy.quote_asset)
-        executions = []
+        executions, buy_notional = [], None
         for i, o in enumerate(legs):
             rule, fee, lots = o.rules, case["entry_fees"][i], case["target_lots"][i]
             if not isinstance(fee, e.FeeRule) or (fee.instrument, fee.rules_version) != (rule.instrument, rule.version):
@@ -269,6 +272,8 @@ class EvaluationInputs:
                 notional = sweep.quote_atoms
                 full_fills = sweep.fills
             executions.append(full_fills)
+            if side == "buy":
+                buy_notional = notional*e.quote_factor(rule, target)
             e.integer(case["entry_minimum_notionals"][i])
             if notional < max(rule.min_notional_atoms, case["entry_minimum_notionals"][i]):
                 raise b.Rejected("minimum_notional")
@@ -353,5 +358,8 @@ class EvaluationInputs:
                                        case["simulation_error"], case["bounds"])
                 scenarios.extend(v._condition(row, v.Context(current, market, policy.absolute_minimum_atoms, policy),
                                               estimator.forecast))
+        entry_base = min(policy.original_base, *(o.rules.base_atoms_per_lot*lots
+                         for o, lots in zip(legs, case["target_lots"])))
         return s.Plan(pair, maker, tuple(scenarios), policy, estimator, case["calibration"],
-                      case["simulation_error"], case["limits"], end, max(1, e.ceil_atoms(occupied)))
+                      case["simulation_error"], case["limits"], end, max(1, e.ceil_atoms(occupied)),
+                      entry_base=entry_base, buy_notional_atoms=buy_notional)

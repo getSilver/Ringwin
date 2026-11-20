@@ -507,7 +507,7 @@ class ScannerConsole:
             self.last_input_ns = at_ns
             self.sequence += 1
             envelope = self._envelope()
-            material = encoded(dict(schema="scanner_inputs_v2", canonical_observations=freeze(observations),
+            material = encoded(dict(schema="scanner_inputs_v3", canonical_observations=freeze(observations),
                                     frozen_plans=freeze(plans), fx_rate=freeze(fx_rate),
                                     plan_failures=plan_failures or {}, input_versions=input_versions, config=self.config,
                                     at_ns=str(at_ns), cursor=str(cursor), max_age_ns=str(self.max_age_ns),
@@ -649,14 +649,14 @@ class ScannerConsole:
         if hashlib.sha256(material.encode()).hexdigest() != digest:
             raise ValueError("scanner replay digest")
         archive = load(material)
-        if archive["schema"] not in ("scanner_inputs_v1", "scanner_inputs_v2"):
+        if archive["schema"] not in ("scanner_inputs_v1", "scanner_inputs_v2", "scanner_inputs_v3"):
             raise ValueError("scanner replay schema")
         result = scanner.scan(archive["canonical_observations"], archive["frozen_plans"],
             at_ns=int(archive["at_ns"]), cursor=int(archive["cursor"]),
             max_age_ns=int(archive["max_age_ns"]), max_skew_ns=int(archive["max_skew_ns"]), scope=self._scope(archive["config"]),
             plan_failures=archive.get("plan_failures", {}), input_versions=archive.get("input_versions"),
             legacy=archive["schema"] == "scanner_inputs_v1", fx_rate=archive.get("fx_rate"),
-            selected_pairs=archive.get("pairs"))
+            selected_pairs=archive.get("pairs"), evaluation_details=archive["schema"] == "scanner_inputs_v3")
         registered = {tuple(map(int, x)) for x in archive["selected_identities"]}
         result["candidates"] = [r for r in result["candidates"] if all(tuple(map(int, x)) in registered for x in r["pair"])]
         return dict(replayable=True, matches=result == archive["snapshot"], snapshot=result)
@@ -674,7 +674,6 @@ class ScannerConsole:
                     self.snapshot = refreshed
                     self.sequence += 1
                     try:
-                        self.history.interrupt(self.session, "expired")
                         envelope = self._envelope()
                         envelope["evidence"] = list(self.last_evidence)
                         self.history.batch(envelope, wall_ms=self.wall_clock(), threshold=self.config["statistics"], evidence=self.last_evidence)
@@ -722,7 +721,7 @@ class ScannerConsole:
             self.coverage_gaps = [gap for gap in self.coverage_gaps if gap["wall_ms"] >= cutoff][-64:]
             return json.loads(encoded(dict(self._envelope(), phase=self.phase, desired=self.desired, config=self.config,
                         catalogue=catalogue, exchanges=exchanges, settings_version=settings["version"] if settings else "0",
-                        wall_ms=str(self.wall_clock()), clock_domain="server_monotonic_ns",
+                        wall_ms=str(self.wall_clock()), clock_domain="server_monotonic_ns", server_now_ns=str(now),
                         remaining_validity_ns={r["id"]: str(max(0, int(r["valid_until_ns"])-now)) for r in self.snapshot["candidates"]},
                         trading_bindings=self.trading_bindings,
                         assets=self.source.assets,

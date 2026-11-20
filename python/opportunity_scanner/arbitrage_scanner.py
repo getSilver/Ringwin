@@ -157,6 +157,8 @@ class Plan:
     valid_until_ns: int
     occupied_atoms: int
     fee_version: Optional[str] = None
+    entry_base: Optional[Fraction] = None
+    buy_notional_atoms: Optional[Fraction] = None
 
     def require_current_fees(self, fees):
         if self.fee_version is None and fees is None:
@@ -193,6 +195,9 @@ class Plan:
             raise b.Rejected("scan_evidence")
         b.uint(self.valid_until_ns, self.policy.at_ns+1)
         e.integer(self.occupied_atoms, 1)
+        for amount in (self.entry_base, self.buy_notional_atoms):
+            if amount is not None:
+                e.positive(amount)
 
     @property
     def key(self):
@@ -260,7 +265,7 @@ def _valid_failure(failure):
 
 
 def scan(observations, plans, *, at_ns, cursor, max_age_ns, max_skew_ns, scope=None,
-         plan_failures=None, input_versions=None, legacy=False, fx_rate=None, selected_pairs=None):
+         plan_failures=None, input_versions=None, legacy=False, fx_rate=None, selected_pairs=None, evaluation_details=True):
     """Full replacement snapshot; omitted/expired rows cannot retain eligibility.
 
     Plans are frozen research scenario inputs, not scanner-generated forecasts.
@@ -316,6 +321,7 @@ def scan(observations, plans, *, at_ns, cursor, max_age_ns, max_skew_ns, scope=N
         if quantity in quantities:
             raise b.Rejected("duplicate_scan_plan")
         quantities[quantity] = plan
+    evaluation_details = evaluation_details and not legacy
     rows = []
     books_by_identity = {x.identity: decode_depth_snapshot(x.book) for x in observations
                          if x.identity in selected_identities and x.book is not None}
@@ -380,10 +386,43 @@ def scan(observations, plans, *, at_ns, cursor, max_age_ns, max_skew_ns, scope=N
             if type(failure) is dict:
                 failure_leg, failure = failure["leg"], failure["reason"]
             plan, result, reason = evaluated[0] if evaluated else (None, None, health or unsupported or failure)
-            age = min(max_age_ns, plan.policy.max_book_age_ns) if plan else max_age_ns
-            end = min(*(min(b.MAX_U64, t+age) for t in times), *(x.rules.valid_until_ns for x in legs),
-                      plan.valid_until_ns if plan else b.MAX_U64, plan.policy.deadline_ns if plan else b.MAX_U64,
-                      plan.calibration.valid_until_ns if plan else b.MAX_U64)
+            def validity(option):
+                age = min(max_age_ns, option.policy.max_book_age_ns) if option else max_age_ns
+                return min(*(min(b.MAX_U64, t+age) for t in times), *(x.rules.valid_until_ns for x in legs),
+                           min(option.valid_until_ns, option.policy.deadline_ns, option.calibration.valid_until_ns)
+                           if option else b.MAX_U64)
+
+            end = validity(plan)
+            economic_rejections = ("reference_profit", "profit", "edge", "probability", "hard_gate")
+            details = {}
+            if evaluation_details:
+                fixed, fixed_reason = None, reason if not evaluated else "fixed_notional_evidence_missing"
+                for option, outcome, failure_reason in evaluated:
+                    quote = e.strategy_quote(tuple(leg.rules for leg in legs), option.policy.quote_asset)
+                    if quote.quote_unit is None:
+                        continue
+                    fixed_atoms = 5000 * 10**quote.quote_unit[1]
+                    if option.policy.reference_notional_atoms != fixed_atoms:
+                        continue
+                    if option.buy_notional_atoms != fixed_atoms:
+                        fixed_reason = "fixed_notional_size_mismatch"
+                        continue
+                    fixed_reason = failure_reason or "fixed_notional_evidence_missing"
+                    if (outcome is None or outcome.plan_atoms is None
+                            or failure_reason and failure_reason not in economic_rejections):
+                        continue
+                    fixed = dict(net_edge_bp=_ratio(e.edge_bp(outcome.plan_atoms, option.policy.reference_notional_atoms)),
+                                 reference_notional_atoms=str(option.policy.reference_notional_atoms),
+                                 quote_asset=str(option.policy.quote_asset), plan_atoms=str(outcome.plan_atoms),
+                                 quantity_base=_ratio(option.entry_base),
+                                 fee_version=option.fee_version, valid_until_ns=str(validity(option)),
+                                 input_versions=(input_versions or {}).get(candidate, {}).get(str(option.policy.original_base), {}))
+                    fixed_reason = ""
+                    break
+                details = dict(fixed_notional=fixed, fixed_notional_reason=fixed_reason,
+                               reference_notional_atoms=str(plan.policy.reference_notional_atoms) if plan else None,
+                               executable_quantity_base=_ratio(plan.entry_base)
+                               if result is not None and result.allowed and not reason else None)
             probability = result.entry_probability if result else None
             route_legs = []
             for i, leg in enumerate(legs):
@@ -401,7 +440,9 @@ def scan(observations, plans, *, at_ns, cursor, max_age_ns, max_skew_ns, scope=N
                 route_legs.append(dict(venue=str(leg.venue), account=str(leg.account),
                     instrument=str(leg.rules.instrument), product=leg.kind, side="buy" if i == buy else "sell",
                     requested_environment=leg.environment, actual_environment=actual,
-                    market_endpoint=endpoint, market_input_kind=input_kind, issues=issues))
+                    market_endpoint=endpoint, market_input_kind=input_kind, issues=issues,
+                    **({"market_age_ns": str(at_ns-books[i]["visible_at_ns"]) if books[i] is not None else None}
+                       if evaluation_details else {})))
             estimated_fx = {}
             if not legacy and any(x.rules.settlement_unit and x.rules.settlement_unit[0] == "USDC" for x in legs):
                 paths = result.plan_paths if result else ()
@@ -421,8 +462,9 @@ def scan(observations, plans, *, at_ns, cursor, max_age_ns, max_skew_ns, scope=N
                 **({"legs": route_legs} if not legacy else {}),
                 "observed_edge_bp": _ratio(observed_edge),
                 **estimated_fx,
+                **details,
                 "status": "evaluated" if result is not None and result.allowed and not reason else
-                          "rejected" if result is not None and reason in ("reference_profit", "profit", "edge", "probability", "hard_gate") else "pending",
+                          "rejected" if result is not None and reason in economic_rejections else "pending",
                 "reason": reason, "trading_qualified": False,
                 "quantity_base": _ratio(plan.policy.original_base) if plan else None,
                 "reference_atoms": str(result.reference_atoms) if result and result.reference_atoms is not None else None,
@@ -461,8 +503,14 @@ def display_json(snapshot, *, at_ns):
     rows = []
     for row in snapshot["candidates"]:
         row = dict(row)
-        if at_ns >= int(row["valid_until_ns"]):
+        if at_ns >= int(row["valid_until_ns"]) and (
+                "executable_quantity_base" not in row or row["status"] in ("evaluated", "rejected")):
             row.update(status="pending", reason="expired", trading_qualified=False, recommended=False)
+            if "executable_quantity_base" in row:
+                row["executable_quantity_base"] = None
+        fixed = row.get("fixed_notional")
+        if fixed and at_ns >= int(fixed["valid_until_ns"]):
+            row.update(fixed_notional=None, fixed_notional_reason="expired")
         rows.append(row)
     return json.dumps(dict(snapshot, at_ns=str(at_ns), candidates=rows),
                       sort_keys=True, separators=(",", ":"), allow_nan=False)

@@ -6,6 +6,7 @@ activated-registry projection. No credentials or execution capability.
 from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import replace
 from fractions import Fraction
+from functools import cache
 import hashlib
 import copy
 import json
@@ -13,6 +14,7 @@ import os
 from pathlib import Path
 import secrets
 import subprocess
+import sys
 import threading
 import time
 import urllib.request
@@ -268,9 +270,33 @@ class PublicTransport:
         return self.adapters[binding["venue"]].request(self, "book", binding["environment"], binding["product"], binding["symbol"])
 
 
+@cache
+def _system_evaluation_clock_id():
+    """Keep registered deadlines across process restarts within the same OS clock."""
+    try:
+        if os.name == "nt":
+            powershell = Path(os.environ["SystemRoot"])/"System32/WindowsPowerShell/v1.0/powershell.exe"
+            identity = subprocess.check_output(
+                [str(powershell), "-NoProfile", "-NonInteractive", "-Command",
+                 "$ErrorActionPreference='Stop'; $os=Get-CimInstance Win32_OperatingSystem; "
+                 "$os.CSName + ':' + $os.LastBootUpTime.ToUniversalTime().Ticks"],
+                timeout=5, stderr=subprocess.DEVNULL, text=True, creationflags=subprocess.CREATE_NO_WINDOW).strip()
+            if identity and identity.rpartition(":")[2].isdigit():
+                return "windows:" + hashlib.sha256(identity.encode()).hexdigest()
+        elif sys.platform == "linux":
+            boot = Path("/proc/sys/kernel/random/boot_id").read_text(encoding="ascii").strip()
+            namespace = Path("/proc/self/ns/time")
+            if boot:
+                return f"linux:{boot}:{namespace.stat().st_ino if namespace.exists() else 0}"
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+        pass
+    return None
+
+
 class ScannerRuntime:
     def __init__(self, directory, *, transport=None, clock=time.monotonic_ns,
-                 utc_clock=time.time_ns, automatic=True, asset_provider=None, adapters=DEFAULT_SCANNER_ADAPTERS):
+                 utc_clock=time.time_ns, automatic=True, asset_provider=None, adapters=DEFAULT_SCANNER_ADAPTERS,
+                 evaluation_clock_id=None):
         configuration = dict(schema=1, assets=[], bindings=[])
         bindings = []
         self.directory = Path(directory).resolve()
@@ -285,7 +311,10 @@ class ScannerRuntime:
         self.asset_binding_digest = None
         from opportunity_scanner.fee_schedules import FeeSchedules
         self.fees = FeeSchedules(self.directory/"manual-fees.json")
-        self.evaluation = EvaluationInputs(self.directory/"scanner-evaluation.json", secrets.token_hex(16),
+        clock_id = evaluation_clock_id
+        if clock_id is None and clock is time.monotonic_ns:
+            clock_id = _system_evaluation_clock_id()
+        self.evaluation = EvaluationInputs(self.directory/"scanner-evaluation.json", clock_id or secrets.token_hex(16),
             fees=self.fees, synthetic=getattr(self.transport, "input_kind", "venue_public") == "synthetic_protocol_fixture")
         self.lock = threading.RLock()
         self.poll_lock = threading.Lock()

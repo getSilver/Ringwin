@@ -1011,7 +1011,7 @@ class IntegrationTests(unittest.TestCase):
         self.now = [2_000_000_000, 1_800_000_000_000_000_000]
         self.transport = ProtocolTransport(self.now)
         self.runtime = ScannerRuntime(self.temp.name, transport=self.transport,
-            clock=lambda:self.now[0], utc_clock=lambda:self.now[1], automatic=False)
+            clock=lambda:self.now[0], utc_clock=lambda:self.now[1], automatic=False, evaluation_clock_id="integration-clock")
         self.app = control_plane_web.ControlPlaneApp(self.temp.name,control_plane.CommandServer(b"k"*32),
                                                    scanner_console=self.runtime.console)
         self.app.scanner_runtime = self.runtime
@@ -1202,11 +1202,11 @@ class IntegrationTests(unittest.TestCase):
         def response(url, body=None, **kwargs):
             payload = original(url, body, **kwargs)
             if body is None:
-                return payload.replace("USDT", "USDC")
+                return payload.replace("USDT", "USDC").replace("3000.01", "3125.00").replace("3000.00", "3124.99")
             if body.get("type") == "l2Book":
                 value = json.loads(payload)
-                value["levels"][0][0]["px"] = "3100"
-                value["levels"][1][0]["px"] = "3100.1"
+                value["levels"][0][0]["px"] = "3300"
+                value["levels"][1][0]["px"] = "3300.1"
                 return json.dumps(value)
             return payload
         self.transport.request = response
@@ -1229,7 +1229,12 @@ class IntegrationTests(unittest.TestCase):
         row = next(r for r in view["snapshot"]["candidates"] if r["mode"] == "taker_taker")
         self.assertEqual(row["status"],"evaluated",(row,self.runtime.evaluation.state))
         self.assertTrue(row["recommended"])
-        self.assertIsNotNone(row["quantity_base"])
+        self.assertEqual(row["executable_quantity_base"], [str(16 * 10**17), "1"])
+        self.assertEqual(row["fixed_notional"]["net_edge_bp"], ["119992", "125"])
+        self.assertEqual(row["plan_atoms"], str(479_968 * 10**15))
+        self.assertEqual([leg["market_age_ns"] for leg in row["legs"]], ["0", "0"])
+        self.assertEqual(row["fixed_notional"]["reference_notional_atoms"], str(5000 * 10**18))
+        self.assertEqual(row["fixed_notional"]["fee_version"], "1")
         self.assertGreater(int(row["plan_atoms"]),0)
         self.assertEqual(row["input_versions"]["fees"],"1")
         material, = self.runtime.console.last_evidence.values()
@@ -1241,7 +1246,59 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(row["plan_atoms"],str(expected.plan_atoms))
         self.assertEqual(row["scenario_digest"],expected.scenario_digest)
         digest, = self.runtime.console.last_evidence
-        self.assertTrue(self.runtime.console.replay(digest)["matches"])
+        replay = self.runtime.console.replay(digest)
+        self.assertTrue(replay["matches"])
+        replayed = next(item for item in replay["snapshot"]["candidates"] if item["id"] == row["id"])
+        for field in ("executable_quantity_base", "fixed_notional", "plan_atoms", "input_versions"):
+            self.assertEqual(replayed[field], row[field])
+        if coin == "HYPE":
+            from copy import deepcopy
+            resized = deepcopy(document)
+            resized["version"] = 2
+            resized["cases"][0]["target_lots"] = tuple(lots + 1 for lots in resized["cases"][0]["target_lots"])
+            publish_inputs(self.runtime.evaluation.path, resized)
+            self.runtime.step()
+            mispriced = next(item for item in self.call("start")["snapshot"]["candidates"] if item["id"] == row["id"])
+            self.assertTrue(mispriced["recommended"], mispriced)
+            self.assertIsNone(mispriced["fixed_notional"])
+            self.assertEqual(mispriced["fixed_notional_reason"], "fixed_notional_size_mismatch")
+
+            revision = 2
+            for field in ("estimator", "calibration", "funds_available", "risk_allowed"):
+                revision += 1
+                incomplete = deepcopy(document)
+                incomplete["version"] = revision
+                del incomplete["cases"][0][field]
+                publish_inputs(self.runtime.evaluation.path, incomplete)
+                self.runtime.step()
+                withdrawn = next(item for item in self.call("start")["snapshot"]["candidates"] if item["id"] == row["id"])
+                self.assertEqual(withdrawn["reason"], field + "_missing")
+                self.assertFalse(withdrawn["recommended"])
+                self.assertIsNone(withdrawn["fixed_notional"])
+                self.assertIsNone(withdrawn["executable_quantity_base"])
+            publish_inputs(self.runtime.evaluation.path, dict(document, version=revision+1))
+            self.runtime.step()
+            self.assertTrue(self.runtime.console.replay(digest)["matches"])
+
+            self.runtime.close()
+            self.runtime = ScannerRuntime(self.temp.name, transport=self.transport,
+                clock=lambda:self.now[0], utc_clock=lambda:self.now[1], automatic=False,
+                evaluation_clock_id="integration-clock")
+            self.app.scanner_runtime, self.app.scanner_console = self.runtime, self.runtime.console
+            self.app.fee_schedules = self.runtime.fees
+            self.runtime.console.exchange_settings = self.app.exchange_settings_store
+            self.assertEqual(self.runtime.console.view()["phase"], "Stopped")
+            self.assertFalse(self.runtime.console.view()["snapshot"]["candidates"])
+            for setting in self.app.exchange_settings_store.view()["exchanges"]:
+                self.runtime.discover(setting)
+            self.call("start")
+            self.runtime.step()
+            restored = next(item for item in self.call("start")["snapshot"]["candidates"] if item["id"] == row["id"])
+            self.assertTrue(restored["recommended"], restored)
+            self.assertEqual(restored["input_versions"]["fees"], "1")
+            self.assertEqual(restored["fixed_notional"]["plan_atoms"], row["fixed_notional"]["plan_atoms"])
+            digest, = self.runtime.console.last_evidence
+
         rows = [dict(item, taker_percent="10") for item in rows]
         status, saved = self.http("/api/manual-fees", dict(expected_version="1", rows=rows), self.headers)
         self.assertEqual(status, 200, saved)
@@ -1259,6 +1316,14 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(target["reason"], "fees_missing_leg:" + ":".join(map(str, observations[1].identity)))
         self.assertFalse(target["recommended"])
         self.assertIsNone(target["plan_atoms"])
+        self.now[0] += 6_000_000_000
+        self.now[1] += 6_000_000_000
+        self.transport.fail.add(21)
+        self.runtime.step()
+        stale = next(item for item in self.call("start")["snapshot"]["candidates"] if item["id"] == row["id"])
+        self.assertIn(stale["reason"], {"data_gap", "book_missing", "stale_data"})
+        self.assertFalse(stale["recommended"])
+        self.assertIsNone(stale["executable_quantity_base"])
 
     def test_settings_rename_delete_and_retained_history_through_http(self):
         self.start()

@@ -15,6 +15,7 @@ MODULES = (arbitrage_baseline, arbitrage_economics, arbitrage_evaluation,
 TYPES = {module.__name__.rsplit(".", 1)[-1] + "." + name: cls for module in MODULES for name, cls in vars(module).items()
          if isinstance(cls, type) and is_dataclass(cls) and cls.__module__ == module.__name__}
 MAX_BYTES = 16 * 1024 * 1024
+OPTIONAL_PLAN_FIELDS = {"fee_version", "entry_base", "buy_notional_atoms"}
 
 
 def freeze(value):
@@ -23,8 +24,8 @@ def freeze(value):
         if name not in TYPES:
             raise ValueError("unregistered scanner archive type")
         return {"type": name, "fields": {f.name: freeze(getattr(value, f.name)) for f in fields(value)
-                                       if not (type(value) is arbitrage_scanner.Plan and f.name == "fee_version"
-                                               and value.fee_version is None)}}
+                                       if not (type(value) is arbitrage_scanner.Plan and f.name in OPTIONAL_PLAN_FIELDS
+                                               and getattr(value, f.name) is None)}}
     if type(value) is Fraction:
         return {"fraction": [str(value.numerator), str(value.denominator)]}
     if type(value) is bytes:
@@ -56,7 +57,7 @@ def thaw(value, depth=0):
         names = set(value["fields"])
         optional = set()
         if cls is arbitrage_scanner.Plan:
-            optional = {"fee_version"}
+            optional = OPTIONAL_PLAN_FIELDS
         if cls is arbitrage_scanner.Observation:
             optional = {"market_source", "market_error", "registered_assets"}
         if cls is arbitrage_economics.InstrumentRules:
