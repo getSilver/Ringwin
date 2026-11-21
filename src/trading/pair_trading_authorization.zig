@@ -137,7 +137,7 @@ pub fn validateRequest(request: Request) !void {
     if (request.identity == 0 or request.strategy == 0 or request.portfolio == 0 or request.activation == 0 or
         request.config_version == 0 or (request.direction != 1 and request.direction != -1) or
         request.legs[0].venue >= request.legs[1].venue or request.legs[0].account == request.legs[1].account or
-        request.legs[0].instrument == request.legs[1].instrument or request.legs[0].environment != request.legs[1].environment)
+        request.legs[0].instrument == request.legs[1].instrument)
         return error.InvalidPairAuthorization;
     for (request.legs) |leg| if (leg.venue == 0 or leg.account == 0 or leg.instrument == 0 or leg.rules_version == 0)
         return error.InvalidPairAuthorization;

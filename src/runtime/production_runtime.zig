@@ -16,7 +16,7 @@ pub const Role = enum { engine, market_feed, execution_gateway, telemetry, contr
 pub const Phase = enum { stopped, starting, ready, recovering, trading, draining, forced_stop, failed };
 pub const RolePhase = enum { stopped, starting, ready, recovering, draining, forced_stop, failed };
 pub const Venue = enum { simulated };
-pub const Command = enum(u8) { enable_risk = 'A', drain = 'D', stop = 'S', business = 'B', settle = 'L', ingest_canonical = 'I', read_committed = 'C', read_strategy_authority = 'P', recover_venue = 'U' };
+pub const Command = enum(u8) { enable_risk = 'A', drain = 'D', stop = 'S', business = 'B', settle = 'L', ingest_canonical = 'I', read_committed = 'C', read_strategy_authority = 'P', approve_pair = 'Q', recover_venue = 'U' };
 pub const Status = enum(u8) { hello = 'H', ready = 'R', risk_enabled = 'A', draining = 'G', stopped = 'T', forced_stop = 'F', failed = 'X', recovery_only = 'V' };
 
 pub const BoundedQueue = struct {
@@ -463,14 +463,19 @@ fn serveRole(init: std.process.Init, role: Role, socket_path: []const u8, startu
                     else => return error.InvalidRoleTransition,
                 }
             },
-            .read_strategy_authority => {
+            .read_strategy_authority, .approve_pair => {
                 const active_engine = live_engine orelse return error.EngineUnavailable;
                 const size = try readFrameInt(&stream, init.io, u32);
                 if (size == 0 or size > production_engine.max_authority_bytes) return error.InvalidAuthorityFrame;
                 const request = try init.gpa.alloc(u8, size);
                 defer init.gpa.free(request);
                 try readExact(&stream, init.io, request);
-                const response = active_engine.readAuthority(init.gpa, request) catch |err|
+                const response = (if (command == .read_strategy_authority)
+                    active_engine.readAuthority(init.gpa, request)
+                else if (draining)
+                    error.EngineDraining
+                else
+                    production_engine.approvePair(active_engine.owner, init.gpa, request)) catch |err|
                     try std.json.Stringify.valueAlloc(init.gpa, .{ .@"error" = @errorName(err) }, .{});
                 defer init.gpa.free(response);
                 if (response.len > production_engine.max_authority_bytes) return error.InvalidAuthorityFrame;
@@ -806,21 +811,12 @@ test "formal engine recovers its Writer and reads canonical observations only af
     try std.testing.expect(owner.shard.recovery_admission_pending);
 
     try @import("../testing/acceptance/core/scanner_authorization_acceptance.zig").configurePairAssets(owner);
-    _ = try owner.apply(fixture.atGroup(46, .{ .identity = 98765, .payload = .{ .pair_trading_authorization = .{
-        .identity = 98765,
-        .strategy = 9,
-        .portfolio = 10,
-        .activation = 1,
-        .config_version = 1,
-        .expected_version = 0,
-        .legs = .{
-            .{ .venue = 1, .environment = .simulation, .account = 20, .instrument = 101, .rules_version = 2 },
-            .{ .venue = 21, .environment = .simulation, .account = 30, .instrument = 102, .rules_version = 2 },
-        },
-        .direction = 1,
-        .mode = .taker_taker,
-        .enabled = true,
-    } } }));
+    const approve_request =
+        \\{"operation":"approve_pair","identity":"98765","strategy":"9","portfolio":"10","expected_version":"0","legs":[{"venue":1,"environment":"simulation","instrument":"101","product":"isolated_linear","base_asset":"4346947","settlement_asset":"1"},{"venue":21,"environment":"simulation","instrument":"102","product":"isolated_linear","base_asset":"4346947","settlement_asset":"1"}],"direction":1,"mode":"taker_taker"}
+    ;
+    const approval = try production_engine.approvePair(owner, allocator, approve_request);
+    defer allocator.free(approval);
+    try std.testing.expect(std.mem.indexOf(u8, approval, "\"status\":\"accepted\"") != null);
     const populated = try production_engine.readStrategyAuthority(owner, allocator, list_request, null);
     defer allocator.free(populated);
     const projected = try std.json.parseFromSlice(struct {
@@ -829,6 +825,95 @@ test "formal engine recovers its Writer and reads canonical observations only af
     defer projected.deinit();
     try std.testing.expectEqual(@as(usize, 1), projected.value.pairs.len);
     try std.testing.expectEqualStrings("000000000000000000000000000181cd", projected.value.pairs[0].identity);
+}
+
+test "formal engine approves only the selected Demo Testnet route and recovers its receipt" {
+    const durable = @import("../persistence/durable_store.zig");
+    const Owner = @import("demo/demo_authority.zig").Owner;
+    const allocator = std.testing.allocator;
+    const store = try allocator.create(durable.MemoryAdapter);
+    defer allocator.destroy(store);
+    store.* = .init();
+    defer store.deinit();
+    const owner = try allocator.create(Owner);
+    defer allocator.destroy(owner);
+    const stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 91 };
+    try Owner.bootstrapInto(owner, store.interface(), std.testing.io, stream);
+    try @import("../testing/acceptance/core/scanner_authorization_acceptance.zig").initializeMixedEnvironmentPairOwner(owner);
+    try std.testing.expect(owner.shard.pairTradingListEmpty(9));
+
+    const Selection = struct {
+        operation: []const u8 = "approve_pair",
+        identity: []const u8 = "98766",
+        strategy: []const u8 = "9",
+        portfolio: []const u8 = "10",
+        expected_version: []const u8 = "0",
+        legs: [2]struct { venue: u64, environment: []const u8, instrument: []const u8, product: []const u8 = "isolated_linear", base_asset: []const u8 = "4346947", settlement_asset: []const u8 = "1" },
+        direction: i8 = -1,
+        mode: []const u8 = "taker_taker",
+
+        fn approve(selection: @This(), target: *Owner) ![]u8 {
+            const bytes = try std.json.Stringify.valueAlloc(std.testing.allocator, selection, .{});
+            defer std.testing.allocator.free(bytes);
+            return production_engine.approvePair(target, std.testing.allocator, bytes);
+        }
+    };
+    const selected: Selection = .{ .legs = .{
+        .{ .venue = 1, .environment = "demo", .instrument = "103" },
+        .{ .venue = 21, .environment = "testnet", .instrument = "102" },
+    } };
+    const before = owner.shard.authoritativeBarrier();
+    var bad = selected;
+    bad.legs[1].environment = "demo";
+    const missing = try bad.approve(owner);
+    defer allocator.free(missing);
+    try std.testing.expect(std.mem.indexOf(u8, missing, "UnmappedPairSecondLeg") != null);
+    bad = selected;
+    bad.portfolio = "11";
+    const wrong_portfolio = try bad.approve(owner);
+    defer allocator.free(wrong_portfolio);
+    try std.testing.expect(std.mem.indexOf(u8, wrong_portfolio, "InvalidPairStrategy") != null);
+    bad = selected;
+    bad.mode = "maker_first";
+    const unsupported = try bad.approve(owner);
+    defer allocator.free(unsupported);
+    try std.testing.expect(std.mem.indexOf(u8, unsupported, "InvalidPairCapability") != null);
+    try std.testing.expectEqual(before, owner.shard.authoritativeBarrier());
+
+    const accepted = try selected.approve(owner);
+    defer allocator.free(accepted);
+    const result = try std.json.parseFromSlice(struct {
+        status: []const u8,
+        barrier: []const u8,
+        pair: struct { direction: i8, mode: []const u8, legs: [2]struct { environment: []const u8, account: []const u8, instrument: []const u8 } },
+    }, allocator, accepted, .{ .ignore_unknown_fields = true });
+    defer result.deinit();
+    try std.testing.expectEqualStrings("accepted", result.value.status);
+    try std.testing.expectEqualStrings("demo", result.value.pair.legs[0].environment);
+    try std.testing.expectEqualStrings("testnet", result.value.pair.legs[1].environment);
+    try std.testing.expectEqualStrings("00000000000000000000000000000014", result.value.pair.legs[0].account);
+    try std.testing.expectEqualStrings("0000000000000000000000000000001e", result.value.pair.legs[1].account);
+    try std.testing.expectEqualStrings("00000000000000000000000000000067", result.value.pair.legs[0].instrument);
+    try std.testing.expectEqualStrings("00000000000000000000000000000066", result.value.pair.legs[1].instrument);
+    try std.testing.expectEqual(@as(i8, -1), result.value.pair.direction);
+    try std.testing.expectEqualStrings("taker_taker", result.value.pair.mode);
+    try std.testing.expectEqual(owner.shard.authoritativeBarrier(), try std.fmt.parseInt(u64, result.value.barrier, 10));
+    const repeated = try selected.approve(owner);
+    defer allocator.free(repeated);
+    try std.testing.expectEqualStrings(accepted, repeated);
+    const recovered = try allocator.create(Owner);
+    defer allocator.destroy(recovered);
+    try production_engine.recover(recovered, store.interface(), std.testing.io, stream.id, owner.deployment_anchor.?);
+    const query =
+        \\{"operation":"pair_approval_status","strategy_identity":"00000000000000000000000000000009","portfolio":"10","identity":"98766"}
+    ;
+    const receipt = try production_engine.readStrategyAuthority(recovered, allocator, query, null);
+    defer allocator.free(receipt);
+    try std.testing.expectEqualStrings(accepted, receipt);
+    const record = recovered.shard.effectivePairAuthorization(9, 0).?;
+    try std.testing.expectEqual(@as(u128, 10), record.request.portfolio);
+    try std.testing.expectEqual(@as(u16, 1), recovered.shard.pair_authorizations.count);
+    try std.testing.expectEqual(@as(u16, 0), recovered.shard.oms.order_count);
 }
 
 test "bounded role IPC fails closed and drains FIFO" {

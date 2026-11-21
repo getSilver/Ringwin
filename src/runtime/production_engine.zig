@@ -7,6 +7,7 @@ const trading = @import("../trading/trading_shard.zig");
 const strategy_authority = @import("../strategy/strategy_package_authority.zig");
 const strategy_host = @import("production_strategy_host.zig");
 const Owner = @import("demo/demo_authority.zig").Owner;
+const pair = @import("../trading/pair_trading_authorization.zig");
 
 pub const max_input_bytes = codec.max_encoded_len - 1;
 pub const max_record_bytes = journal.max_payload_size;
@@ -228,24 +229,140 @@ pub fn revokeHosts(owner: *Owner) !void {
 
 pub const max_authority_bytes = 256 * 1024;
 
+const PairApproval = struct {
+    operation: enum { approve_pair },
+    identity: u128,
+    strategy: u128,
+    portfolio: u128,
+    expected_version: u64,
+    legs: [2]struct {
+        venue: u64,
+        environment: @FieldType(pair.Leg, "environment"),
+        instrument: u128,
+        product: @FieldType(trading.InstrumentEntry, "product"),
+        base_asset: u64,
+        settlement_asset: u64,
+        account: ?u128 = null,
+    },
+    direction: i8,
+    mode: pair.Mode,
+};
+
+fn resolvePairApproval(shard: *const trading.TradingShard, selection: PairApproval) !pair.Request {
+    const authority = shard.strategyAuthority(selection.strategy);
+    if (!authority.strategy_active or authority.strategy_identity != selection.strategy or
+        authority.portfolio_identity != selection.portfolio or shard.strategyFenced(selection.strategy))
+        return error.InvalidPairStrategy;
+    var legs: [2]pair.Leg = undefined;
+    for (selection.legs, &legs, 0..) |selected, *leg, index| {
+        var match: ?pair.Leg = null;
+        for (shard.deployment.accounts[0..shard.deployment.account_count]) |account| {
+            if (account.venue != selected.venue or account.environment != selected.environment or
+                (selected.account != null and selected.account != account.identity) or
+                shard.deployment.owner(account.identity, selected.instrument) != shard.decision_domain_identity) continue;
+            const entry = shard.pairInstrument(account.identity, selected.instrument) orelse continue;
+            if (entry.venue != selected.venue or entry.product != selected.product or entry.rules.base_asset != selected.base_asset or
+                entry.rules.settlement_asset != selected.settlement_asset or
+                shard.deployment.portfolioSliceLimit(account.identity, entry.rules.settlement_asset, selection.portfolio) == null) continue;
+            if (match != null) return if (index == 0) error.AmbiguousPairFirstLeg else error.AmbiguousPairSecondLeg;
+            match = .{ .venue = account.venue, .environment = account.environment, .account = account.identity, .instrument = entry.instrument, .rules_version = entry.rules.version };
+        }
+        leg.* = match orelse return if (index == 0) error.UnmappedPairFirstLeg else error.UnmappedPairSecondLeg;
+    }
+    return .{
+        .identity = selection.identity,
+        .strategy = selection.strategy,
+        .portfolio = selection.portfolio,
+        .activation = authority.strategy_activation_identity,
+        .config_version = authority.strategy_config_version,
+        .expected_version = selection.expected_version,
+        .legs = legs,
+        .direction = selection.direction,
+        .mode = selection.mode,
+        .enabled = true,
+    };
+}
+
+fn pairOutcome(gpa: std.mem.Allocator, identity: u128, status: []const u8, reason: ?[]const u8) ![]u8 {
+    var id: [39]u8 = undefined;
+    return std.json.Stringify.valueAlloc(gpa, .{ .identity = try std.fmt.bufPrint(&id, "{d}", .{identity}), .status = status, .reason = reason }, .{});
+}
+
+fn pairReceipt(gpa: std.mem.Allocator, record: pair.Record) ![]u8 {
+    var id: [39]u8 = undefined;
+    var version: [20]u8 = undefined;
+    var barrier: [20]u8 = undefined;
+    return std.json.Stringify.valueAlloc(gpa, .{
+        .identity = try std.fmt.bufPrint(&id, "{d}", .{record.request.identity}),
+        .status = "accepted",
+        .core_version = try std.fmt.bufPrint(&version, "{d}", .{record.version}),
+        .barrier = try std.fmt.bufPrint(&barrier, "{d}", .{record.barrier}),
+        .pair = strategy_authority.pairListEntry(record.request),
+    }, .{});
+}
+
+pub fn approvePair(owner: *Owner, gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    const parsed = try std.json.parseFromSlice(PairApproval, gpa, bytes, .{});
+    defer parsed.deinit();
+    const selection = parsed.value;
+    const shard = try owner.source();
+    const request = resolvePairApproval(shard, selection) catch |err|
+        return pairOutcome(gpa, selection.identity, "rejected", @errorName(err));
+    if (shard.pair_authorizations.receipt(request.identity)) |record| {
+        if (!std.meta.eql(record.request, request))
+            return pairOutcome(gpa, request.identity, "rejected", "PairAuthorizationIdentityConflict");
+        return pairReceipt(gpa, record);
+    }
+    shard.validatePairAuthorization(request) catch |err| return pairOutcome(gpa, request.identity, "rejected", @errorName(err));
+    if (request.expected_version != shard.pair_authorizations.version)
+        return pairOutcome(gpa, request.identity, "rejected", "PairAuthorizationVersionConflict");
+    if (shard.pair_authorizations.count == shard.pair_authorizations.records.len)
+        return pairOutcome(gpa, request.identity, "rejected", "PairAuthorizationCapacity");
+    const event_identity = try std.math.add(u64, shard.authoritativeBarrier(), 1);
+    _ = owner.apply(.{ .core = .{ .identity = event_identity, .payload = .{ .pair_trading_authorization = request } } }) catch |err|
+        return pairOutcome(gpa, request.identity, "unknown", @errorName(err));
+    const record = (try owner.source()).pair_authorizations.receipt(request.identity) orelse return error.PairConfirmationUnavailable;
+    return pairReceipt(gpa, record);
+}
+
 pub fn readStrategyAuthority(owner: *const Owner, gpa: std.mem.Allocator, bytes: []const u8, ready_strategy: ?u128) ![]u8 {
     const Request = struct {
-        operation: enum { pair_trading_list, strategy_instances },
+        operation: enum { pair_trading_list, strategy_instances, pair_authorization_version, pair_approval_status },
         strategy_identity: ?[]const u8 = null,
         scope_accounts: ?[]const []const u8 = null,
+        identity: ?u128 = null,
+        portfolio: ?u128 = null,
     };
     const shard = try owner.source();
     const parsed = try std.json.parseFromSlice(Request, gpa, bytes, .{});
     defer parsed.deinit();
     const request = parsed.value;
     if (request.operation == .strategy_instances) {
-        if (request.strategy_identity != null or request.scope_accounts != null) return error.InvalidAuthorityFrame;
+        if (request.strategy_identity != null or request.scope_accounts != null or request.identity != null or request.portfolio != null)
+            return error.InvalidAuthorityFrame;
         return readStrategyInstances(gpa, shard, ready_strategy);
     }
     const id = request.strategy_identity orelse return error.StrategyIdentityMismatch;
     if (id.len != 32) return error.StrategyIdentityMismatch;
     const identity = try std.fmt.parseInt(u128, id, 16);
-    if (identity == 0 or !shard.strategyAuthority(identity).strategy_active) return error.StrategyIdentityMismatch;
+    if (identity == 0) return error.StrategyIdentityMismatch;
+    if (request.operation == .pair_approval_status) {
+        if (request.scope_accounts != null) return error.InvalidAuthorityFrame;
+        const approval = request.identity orelse return error.InvalidAuthorityFrame;
+        const portfolio = request.portfolio orelse return error.InvalidAuthorityFrame;
+        if (shard.pair_authorizations.receipt(approval)) |record| {
+            if (record.request.strategy == identity and record.request.portfolio == portfolio)
+                return pairReceipt(gpa, record);
+        }
+        return pairOutcome(gpa, approval, "unknown", null);
+    }
+    if (request.identity != null or request.portfolio != null) return error.InvalidAuthorityFrame;
+    if (!shard.strategyAuthority(identity).strategy_active) return error.StrategyIdentityMismatch;
+    if (request.operation == .pair_authorization_version) {
+        if (request.scope_accounts != null) return error.InvalidAuthorityFrame;
+        var version: [20]u8 = undefined;
+        return std.json.Stringify.valueAlloc(gpa, .{ .core_version = try std.fmt.bufPrint(&version, "{d}", .{shard.pair_authorizations.version}) }, .{});
+    }
     return strategy_authority.pairTradingList(gpa, shard, identity, request.scope_accounts orelse return error.InvalidAuthorityFrame);
 }
 
@@ -254,6 +371,7 @@ fn readStrategyInstances(gpa: std.mem.Allocator, shard: *const trading.TradingSh
         binding: struct {
             strategy_identity: [32]u8,
             decision_domain: [32]u8,
+            portfolio_identity: [32]u8,
             config_version: u64,
         },
         status: []const u8,
@@ -273,6 +391,7 @@ fn readStrategyInstances(gpa: std.mem.Allocator, shard: *const trading.TradingSh
             .binding = .{
                 .strategy_identity = undefined,
                 .decision_domain = undefined,
+                .portfolio_identity = undefined,
                 .config_version = authority.strategy_config_version,
             },
             .status = if (identity == ready_strategy) "Ready" else "Stopped",
@@ -281,6 +400,7 @@ fn readStrategyInstances(gpa: std.mem.Allocator, shard: *const trading.TradingSh
         };
         _ = try std.fmt.bufPrint(&instance.binding.strategy_identity, "{x:0>32}", .{identity});
         _ = try std.fmt.bufPrint(&instance.binding.decision_domain, "{x:0>32}", .{shard.decision_domain_identity});
+        _ = try std.fmt.bufPrint(&instance.binding.portfolio_identity, "{x:0>32}", .{authority.portfolio_identity});
         try instances.append(arena.allocator(), instance);
     }
     return std.json.Stringify.valueAlloc(gpa, .{ .instances = instances.items }, .{});

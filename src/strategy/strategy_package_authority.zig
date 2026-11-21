@@ -360,7 +360,7 @@ pub const Authority = struct {
                 const strategy = self.shard.strategyAuthority(self.strategy);
                 if (strategy.strategy_config_version != self.config_version or !strategy.strategy_active)
                     return error.StrategyBindingMismatch;
-                if (try self.crossesVenues(value.scope_accounts) and !self.shard.pairTradingScopeBound(self.strategy))
+                if (try crossesVenues(self.shard, value.scope_accounts) and !self.shard.pairTradingScopeBound(self.strategy))
                     try self.commit(self.context, .{ .pair_trading_scope_bound = self.strategy });
                 try self.commit(self.context, .{ .control_command = command });
                 if (!self.shard.operational_state.effectiveTradingAuthority()) return error.TradingSafetyGateClosed;
@@ -540,22 +540,29 @@ pub fn pairTradingList(gpa: std.mem.Allocator, shard: *const trading.TradingShar
     return std.json.Stringify.valueAlloc(gpa, .{ .pairs = pairs }, .{});
 }
 
+pub fn pairListEntry(request: pair_authorization.Request) PairListEntry {
+    var entry: PairListEntry = .{
+        .identity = undefined,
+        .direction = request.direction,
+        .mode = request.mode,
+        .legs = undefined,
+    };
+    _ = std.fmt.bufPrint(&entry.identity, "{x:0>32}", .{request.identity}) catch unreachable;
+    for (request.legs, &entry.legs) |leg, *projected| {
+        projected.venue = leg.venue;
+        projected.environment = leg.environment;
+        _ = std.fmt.bufPrint(&projected.account, "{x:0>32}", .{leg.account}) catch unreachable;
+        _ = std.fmt.bufPrint(&projected.instrument, "{x:0>32}", .{leg.instrument}) catch unreachable;
+    }
+    return entry;
+}
+
 pub fn effectivePairList(gpa: std.mem.Allocator, shard: *const trading.TradingShard, strategy: u128) ![]PairListEntry {
     var pairs: [@typeInfo(@FieldType(pair_authorization.State, "records")).array.len]PairListEntry = undefined;
     var count: usize = 0;
     for (0..shard.pair_authorizations.count) |index| {
         const record = shard.effectivePairAuthorization(strategy, index) orelse continue;
-        const request_value = record.request;
-        const entry = &pairs[count];
-        _ = try std.fmt.bufPrint(&entry.identity, "{x:0>32}", .{request_value.identity});
-        entry.direction = request_value.direction;
-        entry.mode = request_value.mode;
-        for (request_value.legs, &entry.legs) |leg, *projected| {
-            projected.venue = leg.venue;
-            projected.environment = leg.environment;
-            _ = try std.fmt.bufPrint(&projected.account, "{x:0>32}", .{leg.account});
-            _ = try std.fmt.bufPrint(&projected.instrument, "{x:0>32}", .{leg.instrument});
-        }
+        pairs[count] = pairListEntry(record.request);
         count += 1;
     }
     return gpa.dupe(PairListEntry, pairs[0..count]);

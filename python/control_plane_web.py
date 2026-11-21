@@ -230,7 +230,7 @@ class ControlPlaneApp:
                  clock=lambda: int(time.time()),
                  projection_provider=None, ui_path=None, release_manager=None,
                  lifecycle_outbox=None, instance_source=None, scanner_console=None, asset_provider=None,
-                 scanner_adapters=None, engine_strategy_reader=None):
+                 scanner_adapters=None, engine_strategy_reader=None, engine_strategy_authority=None):
         self.directory = directory
         self.clock = clock
         self.passphrases = owner_session.PassphraseStore(directory)
@@ -244,7 +244,7 @@ class ControlPlaneApp:
         self.ui_path = ui_path
         self.csrf_by_token_hash: dict[str, str] = {}
         self.release_manager = release_manager
-        self.engine_strategy_reader = engine_strategy_reader
+        self.engine_strategy_reader = engine_strategy_authority.instances if engine_strategy_authority else engine_strategy_reader
         self.instance_manager = (strategy_instance.InstanceManager(directory, release_manager, instance_source)
                                  if instance_source is not None else None)
         self.lifecycle_outbox = lifecycle_outbox
@@ -262,6 +262,7 @@ class ControlPlaneApp:
         self.fee_schedules = scanner_console.fee_schedules or FeeSchedules(Path(directory)/"manual-fees.json")
         scanner_console.fee_schedules = self.fee_schedules
         self.scanner_console = scanner_console
+        scanner_console.deployment_authority = engine_strategy_authority
         if scanner_console is not None and scanner_console.config_store is None:
             scanner_console.bind_config(Path(directory)/"scanner-config.json")
         scanner_console.exchange_settings = self.exchange_settings_store
@@ -623,7 +624,7 @@ class ControlPlaneApp:
                 raise ValueError("scanner operation required")
             else:
                 operation = request["operation"]
-                expected = {"operation"} if operation in ("start", "pause", "stop", "summary") else {"operation", "payload"}
+                expected = {"operation"} if operation in ("start", "pause", "stop", "summary", "approval_targets") else {"operation", "payload"}
                 if set(request) != expected:
                     raise ValueError("scanner request fields")
                 if operation == "start":
@@ -640,6 +641,8 @@ class ControlPlaneApp:
                     result = console.history.summarize()
                 elif operation == "approve":
                     result = console.request_approval(request["payload"])
+                elif operation == "approval_targets":
+                    result = console.approval_targets()
                 elif operation == "approval_status":
                     result = console.query_approval(request["payload"])
                 elif operation == "core_version":

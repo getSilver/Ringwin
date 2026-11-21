@@ -989,7 +989,7 @@ fn prepareTradingWithSpot(owner: *demo.Owner, scenario: Scenario, first_spot: bo
             .exchange_account = account,
             .instrument = instrument,
             .venue = venue,
-            .environment = .simulation,
+            .environment = @enumFromInt(@intFromEnum(owner.shard.deployment.account(account).?.environment)),
             .product = if ((spot and instrument <= 102) or (first_spot and instrument == 101) or (scenario == .cycle_spot_carry and instrument == 103)) .spot else .isolated_linear,
             .version = 1,
             .rules_version = 1,

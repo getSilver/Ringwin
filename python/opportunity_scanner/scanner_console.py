@@ -125,6 +125,7 @@ class ScannerConsole:
         self.max_age_ns, self.max_skew_ns = max_age_ns, max_skew_ns
         self.authority = authority
         self.trading_bindings = json.loads(encoded(trading_bindings))
+        self.deployment_authority = None
         self.resolve_selection = resolve_selection or (self._resolve_selection if trading_bindings else None)
         self.lock = RLock()
         self.desired, self.phase, self.session = "stopped", "Stopped", ""
@@ -557,7 +558,8 @@ class ScannerConsole:
             uint_text(selection["identity"], minimum=1)
             uint_text(selection["strategy_identity"], minimum=1)
             uint_text(selection["portfolio_identity"], minimum=1)
-            uint_text(selection["expected_core_version"])
+            if selection["expected_core_version"] is not None:
+                uint_text(selection["expected_core_version"])
             try:
                 previous = self.history.request(selection["identity"])
             except ValueError as error:
@@ -572,13 +574,23 @@ class ScannerConsole:
             self.view()  # Refresh TTL on the server before using a candidate.
             row = next((x for x in self.snapshot["candidates"] if x["id"] == selection["candidate_id"]), None)
             if selection["enabled"] and (row is None or row["status"] != "evaluated"):
-                raise ValueError("current evaluated candidate required")
+                reason = row["reason"] if row else "candidate_unavailable"
+                raise ValueError(f"current evaluated candidate required: {reason}")
             if selection["enabled"] and self.fee_schedules is not None:
                 self.fee_schedules.require_current(row.get("input_versions", {}).get("fees"))
-            if self.authority is None or self.resolve_selection is None:
-                raise ValueError("core pair authorization unavailable")
-            # Disabling uses the trusted node binding, not an expired recommendation.
-            binding = self.resolve_selection(selection, row)
+            resolved = dict(selection)
+            if resolved["expected_core_version"] is None:
+                resolved["expected_core_version"] = self.core_version(selection["strategy_identity"])["core_version"]
+            if self.deployment_authority is not None:
+                if not selection["enabled"]:
+                    raise ValueError("deployed pair approval requires enabled=true")
+                binding = self._deployment_selection(resolved, row)
+            else:
+                if self.authority is None or self.resolve_selection is None:
+                    raise ValueError("core pair authorization unavailable")
+                binding = self.resolve_selection(resolved, row)
+            if selection["enabled"] and self.clock() >= int(row["valid_until_ns"]):
+                raise ValueError("current evaluated candidate required: expired")
             if type(binding) is not dict:
                 raise ValueError("core pair binding unavailable")
             request = dict(selection=selection, core=binding, candidate=row)
@@ -586,6 +598,49 @@ class ScannerConsole:
             self.history.request(selection["identity"], request, response)
             self._record("operations", secrets.token_hex(16), dict(action="pair_request", identity=selection["identity"]))
             return self._query_or_submit(selection["identity"], request, submit=True)
+
+    def approval_targets(self):
+        if self.deployment_authority is None:
+            if self.authority is None:
+                raise OSError("core pair authorization unavailable")
+            return dict(bindings=self.trading_bindings, legacy_revoke=bool(self.trading_bindings))
+        return dict(bindings=[
+            dict(strategy_identity=str(int(row["binding"]["strategy_identity"], 16)),
+                 portfolio_identity=str(int(row["binding"]["portfolio_identity"], 16)))
+            for row in self.deployment_authority.instances()], legacy_revoke=False)
+
+    def _deployment_selection(self, selection, row):
+        path = self.config_store.path.with_name("scanner-trading-instruments.json")
+        try:
+            aliases = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            aliases = {}
+        if type(aliases) is not dict:
+            raise ValueError("invalid scanner trading instrument mappings")
+        legs = []
+        for identity in row["pair"]:
+            observed = self.source.registered.get(tuple(map(int, identity)))
+            if observed is None:
+                raise ValueError("pair observation removed")
+            key = f"{observed.venue}:{observed.environment}:{observed.rules.instrument}"
+            mapping = aliases.get(key, {"instrument": str(observed.rules.instrument)})
+            if type(mapping) is not dict or not {"instrument"} <= mapping.keys() <= {"instrument", "account"}:
+                raise ValueError(f"invalid trading instrument mapping: {key}")
+            uint_text(mapping["instrument"], minimum=1)
+            if "account" in mapping:
+                uint_text(mapping["account"], minimum=1)
+            rules = observed.rules
+            legs.append(dict(mapping, venue=observed.venue, environment=observed.environment,
+                             product="isolated_linear" if observed.kind == "linear" else observed.kind,
+                             base_asset=str(rules.base_asset),
+                             settlement_asset=str(rules.settlement[0] if rules.settlement else rules.quote_asset)))
+        return dict(operation="approve_pair", identity=selection["identity"], strategy=selection["strategy_identity"],
+                    portfolio=selection["portfolio_identity"], expected_version=selection["expected_core_version"],
+                    legs=legs, direction=row["direction"], mode=self._pair_mode(row))
+
+    @staticmethod
+    def _pair_mode(row):
+        return "taker_taker" if row["mode"] == "taker_taker" else "maker_first" if row["maker_leg"] == 0 else "maker_second"
 
     def _resolve_selection(self, selection, row):
         binding = next((b for b in self.trading_bindings if b["strategy_identity"] == selection["strategy_identity"]
@@ -607,7 +662,7 @@ class ScannerConsole:
         return dict(identity=selection["identity"], strategy=selection["strategy_identity"], portfolio=selection["portfolio_identity"],
                     activation=binding["activation"], config_version=int(binding["config_version"]),
                     expected_version=int(selection["expected_core_version"]), legs=legs, direction=row["direction"],
-                    mode="taker_taker" if row["mode"] == "taker_taker" else "maker_first" if row["maker_leg"] == 0 else "maker_second",
+                    mode=self._pair_mode(row),
                     enabled=selection["enabled"])
 
     def query_approval(self, identity):
@@ -619,21 +674,34 @@ class ScannerConsole:
             return self._query_or_submit(identity, previous["request"], submit=False)
 
     def core_version(self, strategy):
-        if self.authority is None or not any(x["strategy_identity"] == strategy for x in self.trading_bindings):
+        uint_text(strategy, minimum=1)
+        authority = self.deployment_authority or self.authority
+        if authority is None or (self.deployment_authority is None and
+                                 not any(x["strategy_identity"] == strategy for x in self.trading_bindings)):
             raise ValueError("core strategy binding unavailable")
-        return self.authority.request(dict(operation="pair_authorization_version", strategy_identity=format(int(strategy), "032x")))
+        return authority.request(dict(operation="pair_authorization_version", strategy_identity=format(int(strategy), "032x")))
 
     def _query_or_submit(self, identity, request, *, submit):
         try:
-            result = self.authority.request(dict(operation="pair_authorize" if submit else "pair_authorization_status",
-                strategy_identity=format(int(request["selection"]["strategy_identity"]), "032x"),
-                pair_request=request["core"]))
+            selection = request["selection"]
+            strategy = format(int(selection["strategy_identity"]), "032x")
+            if self.deployment_authority is not None:
+                command = request["core"] if submit else dict(operation="pair_approval_status", identity=identity,
+                    strategy_identity=strategy, portfolio=selection["portfolio_identity"])
+                result = self.deployment_authority.request(command)
+            else:
+                result = self.authority.request(dict(operation="pair_authorize" if submit else "pair_authorization_status",
+                    strategy_identity=strategy, pair_request=request["core"]))
             if result.get("status") not in ("accepted", "rejected", "unknown"):
                 raise ValueError("invalid core pair response")
-            if result["status"] == "accepted" and (result.get("identity") != identity
-                    or not result.get("core_version") or not result.get("barrier")):
+            if result.get("identity") != identity:
+                raise ValueError("core pair confirmation identity")
+            if result["status"] == "accepted" and (not result.get("core_version") or not result.get("barrier")
+                    or (self.deployment_authority is not None and not isinstance(result.get("pair"), dict))):
                 raise ValueError("core pair confirmation binding")
             response = dict(result, trading_qualified=False)
+            if self.deployment_authority is not None and response["status"] == "accepted":
+                response["observation_legs"] = request["candidate"].get("legs", [])
         except (OSError, TimeoutError, ValueError) as error:
             response = dict(identity=identity, status="unknown", reason=str(error), trading_qualified=False)
         if submit:

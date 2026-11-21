@@ -1,16 +1,23 @@
 """Scanner public lifecycle/history and authenticated Web boundaries."""
 import json
+import os
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
 from dataclasses import replace
 from fractions import Fraction
 import http.client
+import socket
+import struct
 import threading
+import time
 
 import control_plane
+import control_plane_node
 import control_plane_web
+import owner_session
 
 from opportunity_scanner import scanner_console as c
 from strategies.cross_venue.arbitrage_economics import FxRate
@@ -19,6 +26,153 @@ from test_arbitrage_evaluation import T
 
 
 class ConsoleTests(unittest.TestCase):
+    def test_authenticated_approval_maps_only_the_selected_demo_testnet_route(self):
+        from verify_production_strategy_web import child, receive
+        from verify_scanner_console import canonical_fixture, PASSPHRASE, ROOT
+        from strategy_host import encode_depth_snapshot
+        binary = "ringwin-strategy-authority-probe" + (".exe" if os.name == "nt" else "")
+        probe = os.environ.get("RINGWIN_SCANNER_APPROVAL_PROBE", str(ROOT / "zig-out" / "bin" / binary))
+        web, writer = socket.socketpair()
+        with tempfile.TemporaryDirectory() as directory, web, writer, child(
+                [probe, "-", "deployed-scanner"], stdin=subprocess.PIPE, stdout=subprocess.PIPE) as core:
+            writer.settimeout(10)
+            authority = control_plane_node.EngineStrategyAuthority(web)
+            observations, plan = canonical_fixture(
+                accounts=(701, 702), environments=("demo", "testnet"), instruments=(201, 102),
+                market_sources=(("production", "fixture-demo-feed", "synthetic_protocol_fixture"),
+                                ("testnet", "fixture-testnet-feed", "synthetic_protocol_fixture")))
+            a = observations[0]
+            book = c.scanner.decode_depth_snapshot(a.book)
+            book["instrument"] = 105
+            other = replace(a, rules=replace(a.rules, instrument=105), book=encode_depth_snapshot(book))
+            observation_rows = observations + (other,)
+            now = [T]
+            console = c.ScannerConsole(c.CanonicalSource(observation_rows), c.History(clock=lambda: 1000),
+                clock=lambda: now[0], wall_clock=lambda: 1000)
+            self.addCleanup(console.close)
+            commands = control_plane.CommandServer(b"s"*32)
+            self.addCleanup(commands.close)
+            app = control_plane_web.ControlPlaneApp(directory, commands, scanner_console=console,
+                engine_strategy_authority=authority)
+            for version, (kind, environment) in enumerate((("okx", "demo"), ("hyperliquid", "testnet"))):
+                app.exchange_settings_store.save(dict(expected_version=str(version), type=kind, name=kind,
+                    environment=environment))
+            self.assertEqual(app.setup(PASSPHRASE)[0], 200)
+            status, session = app.login(PASSPHRASE, owner_session.totp_at(app.totp.read_secret(), int(time.time())), "offline")
+            self.assertEqual(status, 200)
+            headers = {"Cookie": "owner_session=" + session["session_token"], "X-Owner-CSRF": session["csrf_token"]}
+            server = control_plane_web.serve(app)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+
+            def post(operation, payload=None, headers=headers):
+                request = {"operation": operation}
+                if payload is not None:
+                    request["payload"] = payload
+                client = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+                try:
+                    client.request("POST", "/api/scanner", json.dumps(request), headers=headers)
+                    response = client.getresponse()
+                    return response.status, json.load(response)
+                finally:
+                    client.close()
+
+            pair = dict(direction=1, mode="taker_taker", legs=[
+                dict(venue=1, environment="demo", account=f"{20:032x}", instrument=f"{103:032x}"),
+                dict(venue=21, environment="testnet", account=f"{30:032x}", instrument=f"{102:032x}")])
+            pair["identity"] = f"{100:032x}"
+            frames = []
+            errors = []
+            ready = threading.Event()
+
+            def relay():
+                try:
+                    if core.stdout.read(2) != b"HV":
+                        raise EOFError("offline Writer did not start")
+                    ready.set()
+                    for _ in range(6):
+                        prefix = receive(writer, 5)
+                        size, = struct.unpack("<I", prefix[1:])
+                        payload = receive(writer, size)
+                        frames.append((prefix[:1], json.loads(payload)))
+                        core.stdin.write(prefix + payload)
+                        core.stdin.flush()
+                        length = core.stdout.read(4)
+                        if len(length) != 4:
+                            raise EOFError("offline Writer disconnected")
+                        reply_size, = struct.unpack("<I", length)
+                        writer.sendall(length + core.stdout.read(reply_size))
+                except (OSError, EOFError) as error:
+                    errors.append(error)
+
+            worker = threading.Thread(target=relay, daemon=True)
+            worker.start()
+            try:
+                self.assertTrue(ready.wait(30), errors)
+                self.assertEqual(post("approval_targets", headers={})[0], 401)
+                status, result = post("approval_targets")
+                self.assertEqual(status, 200, result)
+                self.assertEqual(result["result"]["bindings"],
+                    [dict(strategy_identity="9", portfolio_identity="10")])
+                scopes = [dict(venue=str(x.venue), environment=x.environment, product=x.kind, include_assets=[],
+                    exclude_assets=[], quote_asset="1", min_depth_atoms=None, max_depth_atoms=None,
+                    new_instruments=False) for x in observations]
+                status, result = post("configure", dict(expected_version="0", scopes=scopes))
+                self.assertEqual(status, 200, result)
+                run = post("start")[1]["result"]
+                console.publish(run["session"], 1, observation_rows, (plan,), at_ns=T,
+                    input_versions={plan.policy.scope: {str(plan.policy.original_base): {"fees": "0"}}})
+                candidates = console.view()["snapshot"]["candidates"]
+                candidate, = [row for row in candidates if row["status"] == "evaluated"]
+                self.assertTrue(any(row["pair"][0][-1] == "105" for row in candidates))
+                mapping = Path(directory, "scanner-trading-instruments.json")
+                mapping.write_text(json.dumps({"1:demo:201": {"instrument": "103", "account": "20"}}))
+                selection = dict(identity="100", candidate_id=candidate["id"], strategy_identity="9",
+                    portfolio_identity="10", expected_config_version="1", expected_core_version=None, enabled=True)
+                self.assertEqual(post("approve", selection, headers={"Cookie": headers["Cookie"]})[0], 403)
+                status, result = post("approve", selection)
+                self.assertEqual(status, 200, result)
+                receipt = result["result"]
+                self.assertEqual(receipt["pair"], pair)
+                self.assertEqual(receipt["core_version"], "1")
+                self.assertEqual([row["account"] for row in receipt["observation_legs"]], ["701", "702"])
+                self.assertEqual([row["actual_environment"] for row in receipt["observation_legs"]], ["production", "testnet"])
+                self.assertEqual(post("approve", selection)[1], result)
+                self.assertEqual(post("approval_status", "100")[1]["result"], receipt)
+                mapping.unlink()
+                self.assertEqual(post("approve", dict(selection, identity="101"))[1]["result"]["reason"], "UnmappedPairFirstLeg")
+                now[0] = T+50
+                status, result = post("approve", dict(selection, identity="102"))
+                self.assertEqual(status, 400)
+                self.assertIn("expired", result["error"])
+                client = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+                try:
+                    client.request("GET", "/api/strategy-instances", headers=headers)
+                    response = client.getresponse()
+                    self.assertEqual(response.status, 200)
+                    instance, = json.load(response)["instances"]
+                    self.assertEqual(instance["pair_trading_list"], [pair])
+                    self.assertFalse(instance["trading_authorized"])
+                finally:
+                    client.close()
+                worker.join(timeout=5)
+                self.assertFalse(worker.is_alive())
+                self.assertFalse(errors)
+                self.assertEqual([prefix for prefix, _ in frames], [b"P", b"P", b"Q", b"P", b"Q", b"P"])
+                submitted = frames[2][1]
+                self.assertEqual((submitted["strategy"], submitted["portfolio"], submitted["direction"], submitted["mode"]),
+                    ("9", "10", 1, "taker_taker"))
+                self.assertEqual(submitted["legs"], [
+                    dict(venue=1, environment="demo", instrument="103", account="20", product="isolated_linear",
+                         base_asset="4346947", settlement_asset="1"),
+                    dict(venue=21, environment="testnet", instrument="102", product="isolated_linear",
+                         base_asset="4346947", settlement_asset="1"),
+                ])
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
     def test_offline_development_http_does_not_require_login(self):
         from verify_scanner_console import Fixture
         with tempfile.TemporaryDirectory() as directory:

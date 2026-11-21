@@ -14,24 +14,40 @@ pub fn configurePairAssets(owner: *demo.Owner) !void {
     return configurePairAssetsForScenario(owner, true);
 }
 
+pub fn initializeMixedEnvironmentPairOwner(owner: *demo.Owner) !void {
+    var rows = try existing.configurationRows();
+    rows[2].account.environment = .demo;
+    rows[3].account.environment = .testnet;
+    var deployment: @import("../../../trading/deployment_allocation.zig").Configuration = .{};
+    for (rows[0 .. rows.len - 1]) |row| try deployment.apply(row);
+    deployment.header.?.expected_digest = deployment.contentDigest();
+    try deployment.apply(.seal);
+    try existing.initializePythonOwnerForConfiguration(owner, &deployment);
+    try configurePairAssets(owner);
+    try configurePairLeg(owner, 20, 103, true);
+}
+
 fn configurePairAssetsForScenario(owner: *demo.Owner, expanded_economics: bool) !void {
-    for ([_]u128{ 20, 30 }, [_]u128{ 101, 102 }) |account, instrument| {
-        const entry = owner.shard.pairInstrument(account, instrument).?;
-        var rules = entry.rules;
-        rules.version += 1;
-        rules.base_asset = 0x425443;
-        if (expanded_economics) rules.quantity_denominator = 1;
-        _ = try owner.apply(fixture.atGroup(44, .{ .identity = owner.shard.authoritativeBarrier() + 1, .account_scope = account, .payload = .{ .instrument_rules_activated = rules } }));
-        var margin = entry.margin;
-        margin.version += 1;
-        if (expanded_economics) margin.price_tick_atoms = 100_000;
-        _ = try owner.apply(fixture.atGroup(44, .{ .identity = owner.shard.authoritativeBarrier() + 1, .account_scope = account, .payload = .{ .margin_rules_activated = margin } }));
-        var capability = entry.capability.?;
-        capability.version += 1;
-        capability.rules_version = rules.version;
-        if (!expanded_economics) capability.supports_native_amend = true;
-        _ = try owner.apply(fixture.atGroup(44, .{ .identity = owner.shard.authoritativeBarrier() + 1, .account_scope = account, .payload = .{ .capability_profile_activation = capability } }));
-    }
+    for ([_]u128{ 20, 30 }, [_]u128{ 101, 102 }) |account, instrument|
+        try configurePairLeg(owner, account, instrument, expanded_economics);
+}
+
+fn configurePairLeg(owner: *demo.Owner, account: u128, instrument: u128, expanded_economics: bool) !void {
+    const entry = owner.shard.pairInstrument(account, instrument).?;
+    var rules = entry.rules;
+    rules.version += 1;
+    rules.base_asset = 0x425443;
+    if (expanded_economics) rules.quantity_denominator = 1;
+    _ = try owner.apply(fixture.atGroup(44, .{ .identity = owner.shard.authoritativeBarrier() + 1, .account_scope = account, .payload = .{ .instrument_rules_activated = rules } }));
+    var margin = entry.margin;
+    margin.version += 1;
+    if (expanded_economics) margin.price_tick_atoms = 100_000;
+    _ = try owner.apply(fixture.atGroup(44, .{ .identity = owner.shard.authoritativeBarrier() + 1, .account_scope = account, .payload = .{ .margin_rules_activated = margin } }));
+    var capability = entry.capability.?;
+    capability.version += 1;
+    capability.rules_version = rules.version;
+    if (!expanded_economics) capability.supports_native_amend = true;
+    _ = try owner.apply(fixture.atGroup(44, .{ .identity = owner.shard.authoritativeBarrier() + 1, .account_scope = account, .payload = .{ .capability_profile_activation = capability } }));
 }
 
 test "scanner pair approval validates identities and survives durable recovery" {

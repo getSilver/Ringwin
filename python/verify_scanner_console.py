@@ -32,21 +32,23 @@ ROOT = Path(__file__).resolve().parents[1]
 PASSPHRASE = "scanner-offline-acceptance-only"
 
 
-def canonical_fixture():
+def canonical_fixture(accounts=(20, 30), environments=("production", "production"), market_sources=(None, None),
+                      instruments=(101, 102)):
     old, plan = fixture()
-    rules = tuple(replace(o.rules, instrument=101+i, version=2, base_asset=0x425443,
+    rules = tuple(replace(o.rules, instrument=instruments[i], version=2, base_asset=0x425443,
                           base_atoms_per_lot=F(100_000_000), tick_quote_atoms_per_base_atom=F(1, 1000))
                   for i, o in enumerate(old))
     def book(payload):
         item = s.decode_depth_snapshot(payload)
-        item.update(instrument={1: 101, 2: 102}.get(item["instrument"], item["instrument"]), rules_version=2)
+        item.update(instrument={1: instruments[0], 2: instruments[1]}.get(item["instrument"], item["instrument"]), rules_version=2)
         return v.encode_depth_snapshot(item)
     def scenario(item):
         return replace(item, markets=tuple(replace(m, books=tuple(book(b) for b in m.books)) for m in item.markets))
-    position = replace(plan.scenarios[0].entry, legs=tuple(replace(leg, account=(20, 30)[i], rules=rules[i],
-        exit_fee=replace(leg.exit_fee, instrument=101+i, rules_version=2)) for i, leg in enumerate(plan.scenarios[0].entry.legs)))
+    position = replace(plan.scenarios[0].entry, legs=tuple(replace(leg, account=accounts[i], rules=rules[i],
+        exit_fee=replace(leg.exit_fee, instrument=instruments[i], rules_version=2)) for i, leg in enumerate(plan.scenarios[0].entry.legs)))
     paths = tuple(scenario(replace(item, entry=position)) for item in plan.scenarios)
-    observations = tuple(s.Observation((1, 21)[i], (20, 30)[i], "linear", rules[i], paths[0].markets[0].books[i], True, environment="production")
+    observations = tuple(s.Observation((1, 21)[i], accounts[i], "linear", rules[i], paths[0].markets[0].books[i], True,
+                                      environment=environments[i], market_source=market_sources[i])
                          for i in range(2))
     pair = tuple(o.identity for o in observations)
     policy = replace(plan.policy, scope=s.candidate_id(pair, 1, "taker_taker", None), base_asset=0x425443,

@@ -53,12 +53,13 @@ pub fn main(init: std.process.Init) !void {
     std.crypto.hash.sha2.Sha256.hash(executable, &binary_digest, .{});
     const key_path = args.next() orelse return error.KeyFileRequired;
     const mode = args.next();
+    if (args.next() != null) return error.UnknownArgument;
+    if (mode != null and std.mem.eql(u8, mode.?, "deployed-scanner")) return serveDeployedScanner(init);
     const group = mode != null;
     const multiple = if (mode) |value| std.mem.eql(u8, value, "multiple") else false;
     const use_hyperliquid = if (mode) |value| std.mem.eql(u8, value, "hyperliquid") else false;
     const scanner = if (mode) |value| std.mem.eql(u8, value, "scanner") else false;
     if (mode) |value| if (!multiple and !use_hyperliquid and !scanner and !std.mem.eql(u8, value, "group")) return error.InvalidOfflineMode;
-    if (args.next() != null) return error.UnknownArgument;
     const key = try std.Io.Dir.cwd().readFileAlloc(init.io, key_path, init.gpa, .limited(33));
     defer init.gpa.free(key);
     if (key.len != 32) return error.InvalidKey;
@@ -227,6 +228,43 @@ pub fn main(init: std.process.Init) !void {
             try output.interface.writeAll(result);
             try output.interface.writeByte('\n');
         }
+        try output.interface.flush();
+    }
+}
+
+fn serveDeployedScanner(init: std.process.Init) !void {
+    const engine = @import("../../../runtime/production_engine.zig");
+    const store = try init.gpa.create(durable.MemoryAdapter);
+    defer init.gpa.destroy(store);
+    store.* = .initWithAllocator(init.gpa);
+    defer store.deinit();
+    const owner = try init.gpa.create(demo.Owner);
+    defer init.gpa.destroy(owner);
+    try demo.Owner.bootstrapInto(owner, store.interface(), init.io, .{ .domain = .decision_log, .id = 91 });
+    try @import("../core/scanner_authorization_acceptance.zig").initializeMixedEnvironmentPairOwner(owner);
+    const storage = try init.gpa.alloc(u8, engine.max_authority_bytes);
+    defer init.gpa.free(storage);
+    var input = std.Io.File.stdin().reader(init.io, storage);
+    var output_buffer: [4096]u8 = undefined;
+    var output = std.Io.File.stdout().writer(init.io, &output_buffer);
+    try output.interface.writeAll("HV");
+    try output.interface.flush();
+    while (true) {
+        const command = input.interface.takeByte() catch |err| switch (err) {
+            error.EndOfStream => return,
+            else => return err,
+        };
+        const size = try input.interface.takeInt(u32, .little);
+        if (size == 0 or size > storage.len) return error.RequestTooLarge;
+        const bytes = try input.interface.take(size);
+        const response = (switch (command) {
+            'P' => engine.readStrategyAuthority(owner, init.gpa, bytes, null),
+            'Q' => engine.approvePair(owner, init.gpa, bytes),
+            else => error.InvalidAuthorityFrame,
+        }) catch |err| try std.json.Stringify.valueAlloc(init.gpa, .{ .@"error" = @errorName(err) }, .{});
+        defer init.gpa.free(response);
+        try output.interface.writeInt(u32, @intCast(response.len), .little);
+        try output.interface.writeAll(response);
         try output.interface.flush();
     }
 }
