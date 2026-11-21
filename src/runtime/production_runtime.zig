@@ -288,7 +288,11 @@ fn serveRole(init: std.process.Init, role: Role, socket_path: []const u8, startu
         try production_engine.Engine.open(init, state_dir.?, startup.state_dir)
     else
         null;
-    defer if (live_engine) |engine| engine.close(init);
+    defer if (live_engine) |engine| {
+        if (engine.host != null) production_engine.revokeHosts(engine.owner) catch |err|
+            std.log.err("strategy_host_revoke: {s}", .{@errorName(err)});
+        engine.close(init);
+    };
     try installTermHandler();
     const address = try std.Io.net.UnixAddress.init(socket_path);
     std.Io.Dir.cwd().deleteFile(init.io, socket_path) catch |err| switch (err) {
@@ -452,6 +456,7 @@ fn serveRole(init: std.process.Init, role: Role, socket_path: []const u8, startu
                 switch (role) {
                     .engine => {
                         const recovered = try recoverVenue(&live_engine.?, &stream, init);
+                        if (recovered) try live_engine.?.startHost(init, generation);
                         try writeStatus(&stream, init.io, if (recovered) .ready else .recovery_only);
                     },
                     .market_feed => try @import("production_market_recovery.zig").replay(init, state_dir.?, startup.state_dir, stream),
@@ -465,7 +470,7 @@ fn serveRole(init: std.process.Init, role: Role, socket_path: []const u8, startu
                 const request = try init.gpa.alloc(u8, size);
                 defer init.gpa.free(request);
                 try readExact(&stream, init.io, request);
-                const response = production_engine.readStrategyAuthority(active_engine.owner, init.gpa, request) catch |err|
+                const response = active_engine.readAuthority(init.gpa, request) catch |err|
                     try std.json.Stringify.valueAlloc(init.gpa, .{ .@"error" = @errorName(err) }, .{});
                 defer init.gpa.free(response);
                 if (response.len > production_engine.max_authority_bytes) return error.InvalidAuthorityFrame;
@@ -483,7 +488,9 @@ fn serveRole(init: std.process.Init, role: Role, socket_path: []const u8, startu
                     const size = try readFrameInt(&stream, init.io, u32);
                     if (size == 0 or size > production_engine.max_input_bytes) return error.InvalidCanonicalFrame;
                     try readExact(&stream, init.io, frame[0..size]);
-                    break :blk .{ .cursor = try production_engine.ingest(active_engine.owner, frame[0..size]) };
+                    const cursor = try production_engine.ingest(active_engine.owner, frame[0..size]);
+                    try live_engine.?.pumpHost();
+                    break :blk .{ .cursor = cursor };
                 } else try production_engine.nextCommittedRecord(active_engine.owner, try readFrameInt(&stream, init.io, u64), &frame);
                 var output_buffer: [256]u8 = undefined;
                 var output = stream.writer(init.io, &output_buffer);
@@ -741,7 +748,7 @@ test "formal engine recovers its Writer and reads canonical observations only af
     const list_request =
         \\{"operation":"pair_trading_list","strategy_identity":"00000000000000000000000000000009","scope_accounts":["00000000000000000000000000000014","0000000000000000000000000000001e"]}
     ;
-    const pair_list = try production_engine.readStrategyAuthority(recovered, allocator, list_request);
+    const pair_list = try production_engine.readStrategyAuthority(recovered, allocator, list_request, null);
     defer allocator.free(pair_list);
     try std.testing.expectEqualStrings("{\"pairs\":[]}", pair_list);
     var buffer: [production_engine.max_record_bytes]u8 = undefined;
@@ -814,7 +821,7 @@ test "formal engine recovers its Writer and reads canonical observations only af
         .mode = .taker_taker,
         .enabled = true,
     } } }));
-    const populated = try production_engine.readStrategyAuthority(owner, allocator, list_request);
+    const populated = try production_engine.readStrategyAuthority(owner, allocator, list_request, null);
     defer allocator.free(populated);
     const projected = try std.json.parseFromSlice(struct {
         pairs: []const struct { identity: []const u8 },

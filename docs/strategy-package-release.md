@@ -313,6 +313,28 @@ Venue adapters own replay of their durable RawIngress. Configure the expected
 after a successful sweep for every configured source. An empty configuration,
 a failed sweep, or a missing source keeps the admission gate closed.
 
+For a locally provisioned Host, add `strategy_host` to `engine.json` with
+absolute `python`, `script`, `request`, and `checkpoint` paths and the
+64-character `checkpoint_sha256`. The request is the approved candidate Host
+request for one strategy instance, including its binding, manifest and
+checkpoint cursor. Provision the request, runtime and package files through
+the trusted deployment operator. Release publication and checkpoint selection
+remain deployment responsibilities. The checkpoint hash pins the
+provisioned file. Venue recovery sources are required for a configured Host.
+The supported Host subscriptions are schema-v1 depth snapshots and market
+trades. The engine reconstructs depth from committed records and sends empty
+coverage for sequences with no subscribed event.
+
+Once every configured Venue source has recovered, the engine restores the
+Host through the current Writer barrier over bounded anonymous pipes. It
+verifies the recovered checkpoint, commits `HostActivated` and waits for the
+Host to acknowledge that exact fact sequence with zero output frames. A
+failed or mismatched acknowledgment terminates the session and revokes its
+activation. The Web projection reports `Ready` for the acknowledged live
+instance. The formal role keeps trading disabled and drains Host output at the pipe
+boundary. Signed trading enablement and dispatch remain separate from Host
+readiness.
+
 The configured `market_feed` role reads its own capture. For OKX public data,
 its `market-recovery.json` contains the same `source`, the original
 `environment`, `config_version`, and `okx_binding`. This replay uses protocol

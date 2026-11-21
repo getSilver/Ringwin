@@ -37,7 +37,8 @@ Status: open
 ## Frontier
 
 - [04 手动费率贯穿扫描和开仓复核](issues/04-fees.md)
-- [07 跨所策略以空交易名单启动](issues/07-empty-list.md)
+- [08 从机会页将一条路线加入指定策略](issues/08-approve.md)
+- [09 从策略页查询和撤销持久批准](issues/09-revoke.md)
 - [15 滚动归档并测出持续扫描容量](issues/15-capacity.md)
 
 ## Decisions so far
@@ -50,11 +51,11 @@ Status: open
 
 [03](issues/03-pairing.md) 按核心登记资产匹配跨环境路线，为全部产品搭配生成两个方向并逐腿记录行情来源与缺项。广域轮转和实际覆盖由 [14](issues/14-coverage.md) 验证。
 
-[06](issues/06-evaluation.md) 已通过同结算币离线验收，覆盖固定金额净边际、逐腿行情年龄、材料缺失撤回及归档复算。08 继续等待 07。
+[06](issues/06-evaluation.md) 已通过同结算币离线验收，覆盖固定金额净边际、逐腿行情年龄、材料缺失撤回及归档复算。
 
 [05](issues/05-stablecoin.md) 已完成扫描平价、核心混合结算币批准及实际周期汇差的离线验收。核心已提交账务和汇率引用可恢复重算。正式双 IOC 运行验收见 [11](issues/11-dual-ioc.md)。
 
-[07](issues/07-empty-list.md) 已通过空名单核心准入、持久恢复及存量敞口处置的离线验证。默认扫描启动器仍须接入策略实例权威连接，完成策略页验收。
+[07](issues/07-empty-list.md) 已通过空名单、存量敞口及正式 Linux 联合验收。默认 Web 从 Writer 读取名单，正式 engine 恢复 Venue 输入，StrategyHost 从 checkpoint 追平并确认核心提交序号。双 IOC 正常交易周期及单腿失败恢复分别由 [11](issues/11-dual-ioc.md) 和 [12](issues/12-ioc-recovery.md) 接续。
 
 [10](issues/10-limit-price.md) 已通过 Host 限价定向验收。Gateway 请求保留各腿 ticks 和规则版本，TradingShard 校验 tick 单位并逐腿记录拒绝原因。
 

@@ -15,9 +15,9 @@ from verify_production_strategy_web import child, receive
 
 
 @contextmanager
-def role(binary, name, state, control):
+def role(binary, name, state, control, **process_options):
     command = [binary, "--production-role", name, "--socket", str(control), "--state-dir", str(state)]
-    with child(command) as process, socket.socket(socket.AF_UNIX) as connection:
+    with child(command, **process_options) as process, socket.socket(socket.AF_UNIX) as connection:
         connection.settimeout(20)
         for _ in range(100):
             try:

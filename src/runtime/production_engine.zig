@@ -5,6 +5,7 @@ const journal = @import("../persistence/journal.zig");
 const codec = @import("../persistence/canonical_event_codec.zig");
 const trading = @import("../trading/trading_shard.zig");
 const strategy_authority = @import("../strategy/strategy_package_authority.zig");
+const strategy_host = @import("production_strategy_host.zig");
 const Owner = @import("demo/demo_authority.zig").Owner;
 
 pub const max_input_bytes = codec.max_encoded_len - 1;
@@ -26,6 +27,7 @@ const Config = struct {
     decision_stream: u64,
     deployment_digest: []const u8,
     recovery_sources: []const RecoverySource = &.{},
+    strategy_host: ?strategy_host.Config = null,
 };
 
 pub const Engine = struct {
@@ -34,15 +36,18 @@ pub const Engine = struct {
     sources: [max_recovery_sources]RecoverySource = undefined,
     source_count: usize = 0,
     recovered_sources: u32 = 0,
+    config: std.json.Parsed(Config),
+    host: ?*strategy_host.Host = null,
 
     pub fn open(init: std.process.Init, dir: std.Io.Dir, state_path: []const u8) !Engine {
         var config_buffer: [4097]u8 = undefined;
         const bytes = try dir.readFile(init.io, "engine.json", &config_buffer);
         if (bytes.len == config_buffer.len) return error.InvalidEngineConfiguration;
-        const parsed = try std.json.parseFromSlice(Config, init.gpa, bytes, .{});
-        defer parsed.deinit();
+        const parsed = try std.json.parseFromSlice(Config, init.gpa, bytes, .{ .allocate = .alloc_always });
+        errdefer parsed.deinit();
         const config = parsed.value;
-        if (config.decision_stream == 0 or config.deployment_digest.len != 64)
+        if (config.decision_stream == 0 or config.deployment_digest.len != 64 or
+            (config.strategy_host != null and config.recovery_sources.len == 0))
             return error.InvalidEngineConfiguration;
         var digest: [32]u8 = undefined;
         _ = try std.fmt.hexToBytes(&digest, config.deployment_digest);
@@ -56,7 +61,7 @@ pub const Engine = struct {
         errdefer init.gpa.destroy(owner);
         try recover(owner, file_store.interface(), init.io, config.decision_stream, digest);
         try revokeHosts(owner);
-        var engine: Engine = .{ .owner = owner, .file_store = file_store };
+        var engine: Engine = .{ .owner = owner, .file_store = file_store, .config = parsed };
         for (config.recovery_sources) |source| {
             if (!source.valid() or engine.source_count == engine.sources.len) return error.InvalidEngineConfiguration;
             for (engine.sources[0..engine.source_count]) |previous|
@@ -91,7 +96,23 @@ pub const Engine = struct {
         self.recovered_sources = recovered_sources;
     }
 
+    pub fn startHost(self: *Engine, init: std.process.Init, generation: u64) !void {
+        if (self.config.value.strategy_host) |config|
+            self.host = try strategy_host.Host.start(init, self.owner, generation, config);
+    }
+
+    pub fn pumpHost(self: *Engine) !void {
+        if (self.host) |host| try host.pump(self.owner);
+    }
+
+    pub fn readAuthority(self: *const Engine, gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
+        const ready_strategy = if (self.host) |host| try host.readyStrategy(self.owner) else null;
+        return readStrategyAuthority(self.owner, gpa, bytes, ready_strategy);
+    }
+
     pub fn close(self: Engine, init: std.process.Init) void {
+        if (self.host) |host| host.close(init);
+        self.config.deinit();
         init.gpa.destroy(self.owner);
         self.file_store.close(init.io);
         init.gpa.destroy(self.file_store);
@@ -207,7 +228,7 @@ pub fn revokeHosts(owner: *Owner) !void {
 
 pub const max_authority_bytes = 256 * 1024;
 
-pub fn readStrategyAuthority(owner: *const Owner, gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
+pub fn readStrategyAuthority(owner: *const Owner, gpa: std.mem.Allocator, bytes: []const u8, ready_strategy: ?u128) ![]u8 {
     const Request = struct {
         operation: enum { pair_trading_list, strategy_instances },
         strategy_identity: ?[]const u8 = null,
@@ -219,7 +240,7 @@ pub fn readStrategyAuthority(owner: *const Owner, gpa: std.mem.Allocator, bytes:
     const request = parsed.value;
     if (request.operation == .strategy_instances) {
         if (request.strategy_identity != null or request.scope_accounts != null) return error.InvalidAuthorityFrame;
-        return readStrategyInstances(gpa, shard);
+        return readStrategyInstances(gpa, shard, ready_strategy);
     }
     const id = request.strategy_identity orelse return error.StrategyIdentityMismatch;
     if (id.len != 32) return error.StrategyIdentityMismatch;
@@ -228,14 +249,14 @@ pub fn readStrategyAuthority(owner: *const Owner, gpa: std.mem.Allocator, bytes:
     return strategy_authority.pairTradingList(gpa, shard, identity, request.scope_accounts orelse return error.InvalidAuthorityFrame);
 }
 
-fn readStrategyInstances(gpa: std.mem.Allocator, shard: *const trading.TradingShard) ![]u8 {
+fn readStrategyInstances(gpa: std.mem.Allocator, shard: *const trading.TradingShard, ready_strategy: ?u128) ![]u8 {
     const Instance = struct {
         binding: struct {
             strategy_identity: [32]u8,
             decision_domain: [32]u8,
             config_version: u64,
         },
-        status: []const u8 = "Stopped",
+        status: []const u8,
         trading_authorized: bool = false,
         pair_trading_list: []strategy_authority.PairListEntry,
         pair_trading_list_empty: bool,
@@ -254,6 +275,7 @@ fn readStrategyInstances(gpa: std.mem.Allocator, shard: *const trading.TradingSh
                 .decision_domain = undefined,
                 .config_version = authority.strategy_config_version,
             },
+            .status = if (identity == ready_strategy) "Ready" else "Stopped",
             .pair_trading_list = pairs,
             .pair_trading_list_empty = pairs.len == 0,
         };

@@ -453,6 +453,14 @@ pub const Gateway = struct {
         self.published_count += 1;
     }
 
+    /// A synchronous consumer has drained earlier outputs and needs only the
+    /// latest publication to validate continuity of the next batch.
+    pub fn retainLatestPublication(self: *Gateway) void {
+        if (self.published_count == 0) return;
+        self.published[0] = self.published[self.published_count - 1];
+        self.published_count = 1;
+    }
+
     pub fn ingest(self: *Gateway, frame: []const u8, now_ns: i64) Decision {
         if (self.trading_enabled and (self.authority_shard == null or self.authority_journal == null or
             self.authority_shard.?.strategyAuthority(self.config.authorization.strategy_identity).host_activation_identity != self.config.authorization.activation_identity or

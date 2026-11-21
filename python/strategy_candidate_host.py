@@ -70,7 +70,7 @@ def config_transition(root, manifest, old_binding, binding, method):
     return state_fields, set(rebuilt)
 
 
-def instance_frames(request):
+def instance_frames(request, *, engine_session=False):
     binding, manifest = request["binding"], request["manifest"]
     root = Path(request["package_root"]).resolve()
     config = binding["config_json"].encode("ascii")
@@ -159,7 +159,7 @@ def instance_frames(request):
             package.require(callbacks <= manifest["limits"]["max_warmup_events"], "warmup event budget exhausted")
         cursor, batch, incoming = last, batch + 1, incoming + 1
         bridge.write_frame(sys.stdout.buffer, bridge.HOST_HEARTBEAT, session, outgoing,
-                           struct.pack("<QQ", cursor, suppressed))
+                           struct.pack("<QQ", cursor, 0 if engine_session else suppressed))
         outgoing += 1
     expected_next = instance.next_intent_sequence
     state = validated_snapshot(instance, manifest)
@@ -272,10 +272,13 @@ def instance_frames(request):
             outgoing += 1
 
 
-def run(request_path):
+def run(request_path, engine_session=None):
     request = package.parse_json(Path(request_path).read_bytes())
     requests = request.get("instances", [request])
     package.require(1 <= len(requests) <= 16, "Host instance capacity exceeded")
+    if engine_session is not None:
+        package.require(len(requests) == 1 and request is requests[0], "expected a single engine Host binding")
+        request.update(fencing=engine_session[0], shard=0, generation=engine_session[1])
     strategy_manifest, checkpoint_manifest = package.host_manifests(requests)
     # Package-local module tables are switched with the callback, including lazy imports.
     # This is trusted-code organization, not a hostile-plugin security boundary.
@@ -288,7 +291,7 @@ def run(request_path):
                         and item["checkpoint_manifest"] == checkpoint_manifest, "Host aggregate manifest mismatch")
         session = (item["fencing"], item["shard"], item["generation"])
         package.require(session not in sessions, "duplicate Host session")
-        sessions[session] = (instance_frames(item), {}, item)
+        sessions[session] = (instance_frames(item, engine_session=engine_session is not None), {}, item)
     while sessions:
         frame = bridge.read_frame(sys.stdin.buffer)
         package.require(frame[1] in sessions, "unknown Host session")
@@ -311,8 +314,14 @@ def run(request_path):
 if __name__ == "__main__":
     # argv is supplied by ManagedHost, never a Web-provided command line.
     try:
-        package.require(sys.argv[1:3] == ["--mode", "candidate"] and len(sys.argv) == 4, "invalid Host arguments")
-        run(sys.argv[3])
+        package.require(sys.argv[1:3] == ["--mode", "candidate"] and len(sys.argv) in (4, 7), "invalid Host arguments")
+        engine_session = None
+        if len(sys.argv) == 7:
+            package.require(sys.argv[4] == "--engine-session", "invalid engine Host arguments")
+            engine_session = tuple(map(int, sys.argv[5:]))
+            for value in engine_session:
+                package.uint(value)
+        run(sys.argv[3], engine_session)
     except Exception as error:
         print(type(error).__name__ + ": " + str(error)[:512], file=sys.stderr, flush=True)
         raise SystemExit(1)

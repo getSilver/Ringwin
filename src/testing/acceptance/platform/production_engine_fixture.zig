@@ -25,7 +25,8 @@ fn provision(init: std.process.Init) !void {
     defer args.deinit();
     _ = args.next();
     const first = args.next() orelse return error.MissingStateDirectory;
-    const capture_only = std.mem.eql(u8, first, "--capture");
+    const append_only = std.mem.eql(u8, first, "--append-capture");
+    const capture_only = append_only or std.mem.eql(u8, first, "--capture");
     const path = if (capture_only) args.next() orelse return error.MissingStateDirectory else first;
     const option = args.next();
     const with_recovery = std.mem.eql(u8, option orelse "", "--with-recovery");
@@ -38,7 +39,7 @@ fn provision(init: std.process.Init) !void {
     store.* = .{ .dir = undefined };
     try store.initLinux(init.io, path);
     defer store.close(init.io);
-    if (capture_only) return provisionCapture(init.io, store);
+    if (capture_only) return provisionCapture(init.io, store, append_only);
     const owner = try init.gpa.create(Owner);
     defer init.gpa.destroy(owner);
     try Owner.bootstrapInto(owner, store.interface(), init.io, .{ .domain = .decision_log, .id = 91 });
@@ -74,7 +75,7 @@ fn provision(init: std.process.Init) !void {
     std.debug.print("provisioned_writer_barrier={d}\n", .{owner.shard.authoritativeBarrier()});
 }
 
-fn provisionCapture(io: std.Io, store: *durable.LinuxFileAdapter) !void {
+fn provisionCapture(io: std.Io, store: *durable.LinuxFileAdapter, append_only: bool) !void {
     const config =
         \\{"source":{"venue":1,"raw_stream":77,"session":9000},"environment":"demo","config_version":1,"okx_binding":{"symbol":"BTC-USDT","instrument":101,"product":"spot","base":"BTC","quote":"USDT"}}
     ;
@@ -84,8 +85,18 @@ fn provisionCapture(io: std.Io, store: *durable.LinuxFileAdapter) !void {
     const book =
         \\{"arg":{"channel":"books","instId":"BTC-USDT"},"action":"snapshot","data":[{"asks":[["50100.1","2.0","0","3"]],"bids":[["50099.9","1.5","0","2"]],"ts":"1800000000200","seqId":"100","prevSeqId":"-1","checksum":0}]}
     ;
-    var capture = try @import("../../../persistence/raw_ingress.zig").DurableSink.init(store.interface(), io, .{ .domain = .raw_ingress, .id = 77 });
-    for ([_][]const u8{ definitions, book }, 1..) |frame, sequence| {
+    const next_book =
+        \\{"arg":{"channel":"books","instId":"BTC-USDT"},"action":"snapshot","data":[{"asks":[["50101.1","2.0","0","3"]],"bids":[["50100.9","1.5","0","2"]],"ts":"1800000000300","seqId":"101","prevSeqId":"-1","checksum":0}]}
+    ;
+    const RawSink = @import("../../../persistence/raw_ingress.zig").DurableSink;
+    const stream: durable.StreamIdentity = .{ .domain = .raw_ingress, .id = 77 };
+    var capture = if (append_only)
+        try RawSink.recover(store.interface(), io, stream)
+    else
+        try RawSink.init(store.interface(), io, stream);
+    const frames: []const []const u8 = if (append_only) &.{next_book} else &.{ definitions, book };
+    for (frames) |frame| {
+        const sequence = capture.next_sequence;
         var digest: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(frame, &digest, .{});
         _ = try capture.interface().append(.{
@@ -97,6 +108,7 @@ fn provisionCapture(io: std.Io, store: *durable.LinuxFileAdapter) !void {
             .sha256 = digest,
         }, frame);
     }
+    if (append_only) return;
     const file = try store.dir.createFile(io, "market-recovery.json", .{ .exclusive = true });
     defer file.close(io);
     try file.writeStreamingAll(io, config);
