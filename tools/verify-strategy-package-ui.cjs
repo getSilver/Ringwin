@@ -25,6 +25,8 @@ let submittedBinding;
 let promptedDefault;
 let renderedStatus = "Stopped";
 let tradingList = [];
+let authorityReadOnly = false;
+let instanceReadError = "";
 const instanceCommands = [];
 const context = vm.createContext({
   console, setTimeout() {}, location: {reload() {}},
@@ -32,7 +34,8 @@ const context = vm.createContext({
   prompt: (message, initial) => { promptedDefault = initial; return prompts.shift() ?? ""; }, window: {confirm: () => true},
   document: {createElement: element, body: {appendChild: el => toasts.push(el)},
     getElementById(id) { if (!elements.has(id)) elements.set(id, element()); return elements.get(id); }},
-  fetch: async (url, options) => ({status: url === "/api/projection" ? 401 : 200, json: async () => {
+  fetch: async (url, options) => ({status: url === "/api/projection" ? 401
+    : url === "/api/strategy-instances" && instanceReadError ? 503 : 200, json: async () => {
     if (url === "/api/releases") return {active_artifact: "bundle-a", strategy_packages: [packageRecord],
       qualification_rejections: [{reason: "bad signature <unsafe>"}],
       release_records: [{artifact_id: "bundle-b", result: {status: "rejected", reason: "digest mismatch"}}]};
@@ -46,7 +49,8 @@ const context = vm.createContext({
         submittedBinding = JSON.parse(options.body);
         return {result: {status: instanceStatus, reason: "warmup <insufficient>"}};
       }
-      return {instances: [{binding: {strategy_identity: "<unsafe>", definition_identity: "definition",
+      if (instanceReadError) return {error: instanceReadError};
+      return {read_only: authorityReadOnly, instances: [{binding: {strategy_identity: "<unsafe>", definition_identity: "definition",
         decision_domain: "0".repeat(31) + "1", config_sha256: "c".repeat(64)},
         status: renderedStatus, pair_trading_list: tradingList,
         trading_authorized: renderedStatus === "Trading", reason: "warmup <insufficient>"}]};
@@ -92,6 +96,17 @@ vm.runInContext(html.match(/<script>([\s\S]*?)<\/script>/)[1], context);
   tradingList = null;
   await vm.runInContext("loadInstances()", context);
   assert.ok(elements.get("instances").innerHTML.includes("策略交易名单不可用"));
+  authorityReadOnly = true;
+  renderedStatus = "Stopped";
+  tradingList = [];
+  await vm.runInContext("loadInstances()", context);
+  assert.ok(elements.get("instances").innerHTML.includes(emptyMessage));
+  assert.ok(!elements.get("instances").innerHTML.includes("从 checkpoint 无权恢复"));
+  instanceReadError = "策略实例或交易名单读取失败";
+  await vm.runInContext("loadInstances()", context);
+  assert.equal(elements.get("instances").textContent, instanceReadError);
+  instanceReadError = "";
+  authorityReadOnly = false;
   await vm.runInContext("controlStrategyInstance('enable_trading','11111111111111111111111111111111','1')", context);
   assert.equal(instanceCommands.at(-1).strategy_identity, "1".repeat(32));
   assert.equal(instanceCommands.at(-1).risk_warning_acknowledged, true);

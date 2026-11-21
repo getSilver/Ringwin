@@ -302,7 +302,7 @@ async function loadInstances(){
         ? r.pair_trading_list.map(pair => `${escaped(pair.legs.map(leg => `${leg.venue} / ${leg.environment} / ${leg.instrument}`).join(pair.direction === 1 ? " → " : " ← "))} · ${escaped(pair.mode)}<br>`).join("")
         : "策略交易名单为空，请从跨所机会扫描器添加配对<br>"
         : r.pair_trading_list === null ? "策略交易名单不可用<br>" : ""}
-      ${escaped(r.binding.definition_identity)} / ${escaped(r.binding.config_sha256)}<br>
+      ${body.read_only ? "" : `${escaped(r.binding.definition_identity)} / ${escaped(r.binding.config_sha256)}<br>
       ${escaped(JSON.stringify(r.recovery || {}))}<br>
       ${escaped(JSON.stringify(r.evidence || {}))}<br>
       ${escaped(JSON.stringify(r.checkpoint || {}))}
@@ -314,7 +314,7 @@ async function loadInstances(){
       ${r.status === "Ready" || r.status === "Trading" ? `<button onclick="updateStrategyConfig('${escaped(r.binding.strategy_identity)}',${r.binding.config_version})">更新参数 Keep/Rebuild</button>` : ""}
       ${r.status === "Ready" ? `<button onclick="controlStrategyInstance('enable_trading','${escaped(r.binding.strategy_identity)}','${BigInt('0x'+r.binding.decision_domain)}')">EnableTrading</button>` : ""}
       ${r.status === "Trading" ? `<button onclick="controlStrategyInstance('trading_pause','${escaped(r.binding.strategy_identity)}','${BigInt('0x'+r.binding.decision_domain)}')">停用交易</button>` : ""}
-      ${r.status === "Stopped" ? `<button onclick="recoverStrategyInstance('${escaped(r.binding.strategy_identity)}')">从 checkpoint 无权恢复</button>` : ""}</p>`).join("") || "尚无实例。";
+      ${r.status === "Stopped" ? `<button onclick="recoverStrategyInstance('${escaped(r.binding.strategy_identity)}')">从 checkpoint 无权恢复</button>` : ""}`}</p>`).join("") || "尚无实例。";
   } catch (error) { el.textContent = "实例查询失败，请重试。"; }
 }
 async function controlStrategyInstance(kind, identity, target){

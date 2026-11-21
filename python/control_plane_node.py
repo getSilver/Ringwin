@@ -5,7 +5,6 @@ import getpass
 import json
 import os
 from pathlib import Path
-from types import SimpleNamespace
 import secrets
 import socket
 import struct
@@ -22,7 +21,7 @@ DEFAULT_PROJECTION_PROBE = Path(__file__).resolve().parents[1] / "zig-out" / "bi
     "ringwin-control-projection.exe" if os.name == "nt" else "ringwin-control-projection")
 
 
-class EnginePairList:
+class EngineStrategyAuthority:
     """Read through the engine control connection authenticated by the node supervisor."""
 
     max_frame_bytes = 256 * 1024
@@ -42,7 +41,8 @@ class EnginePairList:
         return result
 
     def request(self, value):
-        strategy_package.require(value.get("operation") == "pair_trading_list",
+        operation = value.get("operation")
+        strategy_package.require(operation in ("pair_trading_list", "strategy_instances"),
                                  "engine strategy operation unavailable")
         data = strategy_package.canonical(value)
         strategy_package.require(len(data) <= self.max_frame_bytes, "engine request too large")
@@ -53,20 +53,30 @@ class EnginePairList:
                 if not 0 < size <= self.max_frame_bytes:
                     raise OSError("invalid engine response size")
                 result = json.loads(self.receive(size))
-                if type(result) is not dict or not (
-                        set(result) == {"pairs"} and (result["pairs"] is None or type(result["pairs"]) is list)
-                        or set(result) == {"error"} and type(result["error"]) is str):
+                if type(result) is not dict:
+                    raise OSError("invalid engine response")
+                if set(result) == {"error"} and type(result["error"]) is str:
+                    error = result["error"]
+                elif operation == "strategy_instances":
+                    if set(result) != {"instances"} or type(result["instances"]) is not list:
+                        raise OSError("invalid engine strategy instances")
+                    return result
+                elif set(result) == {"pairs"} and (result["pairs"] is None or type(result["pairs"]) is list):
+                    return result
+                else:
                     raise OSError("invalid engine response")
             except (OSError, ValueError):
                 self.stream.close()
                 raise
-        strategy_package.require("error" not in result, result.get("error", "engine rejected request"))
-        return result
+        raise ValueError(error)
+
+    def instances(self):
+        return self.request({"operation": "strategy_instances"})["instances"]
 
 
 @contextmanager
 def open_node_web(*, directory, ui_path, port, projection, command_server, release_manager=None,
-                  lifecycle_outbox=None, instance_source=None):
+                  lifecycle_outbox=None, instance_source=None, engine_strategy_reader=None):
     """Open the Web control plane. The node drives committed input via app.instance_manager."""
     if instance_source is not None and instance_source.authority is None:
         raise ValueError("strategy instance access requires node authority")
@@ -77,7 +87,8 @@ def open_node_web(*, directory, ui_path, port, projection, command_server, relea
         cleanup.callback(command_server.close)
         app = ControlPlaneApp(str(directory), command_server, ui_path=str(ui_path),
                               projection_provider=projection, release_manager=release_manager,
-                              lifecycle_outbox=lifecycle_outbox, instance_source=instance_source)
+                              lifecycle_outbox=lifecycle_outbox, instance_source=instance_source,
+                              engine_strategy_reader=engine_strategy_reader)
         cleanup.callback(app.scanner_runtime.close)
         if app.instance_manager is not None:
             cleanup.callback(app.instance_manager.close)
@@ -107,16 +118,16 @@ def main():
         parser.error("--core-directory must be an existing directory")
     provider = ProjectionProvider(str(core_directory.resolve()), str(args.projection_probe.resolve()))
     with ExitStack() as cleanup:
-        source = None
+        engine_strategy_reader = None
         if args.engine_authority_fd is not None:
             if not hasattr(socket, "AF_UNIX"):
                 parser.error("--engine-authority-fd requires Unix sockets")
             stream = cleanup.enter_context(socket.socket(
                 socket.AF_UNIX, socket.SOCK_STREAM, 0, fileno=args.engine_authority_fd))
-            source = SimpleNamespace(authority=EnginePairList(stream))
+            engine_strategy_reader = EngineStrategyAuthority(stream).instances
         _, server = cleanup.enter_context(open_node_web(
             directory=args.directory, ui_path=args.ui, port=args.port, projection=provider,
-            command_server=CommandServer(secrets.token_bytes(32)), instance_source=source))
+            command_server=CommandServer(secrets.token_bytes(32)), engine_strategy_reader=engine_strategy_reader))
         print("Web control plane: http://127.0.0.1:" + str(server.server_port), flush=True)
         try:
             server.serve_forever()

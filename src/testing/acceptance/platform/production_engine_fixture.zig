@@ -27,10 +27,11 @@ fn provision(init: std.process.Init) !void {
     const first = args.next() orelse return error.MissingStateDirectory;
     const capture_only = std.mem.eql(u8, first, "--capture");
     const path = if (capture_only) args.next() orelse return error.MissingStateDirectory else first;
-    const with_recovery = if (args.next()) |option| blk: {
-        if (capture_only or !std.mem.eql(u8, option, "--with-recovery")) return error.InvalidArgument;
-        break :blk true;
-    } else false;
+    const option = args.next();
+    const with_recovery = std.mem.eql(u8, option orelse "", "--with-recovery");
+    const web_empty = std.mem.eql(u8, option orelse "", "--web-empty");
+    const web_approved = std.mem.eql(u8, option orelse "", "--web-approved");
+    if (option != null and (capture_only or !(with_recovery or web_empty or web_approved))) return error.InvalidArgument;
     if (args.next() != null or !std.fs.path.isAbsolute(path)) return error.InvalidStateDirectory;
     const store = try init.gpa.create(durable.LinuxFileAdapter);
     defer init.gpa.destroy(store);
@@ -42,6 +43,30 @@ fn provision(init: std.process.Init) !void {
     defer init.gpa.destroy(owner);
     try Owner.bootstrapInto(owner, store.interface(), init.io, .{ .domain = .decision_log, .id = 91 });
     try fixture.initializePythonOwner(owner);
+    if (web_empty or web_approved) {
+        _ = try owner.apply(.{ .core = .{ .identity = owner.shard.authoritativeBarrier() + 1, .payload = .{ .pair_trading_scope_bound = 9 } } });
+    }
+    if (web_approved) {
+        try @import("../core/scanner_authorization_acceptance.zig").configurePairAssets(owner);
+        _ = try owner.apply(@import("../../support/trading_shard_fixture.zig").atGroup(45, .{
+            .identity = 98765,
+            .payload = .{ .pair_trading_authorization = .{
+                .identity = 98765,
+                .strategy = 9,
+                .portfolio = 10,
+                .activation = 1,
+                .config_version = 1,
+                .expected_version = 0,
+                .legs = .{
+                    .{ .venue = 1, .environment = .simulation, .account = 20, .instrument = 101, .rules_version = 2 },
+                    .{ .venue = 21, .environment = .simulation, .account = 30, .instrument = 102, .rules_version = 2 },
+                },
+                .direction = 1,
+                .mode = .taker_taker,
+                .enabled = true,
+            } },
+        }));
+    }
 
     const source_config = if (with_recovery) ",\"recovery_sources\":[{\"venue\":1,\"raw_stream\":77,\"session\":9000}]" else "";
     var text: [256]u8 = undefined;

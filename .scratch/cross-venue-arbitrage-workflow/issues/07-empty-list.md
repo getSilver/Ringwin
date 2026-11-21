@@ -24,7 +24,7 @@ StrategyInstance 加载即读取名单，每次新增开仓检查有效批准。
 
 - [x] 首次启动、撤销最后一项和重启均拒绝新开仓，无需开启白名单开关。
 - [x] 用已有敞口验证撤单和减仓仍可进行。
-- [ ] 默认 Web 入口通过正式 engine 加载实例和名单。有条目时显示清单，空名单时显示“策略交易名单为空，请从跨所机会扫描器添加配对”。权威连接或名单读取失败时显示错误。
+- [x] 默认 Web 入口通过正式 engine 加载实例和名单。有条目时显示清单，空名单时显示“策略交易名单为空，请从跨所机会扫描器添加配对”。权威连接或名单读取失败时显示错误。
 - [x] 在 Venue 输入持久化后、决策提交前终止 engine。重启后补提交该输入，重复恢复只产生一次权威结果。输入恢复失败时维持 `RecoveryOnly`。
 - [ ] StrategyHost 从已有 checkpoint 追平核心指定的屏障。验收记录包含重放起点、批次覆盖区间以及 `HostActivated` 对应的回执；该回执前策略输出无法进入风控。
 - [ ] 使用同一套 Linux 正式入口和隔离状态目录串联以上三项，记录复现命令、运行环境、输入来源、决策提交屏障和 Host 回执。只运行本次变更涉及的定向测试及这条 Linux 进程链。
@@ -35,14 +35,14 @@ StrategyInstance 加载即读取名单，每次新增开仓检查有效批准。
 
 Windows 离线回归使用两个模拟 Venue、持久日志、合成订单回报和规范成交，验证首次空名单、撤销最后一项和重启后拒绝开仓，已有挂单可撤，成交后的敞口可用 reduce-only 订单减仓。
 
-已有权威连接的 Web 策略页支持空名单提示，内置页面和 RingwinUi 均已接入。默认 `python/control_plane_node.py` 启动路径仍缺策略实例权威连接和发布管理器。正式 engine 恢复 Writer 后维持 `RecoveryOnly`，直到所有配置的输入源通过恢复校验。正式 `market_feed` 角色使用 OKX 公共行情 adapter 重放自己的 RawIngress，控制器通过现有 Unix 通道转交规范输入。正式 Linux 进程链联合验收仍待完成。
+默认 `python/control_plane_node.py` 通过控制器提供的 `--engine-authority-fd` 只读中继，从正式 engine 的同一次查询读取策略实例和当前有效名单。实例来源为已恢复的 Writer，Web 无需本地实例日志。正式 engine 恢复 Writer 后维持 `RecoveryOnly`，直到所有配置的输入源通过恢复校验。正式 `market_feed` 角色使用 OKX 公共行情 adapter 重放自己的 RawIngress，控制器通过现有 Unix 通道转交规范输入。发布管理、StrategyHost 回执和正式 Linux 联合验收仍待完成。
 
 ### 本轮定向验证
 
 - WSL1 Ubuntu 20.04 使用正式 `engine` 和 `market_feed` 入口及各自的隔离状态目录。合成 OKX 协议输入包含产品定义和订单簿快照。空回放或缺少 capture 时返回 `RecoveryOnly`。RawIngress 提交序号 2 后、engine 决策提交仍为 65 时发送 SIGKILL。重启由 adapter 解码并补提交 3 条规范输入，Writer 屏障为 68。再次重启重放，65 后的决策记录逐字节一致，屏障仍为 68。此证据覆盖已配置的 OKX 公共行情恢复。
 
 - Windows 启动 Zig 正式 engine 定向回归，验证 Writer 恢复、已提交记录的连续读取、空名单和有效批准。独立的 OKX 私有恢复回归验证部分决策已提交时仅补一次缺失 Fill。
-- WSL1 Ubuntu 20.04（内核 4.4.0-17763-Microsoft），隔离状态目录和合成双账户 Writer。正式入口 `--production-role engine --state-dir` 通过只读中继连接实际 Web 进程。实际 OwnerSession 登录后，验证空名单、无效实例和 SIGKILL 断连。engine 报告 `VenueRecoveryNotConfigured` 并保持 `RecoveryOnly`。WSL 自带 Python 3.8 使用临时 `sitecustomize` 将 `functools.cache` 映射到 `lru_cache(maxsize=None)`。
+- WSL1 Ubuntu 20.04.3 LTS（内核 4.4.0-17763-Microsoft）使用正式 engine 入口、默认 Web 启动器及两个独立的合成双账户 Writer。空名单场景停在已提交序号 66，有效批准场景停在 73。Web 状态目录未写入实例记录。认证 HTTP 验证未登录返回 401，OwnerSession 登录后读取同一个策略实例及相应名单，SIGKILL 断开 engine 后返回 503。两次启动均报告 `VenueRecoveryNotConfigured` 并保持 `RecoveryOnly`。WSL 自带 Python 3.8 使用临时 `sitecustomize` 将 `functools.cache` 映射到 `lru_cache(maxsize=None)`。控制器以 root 连接正式 role 并向 Web 传递只读中继。
 - HTTP 定向测试覆盖名单协议和错误。实例定向测试覆盖重载和并发读，内置页面定向测试覆盖空名单、有条目及错误显示。
 
 从仓库根目录构建两个相关 Linux 入口：

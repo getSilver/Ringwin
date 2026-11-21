@@ -4,6 +4,7 @@ const durable = @import("../persistence/durable_store.zig");
 const journal = @import("../persistence/journal.zig");
 const codec = @import("../persistence/canonical_event_codec.zig");
 const trading = @import("../trading/trading_shard.zig");
+const strategy_authority = @import("../strategy/strategy_package_authority.zig");
 const Owner = @import("demo/demo_authority.zig").Owner;
 
 pub const max_input_bytes = codec.max_encoded_len - 1;
@@ -206,19 +207,64 @@ pub fn revokeHosts(owner: *Owner) !void {
 
 pub const max_authority_bytes = 256 * 1024;
 
-pub fn readPairTradingList(owner: *const Owner, gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
+pub fn readStrategyAuthority(owner: *const Owner, gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
     const Request = struct {
-        operation: enum { pair_trading_list },
-        strategy_identity: []const u8,
-        scope_accounts: []const []const u8,
+        operation: enum { pair_trading_list, strategy_instances },
+        strategy_identity: ?[]const u8 = null,
+        scope_accounts: ?[]const []const u8 = null,
     };
     const shard = try owner.source();
     const parsed = try std.json.parseFromSlice(Request, gpa, bytes, .{});
     defer parsed.deinit();
-    if (parsed.value.strategy_identity.len != 32) return error.StrategyIdentityMismatch;
-    const identity = try std.fmt.parseInt(u128, parsed.value.strategy_identity, 16);
+    const request = parsed.value;
+    if (request.operation == .strategy_instances) {
+        if (request.strategy_identity != null or request.scope_accounts != null) return error.InvalidAuthorityFrame;
+        return readStrategyInstances(gpa, shard);
+    }
+    const id = request.strategy_identity orelse return error.StrategyIdentityMismatch;
+    if (id.len != 32) return error.StrategyIdentityMismatch;
+    const identity = try std.fmt.parseInt(u128, id, 16);
     if (identity == 0 or !shard.strategyAuthority(identity).strategy_active) return error.StrategyIdentityMismatch;
-    return @import("../strategy/strategy_package_authority.zig").pairTradingList(gpa, shard, identity, parsed.value.scope_accounts);
+    return strategy_authority.pairTradingList(gpa, shard, identity, request.scope_accounts orelse return error.InvalidAuthorityFrame);
+}
+
+fn readStrategyInstances(gpa: std.mem.Allocator, shard: *const trading.TradingShard) ![]u8 {
+    const Instance = struct {
+        binding: struct {
+            strategy_identity: [32]u8,
+            decision_domain: [32]u8,
+            config_version: u64,
+        },
+        status: []const u8 = "Stopped",
+        trading_authorized: bool = false,
+        pair_trading_list: ?[]strategy_authority.PairListEntry,
+        pair_trading_list_empty: ?bool,
+    };
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    var instances: std.ArrayList(Instance) = .empty;
+    for (0..shard.portfolio_authority_count + 1) |index| {
+        const authority = if (index == 0) shard.strategyAuthority(shard.strategy_identity) else shard.portfolio_authorities[index - 1];
+        const identity = authority.strategy_identity;
+        if (identity == 0 or !authority.strategy_active or shard.strategyFenced(identity)) continue;
+        const pairs = if (shard.pairTradingScopeBound(identity) or shard.pair_authorizations.hasHistory(identity))
+            try strategy_authority.effectivePairList(arena.allocator(), shard, identity)
+        else
+            null;
+        var instance: Instance = .{
+            .binding = .{
+                .strategy_identity = undefined,
+                .decision_domain = undefined,
+                .config_version = authority.strategy_config_version,
+            },
+            .pair_trading_list = pairs,
+            .pair_trading_list_empty = if (pairs) |entries| entries.len == 0 else null,
+        };
+        _ = try std.fmt.bufPrint(&instance.binding.strategy_identity, "{x:0>32}", .{identity});
+        _ = try std.fmt.bufPrint(&instance.binding.decision_domain, "{x:0>32}", .{shard.decision_domain_identity});
+        try instances.append(arena.allocator(), instance);
+    }
+    return std.json.Stringify.valueAlloc(gpa, .{ .instances = instances.items }, .{ .emit_null_optional_fields = false });
 }
 
 pub const CommittedRecord = struct {

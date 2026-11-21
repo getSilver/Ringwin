@@ -230,7 +230,7 @@ class ControlPlaneApp:
                  clock=lambda: int(time.time()),
                  projection_provider=None, ui_path=None, release_manager=None,
                  lifecycle_outbox=None, instance_source=None, scanner_console=None, asset_provider=None,
-                 scanner_adapters=None):
+                 scanner_adapters=None, engine_strategy_reader=None):
         self.directory = directory
         self.clock = clock
         self.passphrases = owner_session.PassphraseStore(directory)
@@ -244,6 +244,7 @@ class ControlPlaneApp:
         self.ui_path = ui_path
         self.csrf_by_token_hash: dict[str, str] = {}
         self.release_manager = release_manager
+        self.engine_strategy_reader = engine_strategy_reader
         self.instance_manager = (strategy_instance.InstanceManager(directory, release_manager, instance_source)
                                  if instance_source is not None else None)
         self.lifecycle_outbox = lifecycle_outbox
@@ -655,8 +656,14 @@ class ControlPlaneApp:
         status, body = self.authorize(headers)
         if status != 200:
             return status, body
+        if binding is None and self.engine_strategy_reader is not None:
+            try:
+                instances = self.engine_strategy_reader()
+                return 200, {"ok": True, "instances": instances, "read_only": True}
+            except (ValueError, OSError) as error:
+                return 503, {"ok": False, "error": f"策略实例或交易名单读取失败（{error}）"}
         if self.instance_manager is None:
-            return 503, {"ok": False, "error": "approved node ownership/input source unavailable"}
+            return 503, {"ok": False, "error": "策略实例权威连接不可用"}
         try:
             if binding is None:
                 return 200, {"ok": True, "instances": self.instance_manager.view()}

@@ -9,7 +9,7 @@ const cutover = @import("../runtime/recovery_cutover.zig");
 const native = @import("native_instance.zig");
 const pair_authorization = @import("../trading/pair_trading_authorization.zig");
 
-const PairListEntry = struct {
+pub const PairListEntry = struct {
     identity: [32]u8,
     direction: i8,
     mode: pair_authorization.Mode,
@@ -535,6 +535,12 @@ pub const Authority = struct {
 pub fn pairTradingList(gpa: std.mem.Allocator, shard: *const trading.TradingShard, strategy: u128, accounts: []const []const u8) ![]u8 {
     const applies = shard.pairTradingScopeBound(strategy) or try crossesVenues(shard, accounts);
     if (!applies) return std.json.Stringify.valueAlloc(gpa, .{ .pairs = null }, .{});
+    const pairs = try effectivePairList(gpa, shard, strategy);
+    defer gpa.free(pairs);
+    return std.json.Stringify.valueAlloc(gpa, .{ .pairs = pairs }, .{});
+}
+
+pub fn effectivePairList(gpa: std.mem.Allocator, shard: *const trading.TradingShard, strategy: u128) ![]PairListEntry {
     var pairs: [@typeInfo(@FieldType(pair_authorization.State, "records")).array.len]PairListEntry = undefined;
     var count: usize = 0;
     for (0..shard.pair_authorizations.count) |index| {
@@ -552,7 +558,7 @@ pub fn pairTradingList(gpa: std.mem.Allocator, shard: *const trading.TradingShar
         }
         count += 1;
     }
-    return std.json.Stringify.valueAlloc(gpa, .{ .pairs = pairs[0..count] }, .{});
+    return gpa.dupe(PairListEntry, pairs[0..count]);
 }
 
 fn crossesVenues(shard: *const trading.TradingShard, accounts: []const []const u8) !bool {

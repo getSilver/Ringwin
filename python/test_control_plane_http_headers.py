@@ -64,16 +64,18 @@ class HttpHeaderAuthenticationTest(unittest.TestCase):
         web, relay = socket.socketpair()
         with web, relay:
             relay.settimeout(5)
-            authority = control_plane_node.EnginePairList(web)
+            authority = control_plane_node.EngineStrategyAuthority(web)
             request = dict(operation="pair_trading_list", strategy_identity=f"{9:032x}",
                            scope_accounts=[f"{20:032x}", f"{30:032x}"])
+            instances_request = {"operation": "strategy_instances"}
             frames = []
             pair = {"identity": f"{99:032x}", "direction": 1, "mode": "approve",
                     "legs": [{"venue": 1}, {"venue": 2}]}
 
             def serve():
                 with relay.makefile("rb") as stream:
-                    for result in ({"pairs": []}, {"pairs": [pair]}, {"error": "DecisionLogUnavailable"}):
+                    for result in ({"pairs": []}, {"pairs": [pair]}, {"error": "DecisionLogUnavailable"},
+                                   {"instances": []}, {"error": "DecisionLogUnavailable"}):
                         prefix = stream.read(5)
                         frames.append((prefix[:1], json.loads(stream.read(struct.unpack("<I", prefix[1:])[0]))))
                         response = strategy_package.canonical(result)
@@ -87,11 +89,14 @@ class HttpHeaderAuthenticationTest(unittest.TestCase):
                 self.assertEqual(authority.request(request), {"pairs": [pair]})
                 with self.assertRaisesRegex(ValueError, "DecisionLogUnavailable"):
                     authority.request(request)
+                self.assertEqual(authority.instances(), [])
+                with self.assertRaisesRegex(ValueError, "DecisionLogUnavailable"):
+                    authority.instances()
                 with self.assertRaises(OSError):
-                    authority.request(request)
+                    authority.instances()
             finally:
                 worker.join(timeout=5)
-            self.assertEqual(frames, [(b"P", request)] * 3)
+            self.assertEqual(frames, [(b"P", request)] * 3 + [(b"P", instances_request)] * 2)
 
     def test_browser_history_routes_reload_the_ui_and_keep_api_authentication(self):
         with tempfile.TemporaryDirectory() as directory:

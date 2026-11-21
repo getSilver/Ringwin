@@ -465,7 +465,7 @@ fn serveRole(init: std.process.Init, role: Role, socket_path: []const u8, startu
                 const request = try init.gpa.alloc(u8, size);
                 defer init.gpa.free(request);
                 try readExact(&stream, init.io, request);
-                const response = production_engine.readPairTradingList(active_engine.owner, init.gpa, request) catch |err|
+                const response = production_engine.readStrategyAuthority(active_engine.owner, init.gpa, request) catch |err|
                     try std.json.Stringify.valueAlloc(init.gpa, .{ .@"error" = @errorName(err) }, .{});
                 defer init.gpa.free(response);
                 if (response.len > production_engine.max_authority_bytes) return error.InvalidAuthorityFrame;
@@ -741,7 +741,7 @@ test "formal engine recovers its Writer and reads canonical observations only af
     const list_request =
         \\{"operation":"pair_trading_list","strategy_identity":"00000000000000000000000000000009","scope_accounts":["00000000000000000000000000000014","0000000000000000000000000000001e"]}
     ;
-    const pair_list = try production_engine.readPairTradingList(recovered, allocator, list_request);
+    const pair_list = try production_engine.readStrategyAuthority(recovered, allocator, list_request);
     defer allocator.free(pair_list);
     try std.testing.expectEqualStrings("{\"pairs\":[]}", pair_list);
     var buffer: [production_engine.max_record_bytes]u8 = undefined;
@@ -814,7 +814,7 @@ test "formal engine recovers its Writer and reads canonical observations only af
         .mode = .taker_taker,
         .enabled = true,
     } } }));
-    const populated = try production_engine.readPairTradingList(owner, allocator, list_request);
+    const populated = try production_engine.readStrategyAuthority(owner, allocator, list_request);
     defer allocator.free(populated);
     const projected = try std.json.parseFromSlice(struct {
         pairs: []const struct { identity: []const u8 },
