@@ -292,8 +292,8 @@ hexadecimal `deployment_digest` from the deployment configuration. The
 operator supplies the digest independently of the recovered journal.
 
 After authenticating on the engine's existing Unix control socket, the
-controller receives `H` followed by `V` (recovery only). It can deliver an
-adapter-produced canonical frame with `I` followed by a little-endian
+controller receives `H` followed by `V` (recovery only). The engine gates
+`I` on Venue recovery. The adapter-produced canonical frame uses a little-endian
 `u32` byte count and the canonical event bytes. The originating adapter
 retains its durable input until the engine replies with the committed decision
 barrier (`u64`, followed by zero as a `u32`).
@@ -307,9 +307,10 @@ monotonic, wall), one byte of time-presence flags, and the stable record
 payload. All integers are little-endian. This includes derived facts and cold
 history proof records in decision order.
 
-The formal role still requires a Venue-owned RawIngress recovery sweep and
-the node-owned journal-to-StrategyHost batch producer before the Web strategy
-management connection can activate a Host.
+Venue adapters own replay of their durable RawIngress. The formal engine
+requires committed recovery evidence from the node role chain before admitting
+new input. Host activation also requires the node-owned
+journal-to-StrategyHost batch producer.
 
 The node calls `InstanceManager.deliver` with its committed canonical input;
 there is no HTTP input/frame injection endpoint. The locked Host wrapper creates

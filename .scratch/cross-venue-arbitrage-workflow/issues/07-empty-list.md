@@ -35,11 +35,11 @@ StrategyInstance 加载即读取名单，每次新增开仓检查有效批准。
 
 Windows 离线回归使用两个模拟 Venue、持久日志、合成订单回报和规范成交，验证首次空名单、撤销最后一项和重启后拒绝开仓，已有挂单可撤，成交后的敞口可用 reduce-only 订单减仓。
 
-已有权威连接的 Web 策略页支持空名单提示，内置页面和 RingwinUi 均已接入。默认 `python/control_plane_node.py` 启动路径仍缺策略实例权威连接和发布管理器。正式 engine 已有 Writer 决策日志恢复的定向离线验证，正式 Linux 进程链联合验收待完成。
+已有权威连接的 Web 策略页支持空名单提示，内置页面和 RingwinUi 均已接入。默认 `python/control_plane_node.py` 启动路径仍缺策略实例权威连接和发布管理器。正式 engine 恢复 Writer 决策日志后维持 `RecoveryOnly`。后续由对应 Venue adapter 补处理 RawIngress，正式 Linux 进程链联合验收待完成。
 
 ### 本轮定向验证
 
-- Windows 启动 Zig 正式 engine 定向回归，验证 Writer 恢复、已提交记录的连续读取、空名单和有效批准。OKX 私有 checkpoint 定向回归验证部分决策已提交时仅补一次缺失 Fill。
+- Windows 启动 Zig 正式 engine 定向回归，验证 Writer 恢复、已提交记录的连续读取、空名单和有效批准。独立的 OKX 私有恢复回归验证部分决策已提交时仅补一次缺失 Fill。
 - WSL1 Ubuntu 20.04（内核 4.4.0-17763-Microsoft），隔离状态目录和合成双账户 Writer。正式入口 `--production-role engine --state-dir` 通过只读中继连接实际 Web 进程。实际 OwnerSession 登录后，验证空名单、无效实例和 SIGKILL 断连。engine 报告 `VenueRecoveryNotConfigured` 并保持 `RecoveryOnly`。WSL 自带 Python 3.8 使用临时 `sitecustomize` 将 `functools.cache` 映射到 `lru_cache(maxsize=None)`。
 - HTTP 定向测试覆盖名单协议和错误。实例定向测试覆盖重载和并发读，内置页面定向测试覆盖空名单、有条目及错误显示。
 

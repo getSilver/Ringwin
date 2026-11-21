@@ -302,8 +302,8 @@ fn serveRole(init: std.process.Init, role: Role, socket_path: []const u8, startu
     var stdout_buffer: [256]u8 = undefined;
     var stdout = std.Io.File.stdout().writer(init.io, &stdout_buffer);
     try stdout.interface.print("production_role: role={s}, generation={d}, ipc=unix\n", .{ roleName(role), generation });
-    if (live_engine) |active_engine| if (active_engine.recovery_failure) |failure|
-        try stdout.interface.print("production_role: venue_recovery={s}\n", .{@errorName(failure)});
+    if (live_engine != null)
+        try stdout.interface.writeAll("production_role: venue_recovery=VenueRecoveryNotConfigured\n");
     try stdout.interface.flush();
 
     active_socket.store(server.socket.handle, .seq_cst);
@@ -316,7 +316,7 @@ fn serveRole(init: std.process.Init, role: Role, socket_path: []const u8, startu
     active_socket.store(stream.socket.handle, .seq_cst);
     try verifyController(stream, fixture, parent);
     try writeStatus(&stream, init.io, .hello);
-    try writeStatus(&stream, init.io, if (live_engine != null and live_engine.?.recovery_failure != null) .recovery_only else .ready);
+    try writeStatus(&stream, init.io, if (live_engine != null) .recovery_only else .ready);
 
     var draining = false;
     var drain_deadline: ?i96 = null;
@@ -468,7 +468,7 @@ fn serveRole(init: std.process.Init, role: Role, socket_path: []const u8, startu
                 const active_engine = live_engine orelse return error.EngineUnavailable;
                 var frame: [production_engine.max_record_bytes]u8 = undefined;
                 const result: production_engine.CommittedRecord = if (command == .ingest_canonical) blk: {
-                    if (active_engine.recovery_failure != null) return error.VenueRecoveryIncomplete;
+                    if (active_engine.owner.shard.recovery_admission_pending) return error.VenueRecoveryIncomplete;
                     const size = try readFrameInt(&stream, init.io, u32);
                     if (size == 0 or size > production_engine.max_input_bytes) return error.InvalidCanonicalFrame;
                     try readExact(&stream, init.io, frame[0..size]);
