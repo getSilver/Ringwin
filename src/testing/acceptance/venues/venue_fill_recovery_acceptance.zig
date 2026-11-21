@@ -2360,6 +2360,8 @@ fn checkPrivateCheckpointPartialFrame() !void {
     const restarted = try allocator.create(demo.Owner);
     defer allocator.destroy(restarted);
     try demo.Owner.recoverWithIngressInto(restarted, memory.interface(), undefined, stream, raw_stream);
+    try std.testing.expectError(error.PrivateRecoveryBoundaryUnavailable, restarted.completeIngressRecovery());
+    try std.testing.expect(restarted.shard.recovery_admission_pending);
     var replay_reconciler: private.Reconciler = .{};
     var replay_adapter = okx.OkxVenueAdapter.init(allocator, &chain, clock.interface(), implementation.profile, rules());
     replay_adapter.attachPrivateReconciler(&replay_reconciler);

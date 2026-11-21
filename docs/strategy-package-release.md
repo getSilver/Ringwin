@@ -307,10 +307,38 @@ monotonic, wall), one byte of time-presence flags, and the stable record
 payload. All integers are little-endian. This includes derived facts and cold
 history proof records in decision order.
 
-Venue adapters own replay of their durable RawIngress. The formal engine
-requires committed recovery evidence from the node role chain before admitting
-new input. Host activation also requires the node-owned
-journal-to-StrategyHost batch producer.
+Venue adapters own replay of their durable RawIngress. Configure the expected
+`recovery_sources` in `engine.json`, each with `venue`, `raw_stream`, and
+`session`. The engine starts in `RecoveryOnly` and changes to Ready only
+after a successful sweep for every configured source. An empty configuration,
+a failed sweep, or a missing source keeps the admission gate closed.
+
+The configured `market_feed` role reads its own capture. For OKX public data,
+its `market-recovery.json` contains the same `source`, the original
+`environment`, `config_version`, and `okx_binding`. This replay uses protocol
+data frames with their original timestamps in the role's durable RawIngress.
+The supported stream contains instrument definitions and subsequent market
+data. Subscription-control records and existing scanner capture formats
+require their own replay handling.
+Venue-private order and account recovery still requires its own adapter
+handoff.
+
+The authenticated controller uses `python/venue_recovery.py` to relay sweeps
+on the existing Unix connections. On the market-feed connection, `U` returns
+a little-endian `u64` RawIngress barrier followed by three `u64` source fields.
+A zero barrier reports an unavailable capture. On the engine connection,
+`U` takes the three source fields followed by the barrier. Both connections
+then carry canonical events as `u32` length-prefixed frames. A zero frame
+length completes the sweep and `0xffffffff` reports failure. The trusted
+controller forwards completion only after the capture owner finishes replay.
+An empty canonical sweep remains in recovery. The engine
+checks the configured binding and sequence and compares already committed
+canonical inputs against the Writer journal before applying the suffix.
+`R` or `V` reports the resulting recovery status. This status grants no
+trading authority.
+
+Host activation also requires the node-owned journal-to-StrategyHost batch
+producer.
 
 The node calls `InstanceManager.deliver` with its committed canonical input;
 there is no HTTP input/frame injection endpoint. The locked Host wrapper creates

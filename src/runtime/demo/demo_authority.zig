@@ -1090,9 +1090,17 @@ pub const Owner = struct {
         if (self.closed or self.store.safetyGate() != .open or after.gate != .open or
             after.last_sequence != before.last_sequence or after.committed_barrier != before.committed_barrier)
             return error.DecisionLogUnavailable;
+        try self.completeIngressRecovery();
+        self.recovery_ingress_store = null;
+    }
+
+    /// Call after the complete ingress replay has been verified by its owner.
+    pub fn completeIngressRecovery(self: *Owner) !void {
+        _ = try self.source();
+        if (self.private_boundary != null and !self.private_seed_restored)
+            return error.PrivateRecoveryBoundaryUnavailable;
         self.recovery_ingress_verified = true;
         self.shard.recovery_admission_pending = self.checkpoint_pending;
-        self.recovery_ingress_store = null;
     }
 
     /// Seal a genuinely ingested bootstrap before allowing dispatch.

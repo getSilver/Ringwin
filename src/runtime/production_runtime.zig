@@ -16,7 +16,7 @@ pub const Role = enum { engine, market_feed, execution_gateway, telemetry, contr
 pub const Phase = enum { stopped, starting, ready, recovering, trading, draining, forced_stop, failed };
 pub const RolePhase = enum { stopped, starting, ready, recovering, draining, forced_stop, failed };
 pub const Venue = enum { simulated };
-pub const Command = enum(u8) { enable_risk = 'A', drain = 'D', stop = 'S', business = 'B', settle = 'L', ingest_canonical = 'I', read_committed = 'C', read_pair_trading_list = 'P' };
+pub const Command = enum(u8) { enable_risk = 'A', drain = 'D', stop = 'S', business = 'B', settle = 'L', ingest_canonical = 'I', read_committed = 'C', read_pair_trading_list = 'P', recover_venue = 'U' };
 pub const Status = enum(u8) { hello = 'H', ready = 'R', risk_enabled = 'A', draining = 'G', stopped = 'T', forced_stop = 'F', failed = 'X', recovery_only = 'V' };
 
 pub const BoundedQueue = struct {
@@ -251,20 +251,20 @@ fn verifyController(stream: std.Io.net.Stream, fixture: bool, parent: std.os.lin
 
 pub fn runRole(init: std.process.Init, role: Role, socket_path: []const u8, startup: Startup) !void {
     if (comptime builtin.os.tag != .linux) return error.LinuxOnlyProductionRole;
-    if (role != .engine or startup == .fixture_generation) return serveRole(init, role, socket_path, startup);
+    if ((role != .engine and role != .market_feed) or startup == .fixture_generation) return serveRole(init, role, socket_path, startup);
 
-    // Writer recovery uses large fixed-size journal and shard values.
+    // Durable recovery uses large fixed-size journal, shard and adapter values.
     const Runner = struct {
         failure: ?anyerror = null,
 
-        fn run(self: *@This(), process: std.process.Init, path: []const u8, mode: Startup) void {
-            serveRole(process, .engine, path, mode) catch |err| {
+        fn run(self: *@This(), process: std.process.Init, owner_role: Role, path: []const u8, mode: Startup) void {
+            serveRole(process, owner_role, path, mode) catch |err| {
                 self.failure = err;
             };
         }
     };
     var runner: Runner = .{};
-    const thread = try std.Thread.spawn(.{ .stack_size = 256 * 1024 * 1024 }, Runner.run, .{ &runner, init, socket_path, startup });
+    const thread = try std.Thread.spawn(.{ .stack_size = 256 * 1024 * 1024 }, Runner.run, .{ &runner, init, role, socket_path, startup });
     thread.join();
     if (runner.failure) |failure| return failure;
 }
@@ -284,7 +284,7 @@ fn serveRole(init: std.process.Init, role: Role, socket_path: []const u8, startu
     if (owner) |file| if (!try file.tryLock(init.io, .exclusive)) return error.RoleAlreadyRunning;
     const generation = if (state_dir) |dir| try advanceGeneration(init.io, dir) else startup.fixture_generation;
     if (generation == 0) return error.InvalidRoleConfiguration;
-    const live_engine = if (role == .engine and state_dir != null)
+    var live_engine = if (role == .engine and state_dir != null)
         try production_engine.Engine.open(init, state_dir.?, startup.state_dir)
     else
         null;
@@ -302,7 +302,7 @@ fn serveRole(init: std.process.Init, role: Role, socket_path: []const u8, startu
     var stdout_buffer: [256]u8 = undefined;
     var stdout = std.Io.File.stdout().writer(init.io, &stdout_buffer);
     try stdout.interface.print("production_role: role={s}, generation={d}, ipc=unix\n", .{ roleName(role), generation });
-    if (live_engine != null)
+    if (live_engine != null and live_engine.?.source_count == 0)
         try stdout.interface.writeAll("production_role: venue_recovery=VenueRecoveryNotConfigured\n");
     try stdout.interface.flush();
 
@@ -447,6 +447,17 @@ fn serveRole(init: std.process.Init, role: Role, socket_path: []const u8, startu
                     else => return error.InvalidBusinessTransition,
                 }
             },
+            .recover_venue => {
+                if (fixture or draining) return error.InvalidRoleTransition;
+                switch (role) {
+                    .engine => {
+                        const recovered = try recoverVenue(&live_engine.?, &stream, init);
+                        try writeStatus(&stream, init.io, if (recovered) .ready else .recovery_only);
+                    },
+                    .market_feed => try @import("production_market_recovery.zig").replay(init, state_dir.?, startup.state_dir, stream),
+                    else => return error.InvalidRoleTransition,
+                }
+            },
             .read_pair_trading_list => {
                 const active_engine = live_engine orelse return error.EngineUnavailable;
                 const size = try readFrameInt(&stream, init.io, u32);
@@ -468,7 +479,7 @@ fn serveRole(init: std.process.Init, role: Role, socket_path: []const u8, startu
                 const active_engine = live_engine orelse return error.EngineUnavailable;
                 var frame: [production_engine.max_record_bytes]u8 = undefined;
                 const result: production_engine.CommittedRecord = if (command == .ingest_canonical) blk: {
-                    if (active_engine.owner.shard.recovery_admission_pending) return error.VenueRecoveryIncomplete;
+                    if (draining or active_engine.owner.shard.recovery_admission_pending) return error.VenueRecoveryIncomplete;
                     const size = try readFrameInt(&stream, init.io, u32);
                     if (size == 0 or size > production_engine.max_input_bytes) return error.InvalidCanonicalFrame;
                     try readExact(&stream, init.io, frame[0..size]);
@@ -491,6 +502,44 @@ fn serveRole(init: std.process.Init, role: Role, socket_path: []const u8, startu
             },
         }
     }
+}
+
+fn recoverVenue(engine: *production_engine.Engine, stream: *std.Io.net.Stream, init: std.process.Init) !bool {
+    if (!engine.owner.shard.recovery_admission_pending) return error.InvalidRoleTransition;
+    const source: production_engine.RecoverySource = .{
+        .venue = try readFrameInt(stream, init.io, u64),
+        .raw_stream = try readFrameInt(stream, init.io, u64),
+        .session = try readFrameInt(stream, init.io, u64),
+    };
+    var sweep: production_engine.RecoverySweep = .{ .source = source, .raw_barrier = try readFrameInt(stream, init.io, u64) };
+    const index = engine.sourceIndex(source);
+    defer sweep.deinit(init.gpa);
+    var valid = index != null and sweep.raw_barrier != 0;
+    if (valid) sweep.loadCommitted(engine.owner, init.gpa) catch |err| {
+        std.log.warn("engine committed Venue prefix: {s}", .{@errorName(err)});
+        valid = false;
+    };
+    var frame: [production_engine.max_input_bytes]u8 = undefined;
+    while (true) {
+        const size = try readFrameInt(stream, init.io, u32);
+        if (size == 0) break;
+        if (size == std.math.maxInt(u32)) {
+            valid = false;
+            break;
+        }
+        if (size > frame.len) return error.InvalidCanonicalFrame;
+        try readExact(stream, init.io, frame[0..size]);
+        if (valid) sweep.apply(engine.owner, frame[0..size]) catch |err| {
+            std.log.warn("engine Venue recovery: {s}", .{@errorName(err)});
+            valid = false;
+        };
+    }
+    if (valid) engine.finishSource(index.?, sweep) catch |err| {
+        std.log.warn("engine Venue recovery completion: {s}", .{@errorName(err)});
+        valid = false;
+    };
+    if (!valid) engine.recovered_sources = 0;
+    return !engine.owner.shard.recovery_admission_pending;
 }
 
 fn connectRole(init: std.process.Init, socket_path: []const u8) !std.Io.net.Stream {
@@ -710,11 +759,25 @@ test "formal engine recovers its Writer and reads canonical observations only af
     event.venue.envelope.instrument = 101;
     event.venue.envelope.identity.stream = 9000;
     event.venue.envelope.source_stream = 9000;
+    event.venue.envelope.adapter_session = 9000;
+    event.venue.envelope.raw_evidence = .{ .stream = 9000, .sequence = 1, .digest = @splat(1) };
     const frame = try codec.encode(&buffer, event.venue);
-    const committed = try production_engine.ingest(recovered, frame);
+    const source: production_engine.RecoverySource = .{ .venue = event.venue.envelope.venue, .raw_stream = 9000, .session = 9000 };
+    var sweep: production_engine.RecoverySweep = .{ .source = source, .raw_barrier = 1 };
+    try sweep.apply(recovered, frame);
+    const committed = recovered.shard.authoritativeBarrier();
     try std.testing.expect(committed > before);
     try std.testing.expectEqual(committed, (try storage.interface().recover(std.testing.io, decision_stream)).committed_barrier);
-    try std.testing.expectEqual(committed, try production_engine.ingest(recovered, frame));
+    var repeat: production_engine.RecoverySweep = .{ .source = source, .raw_barrier = 1 };
+    defer repeat.deinit(allocator);
+    try repeat.loadCommitted(recovered, allocator);
+    try repeat.apply(recovered, frame);
+    try std.testing.expectEqual(committed, recovered.shard.authoritativeBarrier());
+    repeat.last_event = 0;
+    repeat.last_raw = 0;
+    var conflicting = event.venue;
+    conflicting.envelope.raw_evidence.digest = @splat(2);
+    try std.testing.expectError(error.ConflictingCanonicalIdentity, repeat.apply(recovered, try codec.encode(&buffer, conflicting)));
     try recovered.checkpoint();
 
     storage.deinit();

@@ -9,17 +9,33 @@ const Owner = @import("demo/demo_authority.zig").Owner;
 pub const max_input_bytes = codec.max_encoded_len - 1;
 pub const max_record_bytes = journal.max_payload_size;
 
+pub const RecoverySource = struct {
+    venue: u64,
+    raw_stream: u64,
+    session: u64,
+
+    pub fn valid(self: RecoverySource) bool {
+        return self.venue != 0 and self.raw_stream != 0 and self.session != 0;
+    }
+};
+
+const max_recovery_sources = 32;
+
 const Config = struct {
     decision_stream: u64,
     deployment_digest: []const u8,
+    recovery_sources: []const RecoverySource = &.{},
 };
 
 pub const Engine = struct {
     owner: *Owner,
     file_store: *durable.LinuxFileAdapter,
+    sources: [max_recovery_sources]RecoverySource = undefined,
+    source_count: usize = 0,
+    recovered_sources: u32 = 0,
 
     pub fn open(init: std.process.Init, dir: std.Io.Dir, state_path: []const u8) !Engine {
-        var config_buffer: [1025]u8 = undefined;
+        var config_buffer: [4097]u8 = undefined;
         const bytes = try dir.readFile(init.io, "engine.json", &config_buffer);
         if (bytes.len == config_buffer.len) return error.InvalidEngineConfiguration;
         const parsed = try std.json.parseFromSlice(Config, init.gpa, bytes, .{});
@@ -39,7 +55,39 @@ pub const Engine = struct {
         errdefer init.gpa.destroy(owner);
         try recover(owner, file_store.interface(), init.io, config.decision_stream, digest);
         try revokeHosts(owner);
-        return .{ .owner = owner, .file_store = file_store };
+        var engine: Engine = .{ .owner = owner, .file_store = file_store };
+        for (config.recovery_sources) |source| {
+            if (!source.valid() or engine.source_count == engine.sources.len) return error.InvalidEngineConfiguration;
+            for (engine.sources[0..engine.source_count]) |previous|
+                if (previous.raw_stream == source.raw_stream or previous.session == source.session)
+                    return error.InvalidEngineConfiguration;
+            engine.sources[engine.source_count] = source;
+            engine.source_count += 1;
+        }
+        return engine;
+    }
+
+    pub fn sourceIndex(self: *const Engine, source: RecoverySource) ?u5 {
+        for (self.sources[0..self.source_count], 0..) |expected, index|
+            if (std.meta.eql(source, expected)) return @intCast(index);
+        return null;
+    }
+
+    pub fn finishSource(self: *Engine, index: u5, sweep: RecoverySweep) !void {
+        if (sweep.last_event == 0 or sweep.last_raw > sweep.raw_barrier or sweep.raw_barrier == 0)
+            return error.IncompleteVenueRecovery;
+        // A regressed or incomplete replay must not exclude an already committed event.
+        const shard = try self.owner.source();
+        for (shard.canonical_ingress_cursors[0..shard.canonical_ingress_cursor_count]) |cursor| {
+            if (cursor.identity.stream == sweep.source.session and cursor.identity.sequence > sweep.last_event)
+                return error.IncompleteVenueRecovery;
+        }
+        const recovered_sources = self.recovered_sources | (@as(u32, 1) << index);
+        if (@popCount(recovered_sources) == self.source_count) {
+            if (self.owner.checkpoint_pending) return error.IncompleteVenueRecovery;
+            try self.owner.completeIngressRecovery();
+        }
+        self.recovered_sources = recovered_sources;
     }
 
     pub fn close(self: Engine, init: std.process.Init) void {
@@ -56,6 +104,75 @@ pub fn recover(owner: *Owner, store: durable.Store, io: std.Io, decision_stream:
     if (!shard.deployment.sealed or shard.decision_domain_identity == 0) return error.DeploymentConfigurationRequired;
     try owner.pinDeploymentDigest(digest);
     if (owner.checkpoint_pending) try owner.checkpoint();
+}
+
+pub const RecoverySweep = struct {
+    source: RecoverySource,
+    raw_barrier: u64,
+    last_raw: u64 = 0,
+    last_event: u64 = 0,
+
+    committed: std.AutoHashMapUnmanaged(u64, [32]u8) = .empty,
+
+    pub fn deinit(self: *RecoverySweep, allocator: std.mem.Allocator) void {
+        self.committed.deinit(allocator);
+    }
+
+    pub fn loadCommitted(self: *RecoverySweep, owner: *const Owner, allocator: std.mem.Allocator) !void {
+        const shard = try owner.source();
+        for (shard.canonical_ingress_cursors[0..shard.canonical_ingress_cursor_count]) |cursor| {
+            if (cursor.identity.stream == self.source.session) break;
+        } else return;
+
+        const Index = struct {
+            sweep: *RecoverySweep,
+            allocator: std.mem.Allocator,
+
+            fn segment(ptr: *anyopaque, bytes: []const u8) !void {
+                const index: *@This() = @ptrCast(@alignCast(ptr));
+                var reader = try journal.Reader.init(bytes);
+                while (true) switch (try reader.next()) {
+                    .end => return,
+                    .record => |record| {
+                        if (record.flags & journal.input_flag == 0) continue;
+                        const input = try trading.decodeStableInput(record);
+                        if (input != .venue or input.venue.envelope.identity.stream != index.sweep.source.session) continue;
+                        var buffer: [codec.max_encoded_len]u8 = undefined;
+                        const hash = frameDigest(try codec.encode(&buffer, input.venue));
+                        const entry = try index.sweep.committed.getOrPut(index.allocator, input.venue.envelope.identity.sequence);
+                        if (entry.found_existing and !std.mem.eql(u8, entry.value_ptr, &hash))
+                            return error.ConflictingCanonicalIdentity;
+                        entry.value_ptr.* = hash;
+                    },
+                };
+            }
+        };
+        var index: Index = .{ .sweep = self, .allocator = allocator };
+        try owner.store.replaySegments(owner.io, owner.stream, .{ .ptr = &index, .consume_fn = Index.segment });
+    }
+
+    pub fn apply(self: *RecoverySweep, owner: *Owner, frame: []const u8) !void {
+        const event = try codec.decode(frame);
+        const envelope = event.envelope;
+        const raw = envelope.raw_evidence;
+        if (envelope.venue != self.source.venue or envelope.identity.stream != self.source.session or
+            envelope.adapter_session != self.source.session or raw.stream != self.source.raw_stream or
+            raw.sequence == 0 or raw.sequence < self.last_raw or raw.sequence > self.raw_barrier or
+            std.mem.allEqual(u8, &raw.digest, 0) or
+            envelope.identity.sequence != try std.math.add(u64, self.last_event, 1))
+            return error.InvalidVenueRecoveryFrame;
+        if (self.committed.get(envelope.identity.sequence)) |hash| {
+            if (!std.mem.eql(u8, &hash, &frameDigest(frame))) return error.ConflictingCanonicalIdentity;
+        } else _ = try owner.apply(.{ .venue = event });
+        self.last_raw = raw.sequence;
+        self.last_event = envelope.identity.sequence;
+    }
+};
+
+fn frameDigest(frame: []const u8) [32]u8 {
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(frame, &digest, .{});
+    return digest;
 }
 
 /// The upstream role retains the input in its durable capture until this

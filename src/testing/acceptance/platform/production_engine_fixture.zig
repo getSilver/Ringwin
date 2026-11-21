@@ -24,21 +24,59 @@ fn provision(init: std.process.Init) !void {
     var args = try std.process.Args.Iterator.initAllocator(init.minimal.args, init.gpa);
     defer args.deinit();
     _ = args.next();
-    const path = args.next() orelse return error.MissingStateDirectory;
+    const first = args.next() orelse return error.MissingStateDirectory;
+    const capture_only = std.mem.eql(u8, first, "--capture");
+    const path = if (capture_only) args.next() orelse return error.MissingStateDirectory else first;
+    const with_recovery = if (args.next()) |option| blk: {
+        if (capture_only or !std.mem.eql(u8, option, "--with-recovery")) return error.InvalidArgument;
+        break :blk true;
+    } else false;
     if (args.next() != null or !std.fs.path.isAbsolute(path)) return error.InvalidStateDirectory;
     const store = try init.gpa.create(durable.LinuxFileAdapter);
     defer init.gpa.destroy(store);
     store.* = .{ .dir = undefined };
     try store.initLinux(init.io, path);
     defer store.close(init.io);
+    if (capture_only) return provisionCapture(init.io, store);
     const owner = try init.gpa.create(Owner);
     defer init.gpa.destroy(owner);
     try Owner.bootstrapInto(owner, store.interface(), init.io, .{ .domain = .decision_log, .id = 91 });
     try fixture.initializePythonOwner(owner);
 
-    var text: [192]u8 = undefined;
-    const config = try std.fmt.bufPrint(&text, "{{\"decision_stream\":91,\"deployment_digest\":\"{s}\"}}\n", .{std.fmt.bytesToHex(owner.deployment_anchor.?, .lower)});
+    const source_config = if (with_recovery) ",\"recovery_sources\":[{\"venue\":1,\"raw_stream\":77,\"session\":9000}]" else "";
+    var text: [256]u8 = undefined;
+    const config = try std.fmt.bufPrint(&text, "{{\"decision_stream\":91,\"deployment_digest\":\"{s}\"{s}}}\n", .{ std.fmt.bytesToHex(owner.deployment_anchor.?, .lower), source_config });
     const file = try store.dir.createFile(init.io, "engine.json", .{ .exclusive = true });
     defer file.close(init.io);
     try file.writeStreamingAll(init.io, config);
+    std.debug.print("provisioned_writer_barrier={d}\n", .{owner.shard.authoritativeBarrier()});
+}
+
+fn provisionCapture(io: std.Io, store: *durable.LinuxFileAdapter) !void {
+    const config =
+        \\{"source":{"venue":1,"raw_stream":77,"session":9000},"environment":"demo","config_version":1,"okx_binding":{"symbol":"BTC-USDT","instrument":101,"product":"spot","base":"BTC","quote":"USDT"}}
+    ;
+    const definitions =
+        \\{"arg":{"channel":"instruments","instType":"SPOT"},"data":[{"instType":"SPOT","instId":"BTC-USDT","baseCcy":"BTC","quoteCcy":"USDT","state":"live","ruleType":"normal","tickSz":"0.1","lotSz":"0.00000001","minSz":"0.00001","maxLmtSz":"100","maxMktSz":"10","maxLmtAmt":"1000000","maxMktAmt":"100000","ctType":"","ctVal":"","ctValCcy":"","settleCcy":"","tradeQuoteCcyList":["USDT"],"upcChg":[],"ts":"1800000000000"}]}
+    ;
+    const book =
+        \\{"arg":{"channel":"books","instId":"BTC-USDT"},"action":"snapshot","data":[{"asks":[["50100.1","2.0","0","3"]],"bids":[["50099.9","1.5","0","2"]],"ts":"1800000000200","seqId":"100","prevSeqId":"-1","checksum":0}]}
+    ;
+    var capture = try @import("../../../persistence/raw_ingress.zig").DurableSink.init(store.interface(), io, .{ .domain = .raw_ingress, .id = 77 });
+    for ([_][]const u8{ definitions, book }, 1..) |frame, sequence| {
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(frame, &digest, .{});
+        _ = try capture.interface().append(.{
+            .source_session = 9000,
+            .receive_time_utc_ns = 1_800_000_001_000_000_000 + sequence,
+            .monotonic_time_ns = 500 + sequence,
+            .wall_time_utc_ns = 1_800_000_001_000_000_000 + sequence,
+            .byte_len = @intCast(frame.len),
+            .sha256 = digest,
+        }, frame);
+    }
+    const file = try store.dir.createFile(io, "market-recovery.json", .{ .exclusive = true });
+    defer file.close(io);
+    try file.writeStreamingAll(io, config);
+    std.debug.print("capture_committed_barrier={d}\n", .{capture.next_sequence - 1});
 }
