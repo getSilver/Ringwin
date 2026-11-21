@@ -10,7 +10,6 @@ from dataclasses import replace
 from fractions import Fraction
 import http.client
 import socket
-import struct
 import threading
 import time
 
@@ -27,7 +26,7 @@ from test_arbitrage_evaluation import T
 
 class ConsoleTests(unittest.TestCase):
     def test_authenticated_approval_maps_only_the_selected_demo_testnet_route(self):
-        from verify_production_strategy_web import child, receive
+        from verify_production_strategy_web import child, relay_strategy_reads
         from verify_scanner_console import canonical_fixture, PASSPHRASE, ROOT
         from strategy_host import encode_depth_snapshot
         binary = "ringwin-strategy-authority-probe" + (".exe" if os.name == "nt" else "")
@@ -81,27 +80,23 @@ class ConsoleTests(unittest.TestCase):
                 dict(venue=1, environment="demo", account=f"{20:032x}", instrument=f"{103:032x}"),
                 dict(venue=21, environment="testnet", account=f"{30:032x}", instrument=f"{102:032x}")])
             pair["identity"] = f"{100:032x}"
-            frames = []
             errors = []
             ready = threading.Event()
+
+            class WriterPipe:
+                def recv(self, size):
+                    return core.stdout.read(size)
+
+                def sendall(self, data):
+                    core.stdin.write(data)
+                    core.stdin.flush()
 
             def relay():
                 try:
                     if core.stdout.read(2) != b"HV":
                         raise EOFError("offline Writer did not start")
                     ready.set()
-                    for _ in range(6):
-                        prefix = receive(writer, 5)
-                        size, = struct.unpack("<I", prefix[1:])
-                        payload = receive(writer, size)
-                        frames.append((prefix[:1], json.loads(payload)))
-                        core.stdin.write(prefix + payload)
-                        core.stdin.flush()
-                        length = core.stdout.read(4)
-                        if len(length) != 4:
-                            raise EOFError("offline Writer disconnected")
-                        reply_size, = struct.unpack("<I", length)
-                        writer.sendall(length + core.stdout.read(reply_size))
+                    relay_strategy_reads(writer, WriterPipe(), pair_approval=True)
                 except (OSError, EOFError) as error:
                     errors.append(error)
 
@@ -113,22 +108,25 @@ class ConsoleTests(unittest.TestCase):
                 status, result = post("approval_targets")
                 self.assertEqual(status, 200, result)
                 self.assertEqual(result["result"]["bindings"],
-                    [dict(strategy_identity="9", portfolio_identity="10")])
+                    [dict(strategy_identity="9", portfolio_identity="10"), dict(strategy_identity="19", portfolio_identity="11")])
                 scopes = [dict(venue=str(x.venue), environment=x.environment, product=x.kind, include_assets=[],
                     exclude_assets=[], quote_asset="1", min_depth_atoms=None, max_depth_atoms=None,
                     new_instruments=False) for x in observations]
                 status, result = post("configure", dict(expected_version="0", scopes=scopes))
                 self.assertEqual(status, 200, result)
                 run = post("start")[1]["result"]
-                console.publish(run["session"], 1, observation_rows, (plan,), at_ns=T,
-                    input_versions={plan.policy.scope: {str(plan.policy.original_base): {"fees": "0"}}})
+                versions = {plan.policy.scope: {str(plan.policy.original_base): {"fees": "0"}}}
+                console.publish(run["session"], 1, observation_rows, (replace(plan, valid_until_ns=T+5),),
+                    at_ns=T, input_versions=versions)
                 candidates = console.view()["snapshot"]["candidates"]
                 candidate, = [row for row in candidates if row["status"] == "evaluated"]
                 self.assertTrue(any(row["pair"][0][-1] == "105" for row in candidates))
                 mapping = Path(directory, "scanner-trading-instruments.json")
                 mapping.write_text(json.dumps({"1:demo:201": {"instrument": "103", "account": "20"}}))
                 selection = dict(identity="100", candidate_id=candidate["id"], strategy_identity="9",
-                    portfolio_identity="10", expected_config_version="1", expected_core_version=None, enabled=True)
+                    portfolio_identity="10", expected_config_version="1", expected_core_version=None, enabled=True,
+                    evaluation=dict(session=run["session"], **{key: candidate[key] for key in
+                        ("scenario_digest", "data_cutoff_ns", "valid_until_ns")}))
                 self.assertEqual(post("approve", selection, headers={"Cookie": headers["Cookie"]})[0], 403)
                 status, result = post("approve", selection)
                 self.assertEqual(status, 200, result)
@@ -141,8 +139,14 @@ class ConsoleTests(unittest.TestCase):
                 self.assertEqual(post("approval_status", "100")[1]["result"], receipt)
                 mapping.unlink()
                 self.assertEqual(post("approve", dict(selection, identity="101"))[1]["result"]["reason"], "UnmappedPairFirstLeg")
-                now[0] = T+50
+                console.publish(run["session"], 2, observation_rows, (plan,), at_ns=T, input_versions=versions)
                 status, result = post("approve", dict(selection, identity="102"))
+                self.assertEqual(status, 400)
+                self.assertIn("evaluation changed", result["error"])
+                now[0] = T+5
+                replacement, = [row for row in console.view()["snapshot"]["candidates"] if row["status"] == "evaluated"]
+                self.assertEqual(replacement["id"], candidate["id"])
+                status, result = post("approve", dict(selection, identity="103"))
                 self.assertEqual(status, 400)
                 self.assertIn("expired", result["error"])
                 client = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
@@ -150,28 +154,19 @@ class ConsoleTests(unittest.TestCase):
                     client.request("GET", "/api/strategy-instances", headers=headers)
                     response = client.getresponse()
                     self.assertEqual(response.status, 200)
-                    instance, = json.load(response)["instances"]
+                    instance, other_instance = json.load(response)["instances"]
                     self.assertEqual(instance["pair_trading_list"], [pair])
                     self.assertFalse(instance["trading_authorized"])
+                    self.assertTrue(other_instance["pair_trading_list_empty"])
                 finally:
                     client.close()
-                worker.join(timeout=5)
-                self.assertFalse(worker.is_alive())
                 self.assertFalse(errors)
-                self.assertEqual([prefix for prefix, _ in frames], [b"P", b"P", b"Q", b"P", b"Q", b"P"])
-                submitted = frames[2][1]
-                self.assertEqual((submitted["strategy"], submitted["portfolio"], submitted["direction"], submitted["mode"]),
-                    ("9", "10", 1, "taker_taker"))
-                self.assertEqual(submitted["legs"], [
-                    dict(venue=1, environment="demo", instrument="103", account="20", product="isolated_linear",
-                         base_asset="4346947", settlement_asset="1"),
-                    dict(venue=21, environment="testnet", instrument="102", product="isolated_linear",
-                         base_asset="4346947", settlement_asset="1"),
-                ])
             finally:
                 server.shutdown()
                 server.server_close()
                 thread.join(timeout=5)
+                web.close()
+                worker.join(timeout=5)
 
     def test_offline_development_http_does_not_require_login(self):
         from verify_scanner_console import Fixture

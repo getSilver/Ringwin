@@ -84,9 +84,9 @@ OKX 动态目录的 `specification` 返回产品、资产、状态、tick、lot�
 
 ## 从机会页批准交易路线
 
-机会详情从 engine 读取当前 StrategyInstance 及其 VirtualPortfolio。提交时，Web 核对扫描配置版本、当前候选的有效期和费率版本。核心 Writer 按候选的两腿、方向和模式处理批准。同一观察路线可以使用不同的行情端点和部署账户。批准回执同时显示两腿各自的观察来源和部署身份。
+机会详情从 engine 读取当前 StrategyInstance 及其 VirtualPortfolio。提交时，Web 核对扫描配置、费率版本及页面所见的评估引用。评估过期或被后续评估替换时，页面提示重新查看。核心 Writer 按候选的两腿、方向和模式处理批准。同一观察路线可以使用不同的行情端点和部署账户。批准回执同时显示两腿各自的观察来源和部署身份。
 
-监督器通过 `control_plane_node.py --engine-authority-fd` 提供有界中继。`P` 用于读取实例、名单、版本和回执。`Q` 用于配对批准，仅向获准提交批准的节点 Web 中继开放。中继按命令字节和小端 32 位长度转发请求，回复为小端 32 位长度加 JSON。`Q` 由 engine 的同一 Writer 提交批准事实，回复携带版本和屏障。批准与交易启用和订单发送权限分别生效。
+监督器通过 `control_plane_node.py --engine-authority-fd` 提供有界中继。`P` 用于读取实例、名单、版本和回执。启用机会批准时，监督器开放 `Q` 并为 Web 启动添加 `--engine-pair-approval`。中继按命令字节和小端 32 位长度转发请求，回复为小端 32 位长度加 JSON。`Q` 由 engine 的同一 Writer 提交批准事实，回复携带版本和屏障。批准与交易启用和订单发送权限分别生效。
 
 默认使用观察和部署共用的规范 InstrumentIdentity。若部署采用不同身份，在 Web 状态目录维护 `scanner-trading-instruments.json`，键为 `Venue:请求环境:观察品种`，值为包含十进制字符串 `instrument` 和可选 `account` 的对象。例如 `{"1:demo:201":{"instrument":"103","account":"20"}}`。每腿独立按请求环境、品种、产品、基础资产、结算资产和投资组合份额核对，账户须唯一。观察命名空间和实际行情环境继续随回执提供，分别用于核对行情证据。
 

@@ -122,7 +122,11 @@ def main():
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--engine-authority-fd", type=int,
                         help="Supervisor-provided relay for engine strategy queries and pair approval")
+    parser.add_argument("--engine-pair-approval", action="store_true",
+                        help="Use a supervisor relay authorized to forward pair approval frames")
     args = parser.parse_args()
+    if args.engine_pair_approval and args.engine_authority_fd is None:
+        parser.error("--engine-pair-approval requires --engine-authority-fd")
     args.directory.mkdir(parents=True, exist_ok=True)
     core_directory = args.core_directory or args.directory
     if not core_directory.is_dir():
@@ -138,7 +142,9 @@ def main():
             authority = EngineStrategyAuthority(stream)
         _, server = cleanup.enter_context(open_node_web(
             directory=args.directory, ui_path=args.ui, port=args.port, projection=provider,
-            command_server=CommandServer(secrets.token_bytes(32)), engine_strategy_authority=authority))
+            command_server=CommandServer(secrets.token_bytes(32)),
+            engine_strategy_reader=authority.instances if authority else None,
+            engine_strategy_authority=authority if args.engine_pair_approval else None))
         print("Web control plane: http://127.0.0.1:" + str(server.server_port), flush=True)
         try:
             server.serve_forever()

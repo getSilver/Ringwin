@@ -540,6 +540,7 @@ pub fn pairTradingList(gpa: std.mem.Allocator, shard: *const trading.TradingShar
     return std.json.Stringify.valueAlloc(gpa, .{ .pairs = pairs }, .{});
 }
 
+/// Project a pair selector without rounding its canonical identities in JSON clients.
 pub fn pairListEntry(request: pair_authorization.Request) PairListEntry {
     var entry: PairListEntry = .{
         .identity = undefined,

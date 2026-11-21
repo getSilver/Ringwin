@@ -27,12 +27,13 @@ def receive(stream, size):
     return data
 
 
-def relay_strategy_reads(web, engine):
+def relay_strategy_reads(web, engine, *, pair_approval=False):
+    commands = (b"P", b"Q") if pair_approval else (b"P",)
     try:
         while True:
             header = receive(web, 5)
             size, = struct.unpack("<I", header[1:])
-            if header[0:1] != b"P" or not 0 < size <= 256 * 1024:
+            if header[0:1] not in commands or not 0 < size <= 256 * 1024:
                 raise ValueError("invalid strategy query")
             engine.sendall(header + receive(web, size))
             reply = receive(engine, 4)

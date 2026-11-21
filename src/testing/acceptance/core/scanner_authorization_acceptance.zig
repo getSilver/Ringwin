@@ -15,14 +15,21 @@ pub fn configurePairAssets(owner: *demo.Owner) !void {
 }
 
 pub fn initializeMixedEnvironmentPairOwner(owner: *demo.Owner) !void {
-    var rows = try existing.configurationRows();
-    rows[2].account.environment = .demo;
-    rows[3].account.environment = .testnet;
-    var deployment: @import("../../../trading/deployment_allocation.zig").Configuration = .{};
-    for (rows[0 .. rows.len - 1]) |row| try deployment.apply(row);
+    var deployment = try @import("multi_portfolio_authority_acceptance.zig").cycleConfiguration();
+    deployment.accounts[0].environment = .demo;
+    deployment.accounts[1].environment = .testnet;
     deployment.header.?.expected_digest = deployment.contentDigest();
-    try deployment.apply(.seal);
     try existing.initializePythonOwnerForConfiguration(owner, &deployment);
+    for ([_]u128{ 20, 30 }) |account| {
+        _ = try owner.apply(fixture.atGroup(44, .{ .identity = owner.shard.authoritativeBarrier() + 1, .account_scope = account, .payload = .{ .virtual_portfolio_activated = .{ .portfolio_identity = 11 } } }));
+        _ = try owner.apply(fixture.atGroup(44, .{ .identity = owner.shard.authoritativeBarrier() + 1, .account_scope = account, .payload = .{ .portfolio_transfer = .{ .portfolio_identity = 11, .amount_atoms = 100 } } }));
+    }
+    _ = try owner.apply(fixture.atGroup(44, .{ .identity = owner.shard.authoritativeBarrier() + 1, .payload = .{ .strategy_activated = .{
+        .portfolio_identity = 11,
+        .strategy_identity = 19,
+        .config_version = 1,
+        .activation_identity = 1,
+    } } }));
     try configurePairAssets(owner);
     try configurePairLeg(owner, 20, 103, true);
 }

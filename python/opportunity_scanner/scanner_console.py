@@ -18,6 +18,9 @@ from opportunity_scanner.scanner_archive import freeze, load, MAX_BYTES
 from opportunity_scanner.scanner_history import History, encoded
 from opportunity_scanner.scanner_config import ConfigStore, uint_text
 
+MAX_CORE_ID = (1 << 128) - 1
+MAX_CORE_VERSION = (1 << 64) - 1
+
 
 @dataclass(frozen=True)
 class CatalogueEntry:
@@ -553,13 +556,13 @@ class ScannerConsole:
         with self.lock:
             fields = {"identity", "candidate_id", "strategy_identity", "portfolio_identity",
                       "expected_config_version", "expected_core_version", "enabled"}
-            if type(selection) is not dict or set(selection) != fields or type(selection["enabled"]) is not bool:
+            if type(selection) is not dict or set(selection) - {"evaluation"} != fields or type(selection["enabled"]) is not bool:
                 raise ValueError("scanner approval fields")
             uint_text(selection["identity"], minimum=1)
-            uint_text(selection["strategy_identity"], minimum=1)
-            uint_text(selection["portfolio_identity"], minimum=1)
+            uint_text(selection["strategy_identity"], minimum=1, maximum=MAX_CORE_ID)
+            uint_text(selection["portfolio_identity"], minimum=1, maximum=MAX_CORE_ID)
             if selection["expected_core_version"] is not None:
-                uint_text(selection["expected_core_version"])
+                uint_text(selection["expected_core_version"], maximum=MAX_CORE_VERSION)
             try:
                 previous = self.history.request(selection["identity"])
             except ValueError as error:
@@ -576,6 +579,8 @@ class ScannerConsole:
             if selection["enabled"] and (row is None or row["status"] != "evaluated"):
                 reason = row["reason"] if row else "candidate_unavailable"
                 raise ValueError(f"current evaluated candidate required: {reason}")
+            if selection["enabled"] and (self.deployment_authority is not None or "evaluation" in selection):
+                self._require_displayed_evaluation(selection.get("evaluation"), row)
             if selection["enabled"] and self.fee_schedules is not None:
                 self.fee_schedules.require_current(row.get("input_versions", {}).get("fees"))
             resolved = dict(selection)
@@ -598,6 +603,15 @@ class ScannerConsole:
             self.history.request(selection["identity"], request, response)
             self._record("operations", secrets.token_hex(16), dict(action="pair_request", identity=selection["identity"]))
             return self._query_or_submit(selection["identity"], request, submit=True)
+
+    def _require_displayed_evaluation(self, reference, row):
+        fields = {"scenario_digest", "data_cutoff_ns", "valid_until_ns"}
+        if type(reference) is not dict or set(reference) != fields | {"session"}:
+            raise ValueError("displayed evaluation reference required")
+        if self.clock() >= uint_text(reference["valid_until_ns"]):
+            raise ValueError("displayed evaluation expired")
+        if reference["session"] != self.session or any(reference[name] != row[name] for name in fields):
+            raise ValueError("displayed evaluation changed; review the current candidate")
 
     def approval_targets(self):
         if self.deployment_authority is None:
@@ -626,9 +640,9 @@ class ScannerConsole:
             mapping = aliases.get(key, {"instrument": str(observed.rules.instrument)})
             if type(mapping) is not dict or not {"instrument"} <= mapping.keys() <= {"instrument", "account"}:
                 raise ValueError(f"invalid trading instrument mapping: {key}")
-            uint_text(mapping["instrument"], minimum=1)
+            uint_text(mapping["instrument"], minimum=1, maximum=MAX_CORE_ID)
             if "account" in mapping:
-                uint_text(mapping["account"], minimum=1)
+                uint_text(mapping["account"], minimum=1, maximum=MAX_CORE_ID)
             rules = observed.rules
             legs.append(dict(mapping, venue=observed.venue, environment=observed.environment,
                              product="isolated_linear" if observed.kind == "linear" else observed.kind,
@@ -674,12 +688,23 @@ class ScannerConsole:
             return self._query_or_submit(identity, previous["request"], submit=False)
 
     def core_version(self, strategy):
-        uint_text(strategy, minimum=1)
+        uint_text(strategy, minimum=1, maximum=MAX_CORE_ID)
         authority = self.deployment_authority or self.authority
         if authority is None or (self.deployment_authority is None and
                                  not any(x["strategy_identity"] == strategy for x in self.trading_bindings)):
             raise ValueError("core strategy binding unavailable")
         return authority.request(dict(operation="pair_authorization_version", strategy_identity=format(int(strategy), "032x")))
+
+    @staticmethod
+    def _verify_deployed_receipt(pair, request):
+        if (type(pair) is not dict or pair.get("direction") != request["direction"] or pair.get("mode") != request["mode"]
+                or type(pair.get("legs")) is not list or len(pair["legs"]) != 2):
+            raise ValueError("core pair confirmation binding")
+        for actual, expected in zip(pair["legs"], request["legs"]):
+            if (actual["venue"] != expected["venue"] or actual["environment"] != expected["environment"]
+                    or int(actual["instrument"], 16) != int(expected["instrument"])
+                    or ("account" in expected and int(actual["account"], 16) != int(expected["account"]))):
+                raise ValueError("core pair confirmation leg binding")
 
     def _query_or_submit(self, identity, request, *, submit):
         try:
@@ -696,13 +721,15 @@ class ScannerConsole:
                 raise ValueError("invalid core pair response")
             if result.get("identity") != identity:
                 raise ValueError("core pair confirmation identity")
-            if result["status"] == "accepted" and (not result.get("core_version") or not result.get("barrier")
-                    or (self.deployment_authority is not None and not isinstance(result.get("pair"), dict))):
+            if result["status"] == "accepted" and (not result.get("core_version") or not result.get("barrier")):
                 raise ValueError("core pair confirmation binding")
             response = dict(result, trading_qualified=False)
             if self.deployment_authority is not None and response["status"] == "accepted":
+                if uint_text(result["core_version"], maximum=MAX_CORE_VERSION) != int(request["core"]["expected_version"]) + 1:
+                    raise ValueError("core pair confirmation version")
+                self._verify_deployed_receipt(result.get("pair"), request["core"])
                 response["observation_legs"] = request["candidate"].get("legs", [])
-        except (OSError, TimeoutError, ValueError) as error:
+        except (OSError, ValueError, KeyError, TypeError) as error:
             response = dict(identity=identity, status="unknown", reason=str(error), trading_qualified=False)
         if submit:
             row = next((r for r in self.snapshot["candidates"] if r["id"] == request["selection"]["candidate_id"]), None)

@@ -301,6 +301,7 @@ fn pairReceipt(gpa: std.mem.Allocator, record: pair.Record) ![]u8 {
     }, .{});
 }
 
+/// Resolve the selected legs against the Writer's deployment and acknowledge committed approval.
 pub fn approvePair(owner: *Owner, gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
     const parsed = try std.json.parseFromSlice(PairApproval, gpa, bytes, .{});
     defer parsed.deinit();

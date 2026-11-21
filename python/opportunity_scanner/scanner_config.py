@@ -9,11 +9,11 @@ from opportunity_scanner.arbitrage_scanner import Scope
 MAX_CONFIG_BYTES = 2*1024*1024
 
 
-def uint_text(value, *, minimum=0):
+def uint_text(value, *, minimum=0, maximum=(1 << 127) - 1):
     if type(value) is not str or not value.isascii() or not value.isdecimal() or str(int(value)) != value:
         raise ValueError("canonical decimal string required")
     result = int(value)
-    if not minimum <= result < 1 << 127:
+    if not minimum <= result <= maximum:
         raise ValueError("integer outside capacity")
     return result
 

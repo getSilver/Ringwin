@@ -912,6 +912,8 @@ test "formal engine approves only the selected Demo Testnet route and recovers i
     try std.testing.expectEqualStrings(accepted, receipt);
     const record = recovered.shard.effectivePairAuthorization(9, 0).?;
     try std.testing.expectEqual(@as(u128, 10), record.request.portfolio);
+    try std.testing.expect(recovered.shard.strategyAuthority(19).strategy_active);
+    try std.testing.expect(recovered.shard.pairTradingListEmpty(19));
     try std.testing.expectEqual(@as(u16, 1), recovered.shard.pair_authorizations.count);
     try std.testing.expectEqual(@as(u16, 0), recovered.shard.oms.order_count);
 }
