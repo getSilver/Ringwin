@@ -327,7 +327,7 @@ class Cycle:
         """
         if not isinstance(plan, Plan) or not isinstance(request, admission.Request) or not isinstance(option, admission.Option):
             raise b.Rejected("admission_binding")
-        option.plan.require_current_fees(fees)
+        option.plan.require_fees(fees.opening_snapshot() if fees is not None else None)
         if (request.identity != plan.request_ref or request.config_hash != plan.config_hash
                 or plan.execution_hash != option.execution_hash
                 or request.target_atoms != plan.target_atoms or request.key != option.plan.key
@@ -350,6 +350,7 @@ class Cycle:
         cycle.entry_valid_until_ns = request.valid_until_ns
         if option.plan.fee_version is not None:
             cycle.entry_fee_version = option.plan.fee_version
+            cycle.entry_fee_venues = tuple(leg[0] for leg in option.plan.pair)
         return cycle
 
     def _check_entry_fees(self, fees):
@@ -357,7 +358,11 @@ class Cycle:
         if version is not None:
             if fees is None:
                 raise b.Rejected("fees_version_missing")
-            fees.require_current(version)
+            venues = getattr(self, "entry_fee_venues", None)
+            if venues is None or len(venues) != len(self.plan.legs):
+                raise b.Rejected("fees_scope_missing")
+            fees.opening_snapshot().require_opening(version, tuple(
+                ((venue, leg.account, leg.rules.instrument), leg.kind) for venue, leg in zip(venues, self.plan.legs)))
 
     def _emit(self, cursor, reason, specs):
         intents = tuple(Intent(self.next_sequence+i, *spec) for i, spec in enumerate(specs))

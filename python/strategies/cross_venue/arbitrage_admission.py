@@ -297,6 +297,12 @@ class Admission:
         if self.rounds >= cfg.max_recalculations:
             return Decision(rejections=(("batch", "recalculation_capacity"),))
         self.rounds += 1
+        try:
+            fees = self.fees.opening_snapshot() if self.fees is not None else None
+        except ValueError as error:
+            for state in signals:
+                state.invalidate()
+            return Decision(rejections=(("batch", str(error)),))
         approved, rejected, seen = [], [], set()
         for option in options:
             plan = option.plan
@@ -308,7 +314,7 @@ class Admission:
             state = states.get(signal_scope(plan.pair, plan.policy.direction))
             reason = ""
             try:
-                plan.require_current_fees(self.fees)
+                plan.require_fees(fees)
             except ValueError as error:
                 rejected.append((scanner.candidate_id(*plan.key), str(error)))
                 continue

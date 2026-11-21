@@ -25,6 +25,7 @@ from pathlib import Path
 from strategies.cross_venue import arbitrage_admission as admission
 from strategies.cross_venue import arbitrage_signals as signals
 from opportunity_scanner import arbitrage_scanner as scanner
+from opportunity_scanner.fee_schedules import FeeSchedules
 from strategies.cross_venue import arbitrage_maker as maker
 from test_arbitrage_admission import config as admission_config, signal_policy
 from strategies.cross_venue import arbitrage_evaluation as valuation
@@ -66,7 +67,7 @@ def core_plan(maker_mode=False):
     return frozen
 
 
-def core_admission_prefix(maker_mode=False, books=None):
+def core_admission_prefix(maker_mode=False, books=None, *, fees=None, fee_version=None):
     frozen = core_plan(maker_mode)
     now = CORE_UTC
     position = core_position(frozen, (10000, 10000), now)
@@ -82,7 +83,8 @@ def core_admission_prefix(maker_mode=False, books=None):
     estimator = core_estimator(position, frames[0], replace(frozen, policy=policy))
     artifact = replace(calibration(scope=valuation.probability_scope(policy, 8, F(10000), now),
         model_hash=policy.model_hash, simulation_hash=estimator.probability_model_hash(policy)), valid_until_ns=frozen.exit_deadline_ns, mode=frozen.policy.mode)
-    plan = scanner.Plan(pair, 0 if maker_mode else None, (scenario,), policy, estimator, artifact, EXACT, LIMITS, frozen.policy.deadline_ns, 200)
+    plan = scanner.Plan(pair, 0 if maker_mode else None, (scenario,), policy, estimator, artifact, EXACT, LIMITS,
+                        frozen.policy.deadline_ns, 200, fee_version=fee_version)
     cfg = admission_config(valid_until_ns=frozen.exit_deadline_ns,
         signal=signal_policy(reset_points=1, entry_points=1, opportunity_ttl_ns=1000000000), recommendation_ttl_ns=1000000000, max_book_age_ns=1000000000)
     option = admission.Option(plan, (10000, 10000), ((20, 100), (30, 100)), 20, "b"*64)
@@ -92,11 +94,12 @@ def core_admission_prefix(maker_mode=False, books=None):
     state.activate("package-activation", now-10)
     state.observe(1, now-1, 0, qualified=True, cursor=4)
     state.observe(2, now, 3, qualified=True, cursor=5)
-    current = admission.Admission(cfg)
+    current = admission.Admission(cfg, fees=fees)
     facts = admission.Facts(now, 5, 1, cfg.content_hash, tuple((key,1000000) for key,_ in option.requirements), (), True, "core-proposal-5")
-    request = current.propose(observations, (option,), (approval,), (state,), facts).request
+    decision = current.propose(observations, (option,), (approval,), (state,), facts)
+    request = decision.request
     if request is None:
-        raise AssertionError("core source proposal not admitted by private policy")
+        raise baseline.Rejected(decision.rejections[0][1])
     quoted = None
     if maker_mode:
         quoted = maker.Quote(100, frames[0], (scenario,), estimator, artifact, EXACT, LIMITS,
@@ -146,8 +149,9 @@ def core_estimator(position, book, frozen):
         simulation_hash=estimator.probability_model_hash(frozen.policy))),))
 
 
-def core_runtime(container, definition=2, maker_mode=False, public_books=False):
+def core_runtime(container, definition=2, maker_mode=False, public_books=False, fee_path=None):
     visible_books = {}
+    fees = FeeSchedules(fee_path) if fee_path else None
     def apply(objects, record):
         current = objects["cycle"]
         if public_books and record.event_type == 7:
@@ -156,9 +160,17 @@ def core_runtime(container, definition=2, maker_mode=False, public_books=False):
                 raise ValueError("unexpected public instrument")
             visible_books[book["instrument"]] = record.payload
             return
-        if record.event_type == 4 and record.payload in (b"start", b"start-risk"):
+        command, _, version = record.payload.partition(b":") if record.event_type == 4 else (b"", b"", b"")
+        if command in (b"start", b"start-risk", b"start-fees"):
             books = tuple(visible_books[key] for key in (101, 102)) if public_books else None
-            _, state, pending, request, quoted = core_admission_prefix(maker_mode, books)
+            fee_version = version.decode("ascii") if command == b"start-fees" else None
+            try:
+                _, state, pending, request, quoted = core_admission_prefix(maker_mode, books,
+                    fees=fees if fee_version else None, fee_version=fee_version)
+            except baseline.Rejected as error:
+                if (fee_version, str(error)) in (("1", "fees_version_changed"), ("2", "fees_missing_leg:21:30:102")):
+                    return
+                raise
             objects["filter"].push(baseline.Point(CORE_UTC//baseline.SECOND*baseline.SECOND, record.shard_sequence, .1))
             objects["signal"], objects["admission"] = state, pending
             if record.payload == b"start-risk":
@@ -480,11 +492,16 @@ if __name__ == "__main__":
         public_books = "--public-books" in sys.argv
         if public_books:
             sys.argv.remove("--public-books")
+        fee_path = None
+        if "--manual-fees" in sys.argv:
+            index = sys.argv.index("--manual-fees")
+            fee_path = sys.argv[index+1]
+            del sys.argv[index:index+2]
         if "--core-definition" in sys.argv:
             index = sys.argv.index("--core-definition")
             definition = int(sys.argv[index+1])
             del sys.argv[index:index+2]
-        raise SystemExit(host.main(runtime_factory=lambda raw: core_runtime(raw, definition, maker_mode, public_books)))
+        raise SystemExit(host.main(runtime_factory=lambda raw: core_runtime(raw, definition, maker_mode, public_books, fee_path)))
     if "--phase" in sys.argv:
         index = sys.argv.index("--phase")
         phase = sys.argv[index+1]

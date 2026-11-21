@@ -220,7 +220,7 @@ SPECS = {
         target_cursor=optional(U), first_exit=optional(structure(dict(reason=S, cursor=U))),
         reasons=mapping(S, 16), before_reconciling=optional(S), last_economic_ref=optional(S),
         last_facts_digest=optional(H), matched_base=optional(Q), entry_cursor=optional(U),
-        entry_valid_until_ns=optional(U), entry_fee_version=S),
+        entry_valid_until_ns=optional(U), entry_fee_version=S, entry_fee_venues=sequence(U, 2)),
 }
 # A separate component tag preserves the existing IOC v2 intent encoding.
 SPECS["maker_cycle"] = dict(SPECS["cycle"],
@@ -240,6 +240,7 @@ CONFIG_FIELDS = {
     "admission": {"config", "pending_signal", "fees"}, "cycle": {"plan"},
     "estimator": set(), "calibration": set(), "maker_cycle": {"plan"},
 }
+OPTIONAL_ENTRY_FEE_FIELDS = {"entry_fee_version", "entry_fee_venues"}
 
 
 def dependency(obj):
@@ -264,8 +265,9 @@ def dependency(obj):
 
 def component_codec(tag, state):
     spec = SPECS[tag]
-    if tag in ("cycle", "maker_cycle") and "entry_fee_version" not in state:
-        spec = {name: codec for name, codec in spec.items() if name != "entry_fee_version"}
+    if tag in ("cycle", "maker_cycle"):
+        spec = {name: codec for name, codec in spec.items()
+                if name not in OPTIONAL_ENTRY_FEE_FIELDS or name in state}
     return structure(spec)
 
 
@@ -280,7 +282,7 @@ def progress(obj, tag):
         if tag == "admission":
             required.remove("pending_scope")
         if tag in ("cycle", "maker_cycle"):
-            required -= {"entry_cursor", "entry_valid_until_ns", "entry_fee_version"}
+            required -= {"entry_cursor", "entry_valid_until_ns"} | OPTIONAL_ENTRY_FEE_FIELDS
         if required-set(vars(obj)):
             raise ValueError("missing component field")
     values = {name: getattr(obj, name, None) for name in SPECS[tag]}
@@ -290,8 +292,10 @@ def progress(obj, tag):
                                for k, v in sorted(obj.evaluated.items())]
     if tag in ("cycle", "maker_cycle") and obj.first_exit is not None:
         values["first_exit"] = dict(reason=obj.first_exit[0], cursor=obj.first_exit[1])
-    if tag in ("cycle", "maker_cycle") and values["entry_fee_version"] is None:
-        values.pop("entry_fee_version")
+    if tag in ("cycle", "maker_cycle"):
+        for name in OPTIONAL_ENTRY_FEE_FIELDS:
+            if values[name] is None:
+                values.pop(name)
     return component_codec(tag, values)[0](values)
 
 
@@ -547,6 +551,10 @@ def validate_configured(obj, tag, values, metadata):
             raise ValueError("entry evidence")
         if values["entry_cursor"] is not None and values["entry_cursor"] > cursor:
             raise ValueError("future entry cursor")
+        venues = values.get("entry_fee_venues")
+        if venues is not None and (values.get("entry_fee_version") is None or
+                                  len(venues) != 2 or not 0 < venues[0] < venues[1]):
+            raise ValueError("entry fee venue scope")
 
 
 def checkpoint(metadata, components):
@@ -596,6 +604,8 @@ def restore(container, templates, *, expected=None):
                 if values[name] is None:
                     values.pop(name)
                     obj.__dict__.pop(name, None)
+            for name in OPTIONAL_ENTRY_FEE_FIELDS - values.keys():
+                obj.__dict__.pop(name, None)
         for name, value in values.items():
             setattr(obj, name, value)
     for obj in restored.values():

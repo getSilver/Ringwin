@@ -160,12 +160,20 @@ class Plan:
     entry_base: Optional[Fraction] = None
     buy_notional_atoms: Optional[Fraction] = None
 
-    def require_current_fees(self, fees):
+    def require_fees(self, fees):
         if self.fee_version is None and fees is None:
             return
         if self.fee_version is None or fees is None:
             raise b.Rejected("fees_version_missing")
-        fees.require_current(self.fee_version)
+        for scenario in self.scenarios:
+            legs = scenario.entry.legs
+            if len(legs) == 2:
+                if tuple((leg.account, leg.rules.instrument) for leg in legs) != tuple(
+                        (account, instrument) for _, account, instrument in self.pair):
+                    raise b.Rejected("fees_scope_mismatch")
+                fees.require_opening(self.fee_version, tuple(zip(self.pair, (leg.kind for leg in legs))))
+                return
+        raise b.Rejected("fees_scope_missing")
 
     def __post_init__(self):
         if self.fee_version is not None and (type(self.fee_version) is not str

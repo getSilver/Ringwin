@@ -51,6 +51,15 @@ class ManualFeeTests(unittest.TestCase):
             opening = cycle.Cycle.from_admission(bound, request, option, fees=fees)
             from test_arbitrage_checkpoint import roundtrip
             opening = roundtrip({"opening": opening}, facts.cursor)["opening"]
+            from copy import copy
+            old_checkpoint = copy(opening)
+            del old_checkpoint.entry_fee_venues
+            old_checkpoint = roundtrip({"opening": old_checkpoint}, facts.cursor)["opening"]
+            start = dict(cursor=facts.cursor, at_ns=facts.at_ns)
+            with self.assertRaisesRegex(ValueError, "fees_scope_missing"):
+                old_checkpoint.start(**start, fees=fees)
+            self.assertEqual(old_checkpoint.phase, "idle")
+            self.assertEqual(len(copy(opening).start(**start, fees=fees).intents), 2)
             rows[0]["maker_percent"] = "0.1"
             fees.save(dict(expected_version="1", rows=rows))
             decision = admission.Admission(config, fees=fees).propose(obs, (option,),
@@ -62,8 +71,42 @@ class ManualFeeTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "fees_version_missing"):
                 cycle.Cycle.from_admission(bound, request, option)
             with self.assertRaisesRegex(ValueError, "fees_version_changed"):
-                opening.start(cursor=facts.cursor, at_ns=facts.at_ns, fees=fees)
+                opening.start(**start, fees=fees)
             self.assertEqual(opening.phase, "idle")
+            missing = FeeSchedules(Path(d) / "missing-leg.json")
+            missing.save(dict(expected_version="0", rows=rows[:1]))
+            with self.assertRaisesRegex(ValueError, "fees_missing_leg"):
+                opening.start(**start, fees=missing)
+            self.assertEqual(opening.next_sequence, bound.first_sequence)
+
+    def test_opening_checks_current_file_and_both_deployed_legs(self):
+        from dataclasses import replace
+        from test_arbitrage_admission import inputs, ready
+        from strategies.cross_venue.arbitrage_admission import Admission
+
+        observations, option, config, approval, facts = inputs()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "manual-fees.json"
+            writer, reader = FeeSchedules(path), FeeSchedules(path)
+            rows = [dict(venue=str(o.venue), account=str(o.account), product=o.kind,
+                         fee_asset=str(o.rules.quote_asset), maker_percent="0", taker_percent="0")
+                    for o in observations]
+
+            def propose(version):
+                current = replace(option, plan=replace(option.plan, fee_version=version))
+                return Admission(config, fees=reader).propose(observations, (current,),
+                    (approval,), (ready(current.plan, config),), facts)
+
+            writer.save(dict(expected_version="0", rows=rows))
+            self.assertIsNotNone(propose("1").request)
+            writer.save(dict(expected_version="1", rows=rows[:1]))
+            self.assertEqual(propose("1").rejections[0][1], "fees_version_changed")
+            missing = propose("2")
+            self.assertIsNone(missing.request)
+            self.assertEqual(missing.rejections[0][1], "fees_missing_leg:" +
+                             ":".join(map(str, observations[1].identity)))
+            writer.save(dict(expected_version="2", rows=rows))
+            self.assertIsNotNone(propose("3").request)
 
     def test_scanner_uses_saved_fees_and_reports_missing_leg(self):
         observations, doc = inputs()

@@ -470,7 +470,7 @@ const PublicStart = struct {
     depth_wires: [2][@import("../../market/depth_snapshot.zig").wire_len]u8,
 };
 
-fn publicDepthStart(init: std.process.Init, python: []const u8, input: *CycleIngress, plan: lifecycle.Plan) !PublicStart {
+fn publicDepthStart(init: std.process.Init, python: []const u8, input: *CycleIngress, plan: lifecycle.Plan, fee_path: []const u8) !PublicStart {
     const canonical = @import("../../model/canonical_event.zig");
     const depth = @import("../../market/depth_snapshot.zig");
     const owner = input.owner;
@@ -521,7 +521,15 @@ fn publicDepthStart(init: std.process.Init, python: []const u8, input: *CycleIng
     var frame: [8192]u8 = undefined;
     var initial_storage: [4096]u8 = undefined;
     const initial = try recovery_module.encodePayloadCheckpoint(&initial_storage, metadata, @embedFile("../fixtures/strategy_cycle_recovery_v2.json"));
-    var host = try lifecycle.ManagedHost.start(init, python, "python/test_strategy_cycle_recovery.py", plan, "portable", &.{ "--core", "--strategy-identity", "9", "--activation-identity", "1", "--public-books" });
+    const fee_a = "{\"venue\":\"1\",\"account\":\"20\",\"product\":\"linear\",\"fee_asset\":\"1\",\"maker_percent\":\"0\",\"taker_percent\":\"0\"}";
+    const fee_b = "{\"venue\":\"21\",\"account\":\"30\",\"product\":\"linear\",\"fee_asset\":\"1\",\"maker_percent\":\"0\",\"taker_percent\":\"0\"}";
+    const revisions = [_][]const u8{
+        "[" ++ fee_a ++ "," ++ fee_b ++ "]",
+        "[" ++ fee_a ++ "]",
+        "[" ++ fee_a ++ "," ++ fee_b ++ "]",
+    };
+    try publishFeeFixture(init.io, fee_path, revisions[0..1]);
+    var host = try lifecycle.ManagedHost.start(init, python, "python/test_strategy_cycle_recovery.py", plan, "portable", &.{ "--core", "--strategy-identity", "9", "--activation-identity", "1", "--public-books", "--manual-fees", fee_path });
     defer host.deinit(init.io);
     try host.sendPlan(init.io);
     try expectLifecycle(.accepted, try host.receive(init.io, 1));
@@ -556,12 +564,21 @@ fn publicDepthStart(init: std.process.Init, python: []const u8, input: *CycleIng
     try host.sendInput(init.io, try gateway.encodeBatch(&batch_storage, 2, activation.barrier, activation.barrier, now, &.{}), now);
     try gateway.recordPublished(2, activation.barrier, now);
     try gateway.activate(&owner.shard, &owner.decision_journal);
-    _ = try input.apply(fixture.atGroup(45, .{ .identity = 9001, .account_scope = 20, .payload = .{ .mark_price = .{ .instrument = 101, .price_atoms = 100 } } }));
-    metadata.strategy_cursor = owner.shard.authoritativeBarrier();
-    const start: gateway_module.EventEnvelope = .{ .event_type = .timer, .shard_sequence = metadata.strategy_cursor, .source_time_ns = 0, .receive_time_ns = 0, .monotonic_time_ns = 0, .wall_time_utc_ns = 0, .payload = "start" };
-    now = @intCast(std.Io.Clock.awake.now(init.io).nanoseconds);
-    try host.sendInput(init.io, try gateway.encodeBatch(&batch_storage, 3, metadata.strategy_cursor, metadata.strategy_cursor, now, &.{start}), now);
-    try gateway.recordPublished(3, metadata.strategy_cursor, now);
+    try publishFeeFixture(init.io, fee_path, revisions[0..2]);
+    for ([_][]const u8{ "start-fees:1", "start-fees:2", "start-fees:3" }, 0..) |payload, index| {
+        if (index == 2) try publishFeeFixture(init.io, fee_path, &revisions);
+        _ = try input.apply(fixture.atGroup(45, .{ .identity = 9190 + index, .account_scope = 20, .payload = .{ .mark_price = .{ .instrument = 101, .price_atoms = 100 } } }));
+        metadata.strategy_cursor = owner.shard.authoritativeBarrier();
+        const start: gateway_module.EventEnvelope = .{ .event_type = .timer, .shard_sequence = metadata.strategy_cursor, .source_time_ns = 0, .receive_time_ns = 0, .monotonic_time_ns = 0, .wall_time_utc_ns = 0, .payload = payload };
+        now = @intCast(std.Io.Clock.awake.now(init.io).nanoseconds);
+        try host.sendInput(init.io, try gateway.encodeBatch(&batch_storage, 3 + index, metadata.strategy_cursor, metadata.strategy_cursor, now, &.{start}), now);
+        try gateway.recordPublished(3 + index, metadata.strategy_cursor, now);
+        if (index < 2) {
+            // A proposal would precede the checkpoint on the same pipe.
+            try host.requestCheckpoint(init.io, 2 + index, metadata);
+            _ = try recovery_module.decodePayloadCheckpoint(try host.receiveCheckpoint(init.io, &frame), metadata);
+        }
+    }
     const output = try host.receiveOutput(init.io, now, &frame);
     const decision = gateway.ingest(output, now + 1);
     try std.testing.expect(decision == .accepted_group);
@@ -570,10 +587,23 @@ fn publicDepthStart(init: std.process.Init, python: []const u8, input: *CycleIng
     try std.testing.expectEqual(@as(u128, 20), group.members[0].exchange_account_identity);
     try std.testing.expectEqual(@as(u128, 30), group.members[1].exchange_account_identity);
     metadata.next_intent_sequence = 3;
-    try host.requestCheckpoint(init.io, 2, metadata);
+    try host.requestCheckpoint(init.io, 4, metadata);
     const saved = try init.gpa.dupe(u8, try host.receiveCheckpoint(init.io, &frame));
     std.debug.print("10 public depth: input_sha256={s}/{s} output=complete_group members=2 next_intent=3 start_cursor={d}\n", .{ std.fmt.bytesToHex(@import("../../persistence/business_history.zig").hash(&wires[0]), .lower), std.fmt.bytesToHex(@import("../../persistence/business_history.zig").hash(&wires[1]), .lower), metadata.strategy_cursor });
     return .{ .candidate = decision.accepted_group, .checkpoint = saved, .depth_wires = wires };
+}
+
+fn publishFeeFixture(io: std.Io, path: []const u8, revisions: []const []const u8) !void {
+    var buffer: [2048]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buffer);
+    try writer.print("{{\"schema\":\"manual_fee_schedules_v1\",\"version\":\"{d}\",\"revisions\":[", .{revisions.len});
+    for (revisions, 0..) |rows, index| {
+        if (index != 0) try writer.writeByte(',');
+        try writer.writeAll(rows);
+    }
+    try writer.writeAll("]}");
+    // Delivery is synchronous. The child consumes this revision only after the next input.
+    try std.Io.Dir.cwd().writeFile(io, .{ .sub_path = path, .data = writer.buffered() });
 }
 
 fn runCycleRecovery(init: std.process.Init, python: []const u8, phase: CyclePhase, transition: CycleTransition, scenario: CycleScenario) !void {
@@ -623,7 +653,8 @@ fn runCycleRecovery(init: std.process.Init, python: []const u8, phase: CyclePhas
         .activation_barrier = owner.shard.authoritativeBarrier() + 1,
         .state_digest = owner.shard.canonicalStateDigest(),
     } } }));
-    const public_start = if (scenario == .public_depth) try publicDepthStart(init, python, &input, old_plan) else null;
+    var fee_path_storage: [2048]u8 = undefined;
+    const public_start = if (scenario == .public_depth) try publicDepthStart(init, python, &input, old_plan, try std.fmt.bufPrint(&fee_path_storage, "{s}/manual-fees.json", .{path})) else null;
     defer if (public_start) |started| init.gpa.free(started.checkpoint);
     const start_sequence = if (public_start != null) owner.shard.authoritativeBarrier() else owner.shard.authoritativeBarrier() + 1;
     if (public_start == null) _ = try input.apply(fixture.atGroup(45, .{ .identity = 9001, .account_scope = 20, .payload = .{ .mark_price = .{ .instrument = 101, .price_atoms = 100 } } }));
@@ -698,9 +729,18 @@ fn runCycleRecovery(init: std.process.Init, python: []const u8, phase: CyclePhas
         try dual.observe(dispatcher, &owner.shard);
         const dispatch_now = owner.shard.oms.findCommand(1).?.authority.dispatch_deadline_monotonic_ns - std.time.ns_per_s;
         for ([_]u64{ 1, 2 }) |command| try std.testing.expectEqual(@import("../../execution/venue_adapter.zig").SendResult.accepted, try dispatcher.sendFromShard(&owner.shard, command, dispatch_now));
-        for (adapters, [_]i128{ 100, 110 }) |target, ticks| {
+        for (adapters, [_]u128{ 101, 102 }, [_]i128{ 100, 110 }, 0..) |target, instrument, ticks, index| {
             try std.testing.expectEqual(@as(usize, 1), target.sends);
-            const price = target.command.?.limit_price.?;
+            const command = target.command.?;
+            const order = owner.shard.oms.orderById(index + 1).?;
+            try std.testing.expectEqual(target.account, command.exchange_account);
+            try std.testing.expectEqual(instrument, command.instrument);
+            try std.testing.expectEqual(order.id, command.orderIdentity());
+            try std.testing.expectEqualDeep(order.client_order_id, command.client_order_id);
+            try std.testing.expectEqual(@as(engine.canonical.OrderSide, if (index == 0) .buy else .sell), command.side);
+            try std.testing.expectEqual(engine.canonical.TimeInForce.immediate_or_cancel, command.time_in_force);
+            try std.testing.expectEqual(@as(i64, 10000), command.quantity.?.lots);
+            const price = command.limit_price.?;
             try std.testing.expectEqual(@as(u64, 1), price.rules_version);
             try std.testing.expectEqual(ticks, price.ticks);
         }

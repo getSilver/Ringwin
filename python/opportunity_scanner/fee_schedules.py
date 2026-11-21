@@ -37,9 +37,12 @@ class FeeSchedules:
     def __init__(self, path):
         self.path, self.lock = Path(path), RLock()
         self.document = dict(schema="manual_fee_schedules_v1", version="0", revisions=[])
-        if self.path.exists():
+        try:
             with self.path.open("rb") as stream:
                 raw = stream.read(MAX_BYTES + 1)
+        except FileNotFoundError:
+            pass
+        else:
             if len(raw) > MAX_BYTES:
                 raise ValueError("fee schedule capacity")
             doc = json.loads(raw, object_pairs_hook=_object)
@@ -106,5 +109,24 @@ class FeeSchedules:
                            0, (1 << 127)-1)
 
     def require_current(self, version):
-        if version != self.view()["version"]:
-            raise ValueError("fees_version_changed")
+        with self.lock:
+            if version != self.document["version"]:
+                raise ValueError("fees_version_changed")
+
+    def opening_snapshot(self):
+        """Read one published revision set for the entire opening decision."""
+        try:
+            return FeeSchedules(self.path)
+        except (OSError, ValueError) as error:
+            raise ValueError("fees_source_unavailable") from error
+
+    def require_opening(self, version, legs):
+        if version == "0":
+            raise ValueError("fees_version_missing")
+        with self.lock:
+            self.require_current(version)
+            rows = self.document["revisions"][-1]
+        scopes = {(row["venue"], row["account"], row["product"]) for row in rows}
+        for (venue, account, instrument), product in legs:
+            if (str(venue), str(account), product) not in scopes:
+                raise ValueError(f"fees_missing_leg:{venue}:{account}:{instrument}")
