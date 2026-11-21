@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import hashlib
 import importlib
+import json
 import struct
 from types import SimpleNamespace
 from pathlib import Path
@@ -70,7 +71,29 @@ def config_transition(root, manifest, old_binding, binding, method):
     return state_fields, set(rebuilt)
 
 
-def instance_frames(request, *, engine_session=False):
+def check_opening_fees(outputs, source):
+    current = None
+    for output in outputs:
+        members = (output,) if type(output) is api.OrderIntent else output.members
+        if all(member.portfolio_reduce_only for member in members):
+            continue
+        if source is None:
+            if type(output) is api.FeeCheckedIntentGroup:
+                raise ValueError("fees_source_unavailable")
+            continue
+        if type(output) is not api.FeeCheckedIntentGroup or len(members) != 2:
+            raise ValueError("fees_version_missing")
+        path, deployed_scopes = source
+        if current is None:
+            from opportunity_scanner.fee_schedules import FeeSchedules
+
+            current = FeeSchedules(path)
+        scopes = tuple(deployed_scopes[(member.exchange_account_identity, member.instrument_identity)]
+                       for member in members)
+        current.require_opening(output.fee_version, scopes)
+
+
+def instance_frames(request, *, engine_session=False, opening_fees=None):
     binding, manifest = request["binding"], request["manifest"]
     root = Path(request["package_root"]).resolve()
     config = binding["config_json"].encode("ascii")
@@ -154,6 +177,8 @@ def instance_frames(request, *, engine_session=False):
             before = instance.next_intent_sequence
             outputs = instance.on_event(api.Event(record.shard_sequence, record.event_type,
                                                   record.schema_version, record.payload))
+            if opening_fees is not None:
+                package.require(not outputs, "fee-checked strategy needs reconciled checkpoint before active replay")
             suppressed += api.validate_outputs(outputs, before, instance.next_intent_sequence, manifest, binding)
             callbacks += 1
             package.require(callbacks <= manifest["limits"]["max_warmup_events"], "warmup event budget exhausted")
@@ -239,26 +264,41 @@ def instance_frames(request, *, engine_session=False):
             if (record.event_type, record.schema_version) not in subscriptions:
                 continue
             before = instance.next_intent_sequence
+            previous = validated_snapshot(instance, manifest) if engine_session else None
             outputs = instance.on_event(api.Event(record.shard_sequence, record.event_type,
                                                   record.schema_version, record.payload))
             api.validate_outputs(outputs, before, instance.next_intent_sequence, manifest, binding)
             if activation == 0 or record.shard_sequence <= activation_barrier:
                 continue
+            try:
+                check_opening_fees(outputs, opening_fees)
+            except (KeyError, OSError, ValueError, RecursionError) as error:
+                # No frames from this callback have been published. Restore
+                # progress so the strategy can retry at a newer input.
+                package.require(previous is not None and instance.restore(previous) is None
+                                and instance.next_intent_sequence == before
+                                and validated_snapshot(instance, manifest) == previous, "fee rejection rollback")
+                print("strategy_opening_fees: " + str(error)[:256], file=sys.stderr, flush=True)
+                continue
             for output in outputs:
                 members = (output,) if type(output) is api.OrderIntent else output.members
                 encoded = []
                 for member in members:
+                    price = member.limit_price
+                    exact = type(price) is api.ExactLimitPrice
                     args = SimpleNamespace(strategy_identity=str(int(context.strategy_identity, 16)),
                         activation_identity=str(activation), config_version=context.config_version,
                         intent_sequence=member.intent_sequence, portfolio_identity=member.portfolio_identity,
                         exchange_account_identity=member.exchange_account_identity,
                         instrument_identity=member.instrument_identity, side=member.side,
                         time_in_force=member.time_in_force, portfolio_reduce_only=member.portfolio_reduce_only,
-                        quantity=member.quantity, limit_price=member.limit_price)
+                        quantity=member.quantity, limit_price=price.ticks if exact else price,
+                        limit_price_rules_version=price.rules_version if exact else None,
+                        limit_price_tick_coefficient=price.tick_coefficient if exact else None)
                     encoded.append(bridge.output_frame(payload, args, session))
                 frame = bytearray(encoded[0][:128] + b"".join(e[128:] for e in encoded))
                 struct.pack_into("<I", frame, 12, len(frame))
-                struct.pack_into("<HII", frame, 98, 1 if len(members) == 1 else 2, len(members), 80 * len(members))
+                struct.pack_into("<HII", frame, 98, 1 if len(members) == 1 else 2, len(members), len(frame) - 128)
                 struct.pack_into("<I", frame, 124, bridge.crc32c(frame[:124] + frame[128:]))
                 frames.append(bytes(frame))
         cursor, batch = last, batch + 1
@@ -272,7 +312,7 @@ def instance_frames(request, *, engine_session=False):
             outgoing += 1
 
 
-def run(request_path, engine_session=None):
+def run(request_path, engine_session=None, opening_fees=None):
     request = package.parse_json(Path(request_path).read_bytes())
     requests = request.get("instances", [request])
     package.require(1 <= len(requests) <= 16, "Host instance capacity exceeded")
@@ -291,7 +331,8 @@ def run(request_path, engine_session=None):
                         and item["checkpoint_manifest"] == checkpoint_manifest, "Host aggregate manifest mismatch")
         session = (item["fencing"], item["shard"], item["generation"])
         package.require(session not in sessions, "duplicate Host session")
-        sessions[session] = (instance_frames(item, engine_session=engine_session is not None), {}, item)
+        sessions[session] = (instance_frames(item, engine_session=engine_session is not None,
+                                             opening_fees=opening_fees), {}, item)
     while sessions:
         frame = bridge.read_frame(sys.stdin.buffer)
         package.require(frame[1] in sessions, "unknown Host session")
@@ -314,14 +355,24 @@ def run(request_path, engine_session=None):
 if __name__ == "__main__":
     # argv is supplied by ManagedHost, never a Web-provided command line.
     try:
-        package.require(sys.argv[1:3] == ["--mode", "candidate"] and len(sys.argv) in (4, 7), "invalid Host arguments")
+        package.require(sys.argv[1:3] == ["--mode", "candidate"] and len(sys.argv) in (4, 7, 10), "invalid Host arguments")
         engine_session = None
-        if len(sys.argv) == 7:
+        opening_fees = None
+        if len(sys.argv) >= 7:
             package.require(sys.argv[4] == "--engine-session", "invalid engine Host arguments")
-            engine_session = tuple(map(int, sys.argv[5:]))
+            engine_session = tuple(map(int, sys.argv[5:7]))
             for value in engine_session:
                 package.uint(value)
-        run(sys.argv[3], engine_session)
+        if len(sys.argv) == 10:
+            package.require(sys.argv[7] == "--opening-fees" and Path(sys.argv[8]).is_absolute(),
+                            "invalid opening fees arguments")
+            # Import the runtime's fee reader before any package-local imports.
+            import opportunity_scanner.fee_schedules
+            scopes = {(int(scope["account"]), int(scope["instrument"])):
+                      ((scope["venue"], int(scope["account"]), int(scope["instrument"])), scope["product"])
+                      for scope in json.loads(sys.argv[9])}
+            opening_fees = (sys.argv[8], scopes)
+        run(sys.argv[3], engine_session, opening_fees)
     except Exception as error:
         print(type(error).__name__ + ": " + str(error)[:512], file=sys.stderr, flush=True)
         raise SystemExit(1)

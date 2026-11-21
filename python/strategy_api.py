@@ -1,5 +1,7 @@
 """Fixed StrategyPackage API v1: immutable values, no authority handles."""
 
+from __future__ import annotations
+
 from typing import NamedTuple
 
 from strategy_package import require, uint
@@ -22,6 +24,12 @@ class Event(NamedTuple):
     payload_bytes: bytes
 
 
+class ExactLimitPrice(NamedTuple):
+    ticks: int
+    rules_version: int
+    tick_coefficient: int
+
+
 class OrderIntent(NamedTuple):
     intent_sequence: int
     portfolio_identity: int
@@ -31,11 +39,16 @@ class OrderIntent(NamedTuple):
     time_in_force: str
     portfolio_reduce_only: bool
     quantity: int
-    limit_price: int
+    limit_price: int | ExactLimitPrice
 
 
 class IntentGroup(NamedTuple):
     members: tuple
+
+
+class FeeCheckedIntentGroup(NamedTuple):
+    members: tuple
+    fee_version: str
 
 
 def validate_outputs(outputs, before, after, manifest, binding):
@@ -51,11 +64,15 @@ def validate_outputs(outputs, before, after, manifest, binding):
         if type(output) is OrderIntent:
             kind, members = "order_intent", (output,)
         else:
-            require(type(output) is IntentGroup and type(output.members) is tuple
+            require(type(output) in (IntentGroup, FeeCheckedIntentGroup) and type(output.members) is tuple
                     and 2 <= len(output.members) <= 4, "expected complete group")
             kind, members = "intent_group", output.members
+            if type(output) is FeeCheckedIntentGroup:
+                version = output.fee_version
+                require(type(version) is str and len(version) <= 20 and version.isascii()
+                        and version.isdecimal() and not version.startswith("0"), "invalid fee version")
         require(kind in manifest["output_kinds"], "undeclared output kind")
-        require(128 + 80 * len(members) <= limits["max_output_frame_bytes"], "output frame capacity")
+        member_sizes = set()
         for member in members:
             require(type(member) is OrderIntent, "expected OrderIntent")
             uint(member.intent_sequence)
@@ -67,8 +84,18 @@ def validate_outputs(outputs, before, after, manifest, binding):
                     "output ownership mismatch")
             require(member.side in ("buy", "sell") and member.time_in_force in ("gtc", "ioc", "post-only")
                     and type(member.portfolio_reduce_only) is bool, "invalid order flags")
-            for value in (member.quantity, member.limit_price):
-                uint(value, 63)
+            uint(member.quantity, 63)
+            price = member.limit_price
+            if type(price) is ExactLimitPrice:
+                uint(price.ticks, 63)
+                uint(price.rules_version, 64)
+                uint(price.tick_coefficient, 127)
+                member_sizes.add(104)
+            else:
+                uint(price, 63)
+                member_sizes.add(80)
             count += 1
+        require(len(member_sizes) == 1 and 128 + len(members) * next(iter(member_sizes)) <=
+                min(448, limits["max_output_frame_bytes"]), "output frame capacity or mixed price units")
     require(after == before + count, "next IntentSequence mismatch")
     return count

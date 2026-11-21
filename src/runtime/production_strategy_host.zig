@@ -18,6 +18,7 @@ pub const Config = struct {
     request: []const u8,
     checkpoint: []const u8,
     checkpoint_sha256: []const u8,
+    manual_fees: ?[]const u8 = null,
 };
 
 const Request = struct {
@@ -27,11 +28,13 @@ const Request = struct {
         decision_domain: []const u8,
         portfolio_identity: []const u8,
         config_version: u64,
+        scopes: []const struct { exchange_account: []const u8, instrument: []const u8 } = &.{},
     },
     manifest: struct {
         state_schema: struct { identity: []const u8, version: u32 },
         compatibility: struct { python_abi: u32 },
         subscriptions: []const struct { event_type: bridge.EventType, schema_version: u16 },
+        limits: struct { max_output_frames_per_event: u8 },
     },
     recover: bool,
     checkpoint_cursor: u64,
@@ -46,6 +49,7 @@ pub const Host = struct {
     cursor: u64,
     delivered_events: u64 = 0,
     activation_ack: ?u64 = null,
+    opening_fees_configured: bool = false,
 
     pub fn start(init: std.process.Init, owner: *Owner, generation: u64, config: Config) !*Host {
         for ([_][]const u8{ config.python, config.script, config.request, config.checkpoint }) |path|
@@ -55,6 +59,9 @@ pub const Host = struct {
         const parsed = try std.json.parseFromSlice(Request, init.gpa, request_bytes, .{ .ignore_unknown_fields = true });
         defer parsed.deinit();
         const request = parsed.value;
+        if (request.manifest.limits.max_output_frames_per_event > output_limit or
+            (config.manual_fees != null and request.manifest.limits.max_output_frames_per_event != 1))
+            return error.InvalidFormalHostOutputCapacity;
         const checkpoint = try readBounded(init, config.checkpoint, checkpoint_limit);
         defer init.gpa.free(checkpoint);
         var digest: [32]u8 = undefined;
@@ -111,17 +118,26 @@ pub const Host = struct {
         }, &.{subscription});
         var fencing_text: [20]u8 = undefined;
         var generation_text: [20]u8 = undefined;
+        var args: [7][]const u8 = undefined;
+        args[0..4].* = .{
+            config.request,
+            "--engine-session",
+            try std.fmt.bufPrint(&fencing_text, "{d}", .{plan.session.fencing}),
+            try std.fmt.bufPrint(&generation_text, "{d}", .{generation}),
+        };
+        const fee_scopes = if (config.manual_fees) |path| blk: {
+            if (!std.fs.path.isAbsolute(path)) return error.InvalidStrategyHostPath;
+            break :blk try encodeFeeScopes(init.gpa, shard, request.binding);
+        } else null;
+        defer if (fee_scopes) |bytes| init.gpa.free(bytes);
+        if (fee_scopes) |bytes| args[4..7].* = .{ "--opening-fees", config.manual_fees.?, bytes };
         const host = try init.gpa.create(Host);
         errdefer init.gpa.destroy(host);
         host.* = .{
-            .process = try lifecycle.ManagedHost.start(init, config.python, config.script, plan, "candidate", &.{
-                config.request,
-                "--engine-session",
-                try std.fmt.bufPrint(&fencing_text, "{d}", .{plan.session.fencing}),
-                try std.fmt.bufPrint(&generation_text, "{d}", .{generation}),
-            }),
+            .process = try lifecycle.ManagedHost.start(init, config.python, config.script, plan, "candidate", args[0..if (fee_scopes == null) @as(usize, 4) else 7]),
             .gateway = gateway,
             .cursor = metadata.strategy_cursor,
+            .opening_fees_configured = fee_scopes != null,
         };
         errdefer host.process.deinit(init.io);
         try host.process.sendPlan(init.io);
@@ -175,6 +191,7 @@ pub const Host = struct {
         // Coverage includes the committed HostActivated fact. A zero-output ACK
         // at this exact sequence is required before accepting any active batch.
         try host.deliver(owner, recovery_barrier, applied.fact_sequence, true);
+        try host.gateway.activate(&owner.shard, &owner.decision_journal);
         host.activation_ack = applied.fact_sequence;
         std.debug.print("strategy_host_activation: generation={d} committed={d} ack={d} outputs_before_ack=0\n", .{
             generation, applied.fact_sequence, host.activation_ack.?,
@@ -185,7 +202,15 @@ pub const Host = struct {
 
     pub fn pump(self: *Host, owner: *Owner) !void {
         if (self.activation_ack == null) return error.StrategyHostActivationMissing;
-        try self.deliver(owner, self.cursor, (try owner.source()).authoritativeBarrier(), false);
+        errdefer {
+            self.activation_ack = null;
+            self.gateway.beginRecovery();
+            revoke(owner, self.gateway.config.authorization) catch |err|
+                std.log.err("strategy_host_revoke: {s}", .{@errorName(err)});
+        }
+        while (self.cursor < (try owner.source()).authoritativeBarrier()) {
+            try self.deliver(owner, self.cursor, (try owner.source()).authoritativeBarrier(), false);
+        }
     }
 
     pub fn readyStrategy(self: *const Host, owner: *const Owner) !?u128 {
@@ -207,13 +232,71 @@ pub const Host = struct {
     fn deliver(self: *Host, owner: *Owner, after: u64, through: u64, suppress: bool) !void {
         if (after == through) return;
         var delivery: Delivery = .{ .host = self, .io = owner.io, .seen = after, .through = through, .suppress = suppress };
-        try owner.store.replaySegmentsAfter(owner.io, owner.stream, after, std.math.maxInt(usize), .{
-            .ptr = &delivery,
-            .consume_fn = Delivery.segment,
-        });
+        while (delivery.seen < through) {
+            owner.store.replaySegmentsAfter(owner.io, owner.stream, delivery.seen, std.math.maxInt(usize), .{
+                .ptr = &delivery,
+                .consume_fn = Delivery.segment,
+            }) catch |err| switch (err) {
+                error.HostOutputPending => {
+                    // Writing the decision may perform store reads of its own.
+                    // Leave the replay consumer before mutating Writer state.
+                    for (delivery.decisions[0..delivery.output_count]) |decision| {
+                        const shard = try owner.source();
+                        const seq = try std.math.add(u64, shard.authoritativeBarrier(), 1);
+                        const utc: u64 = @intCast(std.Io.Clock.real.now(owner.io).nanoseconds);
+                        _ = try owner.apply(.{ .core = .{
+                            .identity = seq,
+                            .source_time = utc,
+                            .receive_time = utc,
+                            .monotonic_time = @intCast(now(owner.io)),
+                            .wall_time = utc,
+                            .time_presence = .{ .source = true, .receive = true, .monotonic = true, .wall = true },
+                            .payload = try self.writerPayload(shard, decision),
+                        } });
+                    }
+                    delivery.output_count = 0;
+                    continue;
+                },
+                else => return err,
+            };
+            break;
+        }
         if (delivery.seen != through or self.cursor != through) return error.StrategyHostSequenceGap;
     }
+
+    fn writerPayload(self: *const Host, shard: *const trading.TradingShard, decision: bridge.Decision) !trading.CorePayload {
+        if (!self.opening_fees_configured and decision == .accepted_group) {
+            const identity = self.gateway.config.authorization.strategy_identity;
+            if (shard.pairTradingScopeBound(identity) or shard.pair_authorizations.hasHistory(identity)) {
+                const group = try bridge.decodeIntentGroup(decision.accepted_group.frame());
+                if (!group.members[0].portfolio_reduce_only) return .{ .strategy_intent_rejected = .{
+                    .reason = .unauthorized,
+                    .strategy_identity = identity,
+                    .intent_sequence = group.members[0].intent_sequence,
+                } };
+            }
+        }
+        return decision.corePayload();
+    }
 };
+
+fn encodeFeeScopes(gpa: std.mem.Allocator, shard: *const trading.TradingShard, binding: @FieldType(Request, "binding")) ![]const u8 {
+    const Scope = struct { venue: u64, account: u128, instrument: u128, product: []const u8 };
+    var scopes: [256]Scope = undefined;
+    if (binding.scopes.len == 0 or binding.scopes.len > scopes.len) return error.InvalidStrategyFeeScopes;
+    for (binding.scopes, scopes[0..binding.scopes.len]) |scope, *result| {
+        const account = try parseIdentity(scope.exchange_account);
+        const instrument = try parseIdentity(scope.instrument);
+        const entry = shard.pairInstrument(account, instrument) orelse return error.InvalidStrategyFeeScopes;
+        if (shard.deployment.owner(account, instrument) != shard.decision_domain_identity)
+            return error.InvalidStrategyFeeScopes;
+        result.* = .{ .venue = entry.venue, .account = account, .instrument = instrument, .product = switch (entry.product) {
+            .spot => "spot",
+            .isolated_linear => "linear",
+        } };
+    }
+    return std.json.Stringify.valueAlloc(gpa, scopes[0..binding.scopes.len], .{});
+}
 
 const Delivery = struct {
     host: *Host,
@@ -221,6 +304,8 @@ const Delivery = struct {
     seen: u64,
     through: u64,
     suppress: bool,
+    decisions: [output_limit]bridge.Decision = undefined,
+    output_count: usize = 0,
 
     fn segment(context: *anyopaque, bytes: []const u8) !void {
         const self: *Delivery = @ptrCast(@alignCast(context));
@@ -237,6 +322,7 @@ const Delivery = struct {
                 if (record.sequence <= self.host.cursor) continue;
                 const events: []const bridge.EventEnvelope = if (event) |item| &.{item} else &.{};
                 try self.send(record.sequence, events);
+                if (self.output_count != 0) return error.HostOutputPending;
             },
         };
     }
@@ -294,11 +380,11 @@ const Delivery = struct {
         try self.host.process.sendInput(self.io, batch, timestamp);
         try self.host.gateway.recordPublished(self.host.process.next_input_batch - 1, sequence, timestamp);
         const outputs = try self.host.process.receiveBatchAck(self.io, now(self.io), if (self.suppress) 0 else output_limit);
-        // Formal role risk is locked behind signed control. Drain bounded Host
-        // frames here without forwarding them to TradingShard or a Venue.
-        for (0..outputs) |_| {
+        self.output_count = @intCast(outputs);
+        for (self.decisions[0..self.output_count]) |*decision| {
             var storage: [1024]u8 = undefined;
-            _ = try self.host.process.receiveOutput(self.io, now(self.io), &storage);
+            const frame = try self.host.process.receiveOutput(self.io, now(self.io), &storage);
+            decision.* = self.host.gateway.ingest(frame, now(self.io));
         }
         self.host.gateway.retainLatestPublication();
         self.host.delivered_events += events.len;
@@ -307,7 +393,9 @@ const Delivery = struct {
 };
 
 fn revoke(owner: *Owner, auth: bridge.Authorization) !void {
-    const seq = try std.math.add(u64, (try owner.source()).authoritativeBarrier(), 1);
+    const shard = try owner.source();
+    if (shard.strategyAuthority(auth.strategy_identity).host_activation_identity != auth.activation_identity) return;
+    const seq = try std.math.add(u64, shard.authoritativeBarrier(), 1);
     _ = try owner.apply(.{ .core = .{ .identity = seq, .payload = .{ .host_activation_revoked = .{
         .strategy_identity = auth.strategy_identity,
         .activation_identity = auth.activation_identity,

@@ -331,9 +331,23 @@ verifies the recovered checkpoint, commits `HostActivated` and waits for the
 Host to acknowledge that exact fact sequence with zero output frames. A
 failed or mismatched acknowledgment terminates the session and revokes its
 activation. The Web projection reports `Ready` for the acknowledged live
-instance. The formal role keeps trading disabled and drains Host output at the pipe
-boundary. Signed trading enablement and dispatch remain separate from Host
-readiness.
+instance. After acknowledgment, the engine validates active output against the
+published batches and submits the decisions to the Writer. Trading admission
+uses the committed authorization and the Writer's current pair approval.
+Signed trading enablement and dispatch remain separate from Host readiness.
+
+For a cross-Venue opening, configure `strategy_host.manual_fees` in
+`engine.json` with the absolute path of the Web node's published
+`manual-fees.json`. The runtime maps the strategy's configured scopes to the
+Writer's deployed Venue, ExchangeAccount and product. The package returns a
+`FeeCheckedIntentGroup` with the fee version used to evaluate its two-leg
+opening. The Host rereads the file and requires both deployed fee rows under
+that version before publishing the frame. A fee rejection restores the private
+state and intent sequence from before the callback. Fee-checked packages emit
+at most one frame per callback and need a reconciled checkpoint when recovery
+would otherwise regenerate an actionable output. Reduce-only intents continue through
+the normal admission path. Exact limit prices carry price ticks, the
+InstrumentRules version and the scale-18 decimal tick coefficient.
 
 The configured `market_feed` role reads its own capture. For OKX public data,
 its `market-recovery.json` contains the same `source`, the original

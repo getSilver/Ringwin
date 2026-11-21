@@ -256,21 +256,16 @@ class Action:
     cancels: tuple = ()
     profit: object = None
 
-    def encode(self, batch, session, *, activation):
-        """Use the existing Host output codec; the core still validates admission.
+    def package_output(self, *, fee_version=None):
+        """Translate a strategy action for the fixed StrategyPackage callback."""
+        import strategy_api as api
 
-        Two intents use schema 2 (Independent policy), preserving ordered group
-        identity and per-leg parameters. Follow-up requests retain cycle via the
-        caller's core cycle association; wire association must be integrated.
-        """
         if self.cancels:
             raise b.Rejected("cancel_projection_requires_core_mapping")
         if not self.intents:
             raise b.Rejected("no_output")
-        _identity(activation)
-        if len(batch) < 96 or struct.unpack_from("<Q", batch, 88)[0] != self.cursor:
-            raise b.Rejected("output_cursor")
-        def args(intent):
+        members = []
+        for intent in self.intents:
             leg = self.plan.legs[intent.leg]
             if type(intent.limit_ticks) is not int or not 0 < intent.limit_ticks < 1 << 63:
                 raise b.Rejected(f"leg_{intent.leg}_limit_price_ticks")
@@ -285,16 +280,34 @@ class Action:
             if tick.denominator != 1 or not 0 < tick.numerator < 1 << 127:
                 raise b.Rejected(f"leg_{intent.leg}_limit_price_tick_unit")
             direction = -leg.direction if intent.reducing else leg.direction
+            members.append(api.OrderIntent(intent.sequence, self.plan.portfolio, leg.account, leg.rules.instrument,
+                "buy" if direction == 1 else "sell", intent.time_in_force, intent.reducing, intent.lots,
+                api.ExactLimitPrice(intent.limit_ticks, leg.rules.version, tick.numerator)))
+        members = tuple(members)
+        if fee_version is not None:
+            if len(members) != 2 or any(member.portfolio_reduce_only for member in members):
+                raise b.Rejected("fee_checked_opening_group")
+            return api.FeeCheckedIntentGroup(members, fee_version)
+        return api.IntentGroup(members) if len(members) > 1 else members[0]
+
+    def encode(self, batch, session, *, activation):
+        """Use the same exact prices in the portable Host bridge."""
+        _identity(activation)
+        if len(batch) < 96 or struct.unpack_from("<Q", batch, 88)[0] != self.cursor:
+            raise b.Rejected("output_cursor")
+        output = self.package_output()
+        def args(member):
             return SimpleNamespace(strategy_identity=str(self.plan.strategy), activation_identity=str(activation),
-                config_version=self.plan.config_version, side="buy" if direction == 1 else "sell",
-                time_in_force=intent.time_in_force, portfolio_reduce_only=intent.reducing, intent_sequence=intent.sequence,
-                portfolio_identity=self.plan.portfolio, exchange_account_identity=leg.account,
-                instrument_identity=leg.rules.instrument, quantity=intent.lots, limit_price=intent.limit_ticks,
-                limit_price_rules_version=leg.rules.version, limit_price_tick_coefficient=tick.numerator)
-        first = args(self.intents[0])
+                config_version=self.plan.config_version, side=member.side, time_in_force=member.time_in_force,
+                portfolio_reduce_only=member.portfolio_reduce_only, intent_sequence=member.intent_sequence,
+                portfolio_identity=member.portfolio_identity, exchange_account_identity=member.exchange_account_identity,
+                instrument_identity=member.instrument_identity, quantity=member.quantity, limit_price=member.limit_price.ticks,
+                limit_price_rules_version=member.limit_price.rules_version,
+                limit_price_tick_coefficient=member.limit_price.tick_coefficient)
         if len(self.intents) == 2:
-            return host.output_group_frame(batch, first, session, self.intents[0].sequence, args(self.intents[1]))
-        return host.output_frame(batch, first, session)
+            first, second = map(args, output.members)
+            return host.output_group_frame(batch, first, session, first.intent_sequence, second)
+        return host.output_frame(batch, args(output), session)
 
 
 class Cycle:

@@ -34,7 +34,7 @@ pub fn initializeMixedEnvironmentPairOwner(owner: *demo.Owner) !void {
     try configurePairLeg(owner, 20, 103, true);
 }
 
-fn configurePairAssetsForScenario(owner: *demo.Owner, expanded_economics: bool) !void {
+pub fn configurePairAssetsForScenario(owner: *demo.Owner, expanded_economics: bool) !void {
     for ([_]u128{ 20, 30 }, [_]u128{ 101, 102 }) |account, instrument|
         try configurePairLeg(owner, account, instrument, expanded_economics);
 }

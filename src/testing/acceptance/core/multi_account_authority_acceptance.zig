@@ -1763,7 +1763,7 @@ noinline fn reconcileAccountView(owner: *demo.Owner, account: u128, gateway: *@i
         .bill_chain_digest = history.hash("all bills in exact interval"),
     };
     for (evidence.before_balances[0..evidence.before_balance_count], 0..) |balance, index| {
-        evidence.balances[index] = .{ .asset = balance.asset, .atoms = if (balance.asset == 1) state.economic_projection.exchange.settlement_balance_atoms else if (state.economic_projection.exchange.nativeAsset(balance.asset)) |native| native.balance_atoms else 0 };
+        evidence.balances[index] = .{ .asset = balance.asset, .atoms = if (balance.asset == state.economic_projection.settlement_asset) state.economic_projection.exchange.settlement_balance_atoms else if (state.economic_projection.exchange.nativeAsset(balance.asset)) |native| native.balance_atoms else 0 };
         evidence.asset_versions[index] = 1;
     }
     if (state.economic_projection.base_asset != 0 and cursor == null) {
@@ -1784,6 +1784,13 @@ noinline fn reconcileAccountView(owner: *demo.Owner, account: u128, gateway: *@i
     window.venue.envelope.exchange_account = account;
     window.venue.envelope.venue = if (account == 20) 1 else 21;
     window.venue.envelope.raw_evidence = evidence.source;
+    for (owner.shard.oms.orders[0..owner.shard.oms.order_count]) |order| {
+        if (order.exchange_account == account and order.terminal_observed_at_utc_ns > window.venue.envelope.times.source_utc_ns.?) {
+            window.venue.envelope.times.source_utc_ns = order.terminal_observed_at_utc_ns;
+            window.venue.envelope.times.receive_utc_ns = order.terminal_observed_at_utc_ns;
+            window.venue.envelope.times.audit_utc_ns = order.terminal_observed_at_utc_ns;
+        }
+    }
     window.venue.event.account_reconciliation_result.account_economics.?.through_utc_ns = window.venue.envelope.times.source_utc_ns.?;
     try applyAdapterInput(owner, window);
     const after = state;

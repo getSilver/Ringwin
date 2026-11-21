@@ -493,9 +493,9 @@ fn serveRole(init: std.process.Init, role: Role, socket_path: []const u8, startu
                     const size = try readFrameInt(&stream, init.io, u32);
                     if (size == 0 or size > production_engine.max_input_bytes) return error.InvalidCanonicalFrame;
                     try readExact(&stream, init.io, frame[0..size]);
-                    const cursor = try production_engine.ingest(active_engine.owner, frame[0..size]);
+                    _ = try production_engine.ingest(active_engine.owner, frame[0..size]);
                     try live_engine.?.pumpHost();
-                    break :blk .{ .cursor = cursor };
+                    break :blk .{ .cursor = (try active_engine.owner.source()).authoritativeBarrier() };
                 } else try production_engine.nextCommittedRecord(active_engine.owner, try readFrameInt(&stream, init.io, u64), &frame);
                 var output_buffer: [256]u8 = undefined;
                 var output = stream.writer(init.io, &output_buffer);

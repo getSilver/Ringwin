@@ -216,6 +216,8 @@ pub fn main(init: std.process.Init) !void {
     const selection = args.next();
     if (args.next() != null) return error.UnknownArgument;
     if (selection) |value| {
+        if (std.mem.eql(u8, value, "--formal-dual-ioc-only"))
+            return @import("production_dual_ioc_integration.zig").run(init, python);
         if (!std.mem.eql(u8, value, "--public-depth-only")) return error.UnknownArgument;
         return runCycleRecovery(init, python, .holding, .keep, .public_depth);
     }

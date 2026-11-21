@@ -33,11 +33,14 @@ PASSPHRASE = "scanner-offline-acceptance-only"
 
 
 def canonical_fixture(accounts=(20, 30), environments=("production", "production"), market_sources=(None, None),
-                      instruments=(101, 102)):
+                      instruments=(101, 102), mixed_stablecoins=False):
     old, plan = fixture()
     rules = tuple(replace(o.rules, instrument=instruments[i], version=2, base_asset=0x425443,
                           base_atoms_per_lot=F(100_000_000), tick_quote_atoms_per_base_atom=F(1, 1000))
                   for i, o in enumerate(old))
+    if mixed_stablecoins:
+        rules = (replace(rules[0], quote_unit=("USDT", 6)),
+                 replace(rules[1], quote_unit=("USDT", 6), settlement=(3, "USDC", 6)))
     def book(payload):
         item = s.decode_depth_snapshot(payload)
         item.update(instrument={1: instruments[0], 2: instruments[1]}.get(item["instrument"], item["instrument"]), rules_version=2)
