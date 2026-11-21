@@ -36,7 +36,6 @@ Status: open
 
 ## Frontier
 
-- [04 手动费率贯穿扫描和开仓复核](issues/04-fees.md)
 - [08 从机会页将一条路线加入指定策略](issues/08-approve.md)
 - [09 从策略页查询和撤销持久批准](issues/09-revoke.md)
 - [15 滚动归档并测出持续扫描容量](issues/15-capacity.md)
@@ -50,6 +49,8 @@ Status: open
 扫描节点通过现有只读核心投影读取生效资产登记。候选和归档证据引用当时的登记版本，验收范围见 [02](issues/02-assets.md)。
 
 [03](issues/03-pairing.md) 按核心登记资产匹配跨环境路线，为全部产品搭配生成两个方向并逐腿记录行情来源与缺项。广域轮转和实际覆盖由 [14](issues/14-coverage.md) 验证。
+
+[04](issues/04-fees.md) 以离线费率保存、扫描重算、历史重放及策略开仓复核证据关闭，解除 [06](issues/06-evaluation.md) 的阻塞。正式 StrategyHost 费率接线和开仓验收由 [11](issues/11-dual-ioc.md) 承接，使用 [08](issues/08-approve.md) 提供的账户绑定。
 
 [06](issues/06-evaluation.md) 已通过同结算币离线验收，覆盖固定金额净边际、逐腿行情年龄、材料缺失撤回及归档复算。
 

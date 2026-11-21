@@ -1,5 +1,7 @@
 # OKX／Hyperliquid 扫描运行
 
+当前前端与默认运行入口的业务断点、用户确认的产品与环境配对规则，以及广域扫描优化方案见[跨所价差套利业务审计与优化建议](research/2026-11-19-cross-venue-arbitrage-workflow.md)。
+
 现有 OwnerSession Web 控制面的只读运行组装，无需加载 StrategyInstance，不持有交易凭证、VenueAdapter、风险预留或发送能力。没有核心桥时，白名单批准返回不可用。
 
 Python 跨场所策略实现位于 `python/strategies/cross_venue/`，机会扫描器位于 `python/opportunity_scanner/`；策略宿主和控制面继续使用各自的共享模块。
