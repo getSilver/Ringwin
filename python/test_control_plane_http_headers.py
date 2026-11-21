@@ -7,6 +7,7 @@ import socket
 import struct
 import tempfile
 import threading
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -19,6 +20,93 @@ import strategy_package
 
 
 class HttpHeaderAuthenticationTest(unittest.TestCase):
+    def test_strategy_pair_revocation_recovers_lost_receipt_after_web_restart(self):
+        strategy, portfolio, approval = (f"{value:032x}" for value in (9, 10, 98766))
+        path = "/api/strategy-pairs"
+        binding = dict(strategy_identity=strategy, portfolio_identity=portfolio)
+        revoke = dict(binding, operation="revoke_pair", identity=approval)
+        query = dict(revoke, operation="pair_revocation_status")
+        receipt = dict(identity="98766", status="accepted", core_version="2", barrier="70")
+        pair = dict(identity=approval)
+        frames = []
+        effective = [pair]
+
+        def relay_responses(stream, operations):
+            with stream, stream.makefile("rb") as reader:
+                for operation in operations:
+                    prefix = reader.read(5)
+                    request = json.loads(reader.read(struct.unpack("<I", prefix[1:])[0]))
+                    frames.append((prefix[0:1], request))
+                    if operation == "drop_revocation_reply":
+                        effective.clear()
+                        return
+                    if operation == "strategy_instances":
+                        response = {"instances": [{"binding": binding, "pair_trading_list": effective}]}
+                    else:
+                        response = receipt
+                    payload = strategy_package.canonical(response)
+                    stream.sendall(struct.pack("<I", len(payload)) + payload)
+
+        with tempfile.TemporaryDirectory() as directory:
+            password = secrets.token_urlsafe(24)
+            owner_session.PassphraseStore(directory).set(password)
+            totp = owner_session.TotpStore(directory).initialize()
+            started_at = int(time.time())
+            for restart, operations in enumerate((
+                    ("strategy_instances", "drop_revocation_reply"),
+                    ("pair_revocation_status", "revoke_pair", "strategy_instances"))):
+                web, relay = socket.socketpair()
+                with web, relay:
+                    relay.settimeout(5)
+                    worker = threading.Thread(target=relay_responses, args=(relay, operations), daemon=True)
+                    worker.start()
+                    authority = control_plane_node.EngineStrategyAuthority(web)
+                    commands = control_plane.CommandServer(secrets.token_bytes(32))
+                    with control_plane_node.open_node_web(directory=directory, ui_path=Path(directory, "index.html"),
+                            port=0, projection=None, command_server=commands,
+                            engine_strategy_authority=authority) as (app, server):
+                        now = started_at + restart * owner_session.TOTP_STEP
+                        app.clock = lambda: now
+                        status, login = app.login(password, owner_session.totp_at(totp, now), "test")
+                        self.assertEqual(status, 200)
+                        headers = {"Cookie": "owner_session=" + login["session_token"],
+                                   "X-Owner-CSRF": login["csrf_token"]}
+                        web_thread = threading.Thread(target=server.serve_forever, daemon=True)
+                        web_thread.start()
+                        connection = http.client.HTTPConnection(*server.server_address, timeout=5)
+
+                        def send(method, url, document=None, request_headers=headers):
+                            connection.request(method, url, json.dumps(document) if document else None, request_headers)
+                            response = connection.getresponse()
+                            return response.status, json.load(response)
+
+                        try:
+                            if not restart:
+                                self.assertEqual(send("POST", path, revoke, {})[0], 401)
+                                self.assertEqual(send("POST", path, revoke, {"Cookie": headers["Cookie"]})[0], 403)
+                                status, result = send("GET", "/api/strategy-instances")
+                                self.assertEqual(status, 200)
+                                self.assertEqual(result["instances"][0]["pair_trading_list"], [pair])
+                                self.assertEqual(send("POST", path, revoke)[0], 503)
+                            else:
+                                for request in (query, revoke):
+                                    status, result = send("POST", path, request)
+                                    self.assertEqual(status, 200)
+                                    self.assertEqual(result["result"], receipt)
+                                status, result = send("GET", "/api/strategy-instances")
+                                self.assertEqual(status, 200)
+                                self.assertEqual(result["instances"][0]["pair_trading_list"], [])
+                        finally:
+                            connection.close()
+                            server.shutdown()
+                            web_thread.join(timeout=5)
+                            worker.join(timeout=5)
+        revoke_frame = (b"Q", dict(operation="revoke_pair", strategy="9", portfolio="10", identity="98766"))
+        query_frame = (b"P", dict(operation="pair_revocation_status", strategy_identity=strategy,
+                                  portfolio="10", identity="98766"))
+        instances_frame = (b"P", {"operation": "strategy_instances"})
+        self.assertEqual(frames, [instances_frame, revoke_frame, query_frame, revoke_frame, instances_frame])
+
     def test_node_supplies_strategy_management_to_the_existing_web_launcher(self):
         with tempfile.TemporaryDirectory() as directory:
             strategy = f"{9:032x}"

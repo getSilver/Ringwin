@@ -194,10 +194,21 @@ fn exercisePairMutation(comptime scenario: enum { ordinary, partial, replacement
         _ = try owner.apply(fixture.atGroup(48, .{ .identity = 13000, .payload = .{ .oms_intent_group = amendment } }));
         try std.testing.expectEqual(trading.oms.OrderState.pending_cancel, owner.shard.oms.orderById(1).?.state);
     }
-    request.identity += 1;
-    request.expected_version = 1;
-    request.enabled = false;
-    _ = try owner.apply(fixture.atGroup(48, .{ .identity = 98766, .payload = .{ .pair_trading_authorization = request } }));
+    if (scenario == .ordinary) {
+        for (1..approval.max_history) |version| {
+            if (version == approval.max_history / 2) try owner.checkpoint();
+            request.identity += 1;
+            request.expected_version = version;
+            _ = try owner.apply(fixture.atGroup(48, .{ .identity = @intCast(request.identity), .payload = .{ .pair_trading_authorization = request } }));
+        }
+        try std.testing.expectEqual(@as(u64, approval.max_history), owner.shard.pair_authorizations.version);
+        try std.testing.expect(!owner.shard.pairTradingListEmpty(9));
+    }
+    _ = try owner.apply(fixture.atGroup(48, .{ .identity = 99030, .payload = .{ .pair_trading_revocation = .{
+        .identity = request.identity,
+        .strategy = request.strategy,
+        .portfolio = request.portfolio,
+    } } }));
     if (scenario == .ordinary) {
         try std.testing.expect(owner.shard.pairTradingListEmpty(9));
         try expectOpeningRejected(owner, group, 12600, 48);

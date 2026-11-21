@@ -133,6 +133,7 @@ pub const EventKind = enum(u16) {
     residual_state_committed,
     canonical_market_trade,
     pair_trading_scope_bound,
+    pair_trading_revoked,
 };
 
 pub const Fact = struct {
@@ -452,6 +453,7 @@ pub const PayloadTag = enum(u16) {
     spot_residual_rule,
     pair_trading_authorization,
     pair_trading_scope_bound,
+    pair_trading_revocation,
 };
 
 pub const ReservationModel = enum(u8) { leveraged, cash };
@@ -648,6 +650,7 @@ pub const CorePayload = union(PayloadTag) {
     spot_residual_rule: @import("cycle_occupancy.zig").ResidualRule,
     pair_trading_authorization: @import("pair_trading_authorization.zig").Request,
     pair_trading_scope_bound: u128,
+    pair_trading_revocation: @import("pair_trading_authorization.zig").Revocation,
 };
 
 /// Typed core-originated event carried by the authoritative CanonicalEvent.
@@ -691,6 +694,11 @@ pub fn encodeInput(destination: []u8, input: CoreEvent) !EncodedInput {
     if (input.account_scope) |account| try encoded.put(u128, account);
     switch (input.payload) {
         .pair_trading_scope_bound => |strategy| try encoded.put(u128, strategy),
+        .pair_trading_revocation => |value| {
+            try encoded.put(u128, value.identity);
+            try encoded.put(u128, value.strategy);
+            try encoded.put(u128, value.portfolio);
+        },
         .pair_trading_authorization => |value| {
             const bytes = try @import("../persistence/snapshot_codec.zig").encodeBare(encoded.bytes[encoded.len..], value);
             encoded.len += bytes.len;
@@ -1113,6 +1121,11 @@ pub fn decodeInput(record: journal.Record) !CoreEvent {
     const account_scope: ?u128 = if (try readInputBool(record.payload, &offset)) try readInputValue(u128, record.payload, &offset) else null;
     const payload: CorePayload = switch (tag) {
         .pair_trading_scope_bound => .{ .pair_trading_scope_bound = try readInputValue(u128, record.payload, &offset) },
+        .pair_trading_revocation => .{ .pair_trading_revocation = .{
+            .identity = try readInputValue(u128, record.payload, &offset),
+            .strategy = try readInputValue(u128, record.payload, &offset),
+            .portfolio = try readInputValue(u128, record.payload, &offset),
+        } },
         .pair_trading_authorization => blk: {
             var value: @import("pair_trading_authorization.zig").Request = undefined;
             value = try @import("../persistence/snapshot_codec.zig").decodeBare(record.payload[offset..], @TypeOf(value));

@@ -521,6 +521,7 @@ pub const TradingShard = struct {
     instrument_registry: instrument_registry.Registry = .{},
 
     pair_trading_scopes: ?[16]u128 = null,
+    pair_revocations: ?@import("pair_trading_authorization.zig").Revocations = null,
     pub const snapshot_optional_tail = "pair_trading_scopes";
 
     /// The sole public core ingress seam. Both typed core events and canonical
@@ -1707,11 +1708,33 @@ pub const TradingShard = struct {
     }
 
     pub fn effectivePairAuthorization(self: *const TradingShard, strategy: u128, index: usize) ?@import("pair_trading_authorization.zig").Record {
-        if (index >= self.pair_authorizations.count) return null;
-        const record = self.pair_authorizations.records[index];
-        if (record.request.strategy != strategy or !self.pair_authorizations.isCurrent(index)) return null;
+        const record = self.currentPairApproval(strategy, index) orelse return null;
         self.validatePairAuthorization(record.request) catch return null;
         return record;
+    }
+
+    pub fn currentPairApproval(self: *const TradingShard, strategy: u128, index: usize) ?@import("pair_trading_authorization.zig").Record {
+        if (index >= self.pair_authorizations.count) return null;
+        const record = self.pair_authorizations.records[index];
+        if (record.request.strategy != strategy or !self.pair_authorizations.isCurrent(index, self.pairRevocations())) return null;
+        return record;
+    }
+
+    fn pairRevocations(self: *const TradingShard) ?*const @import("pair_trading_authorization.zig").Revocations {
+        return if (self.pair_revocations) |*receipts| receipts else null;
+    }
+
+    pub fn pairRevocationIndex(self: *const TradingShard, request: @import("pair_trading_authorization.zig").Revocation) !usize {
+        const index = self.pair_authorizations.historyIndex(request.identity) orelse return error.UnknownPairApproval;
+        const approval = self.pair_authorizations.records[index].request;
+        if (approval.strategy != request.strategy or approval.portfolio != request.portfolio or !approval.enabled)
+            return error.UnknownPairApproval;
+        return index;
+    }
+
+    pub fn pairRevocationReceipt(self: *const TradingShard, index: usize) ?@import("pair_trading_authorization.zig").RevocationReceipt {
+        const receipts = self.pairRevocations() orelse return null;
+        return receipts[index];
     }
 
     fn pairSettlementCompatible(self: *const TradingShard, entries: [2]InstrumentEntry) bool {
@@ -2174,7 +2197,7 @@ pub const TradingShard = struct {
         const cycle = self.cycles.owningForPortfolio(.{ .account = intent.exchange_account, .instrument = intent.instrument }, intent.portfolio) orelse return error.PairNotAuthorized;
         if (cycle.strategy != intent.strategy_instance) return error.PairNotAuthorized;
         const authority = self.strategyAuthority(intent.strategy_instance);
-        const approval = self.pair_authorizations.allowedAmendment(intent, cycle.members[0..cycle.count], authority.strategy_config_version) orelse return error.PairNotAuthorized;
+        const approval = self.pair_authorizations.allowedAmendment(intent, cycle.members[0..cycle.count], authority.strategy_config_version, self.pairRevocations()) orelse return error.PairNotAuthorized;
         try self.validatePairAuthorization(approval);
     }
 
@@ -4837,7 +4860,7 @@ pub const TradingShard = struct {
         const opening = original.members[0].operation == .place and !original.members[0].portfolio_reduce_only and !original.members[0].venue_reduce_only;
         if (opening and original.count != occupancy.max_members) return error.InvalidCycleMembers;
         if (opening and self.requiresPairApproval(authority.strategy_identity)) {
-            const approval = self.pair_authorizations.allowedRequest(original, authority.strategy_config_version) orelse return error.PairNotAuthorized;
+            const approval = self.pair_authorizations.allowedRequest(original, authority.strategy_config_version, self.pairRevocations()) orelse return error.PairNotAuthorized;
             try self.validatePairAuthorization(approval);
         }
         if (!input.time_presence.monotonic or input.monotonic_time == 0 or (opening and !authority.strategy_active)) return error.TradingNotAuthorized;
@@ -5672,6 +5695,15 @@ pub const TradingShard = struct {
                 if (self.pair_authorizations.count == self.pair_authorizations.records.len) return error.PairAuthorizationCapacity;
                 try self.trace.append(.pair_trading_authorized, input.identity);
                 _ = try self.pair_authorizations.append(request, self.authoritativeBarrier());
+            },
+            .pair_trading_revocation => |request| {
+                const index = try self.pairRevocationIndex(request);
+                if (self.pairRevocationReceipt(index) != null) return null;
+                if (self.currentPairApproval(request.strategy, index) == null) return error.PairApprovalSuperseded;
+                try self.trace.append(.pair_trading_revoked, input.identity);
+                if (self.pair_revocations == null) self.pair_revocations = @splat(null);
+                self.pair_authorizations.version += 1;
+                self.pair_revocations.?[index] = .{ .version = self.pair_authorizations.version, .barrier = self.authoritativeBarrier() };
             },
             .instrument_trading_authorization => |authorization| {
                 const entry = self.instrument_registry.getPtr(authorization.instrument) orelse return error.UnknownInstrument;
@@ -6543,7 +6575,7 @@ fn validateSnapshotState(shard: *const TradingShard) !void {
 }
 
 fn validateSnapshotStateInner(shard: *const TradingShard, validate_partitions: bool) !void {
-    try shard.pair_authorizations.validate();
+    try shard.pair_authorizations.validate(shard.pairRevocations());
     if (shard.pair_trading_scopes) |scopes| {
         if (!shard.deployment.sealed or shard.decision_domain_identity == 0 or scopes[0] == 0)
             return error.InvalidSnapshotState;
@@ -7286,7 +7318,7 @@ pub fn applyStableOnCandidate(
         if (input == .core and input.core.payload == .control_command) return null;
         if (input == .core and input.core.payload == .spot_residual_rule) return null;
         if (input == .core and input.core.payload == .instrument_trading_authorization) return null;
-        if (input == .core and (input.core.payload == .pair_trading_authorization or input.core.payload == .pair_trading_scope_bound)) return null;
+        if (input == .core and (input.core.payload == .pair_trading_authorization or input.core.payload == .pair_trading_scope_bound or input.core.payload == .pair_trading_revocation)) return null;
         if (input == .core and (input.core.payload == .external_order_intent or input.core.payload == .external_intent_group)) return null;
         if (input == .core and input.core.payload == .oms_intent_group and
             (previous.oms.groupIdentityStatus(input.core.payload.oms_intent_group) catch .fresh) == .duplicate)
@@ -7417,6 +7449,10 @@ fn stateDigestBorrowed(shard: *const TradingShard) [Sha256.digest_length]u8 {
     digestInt(&hasher, u16, shard.pair_authorizations.count);
     digestInt(&hasher, u64, shard.pair_authorizations.version);
     for (shard.pair_authorizations.records[0..shard.pair_authorizations.count]) |record| digestBare(&hasher, record);
+    if (shard.pairRevocations()) |receipts| {
+        hasher.update("PairTradingRevocations");
+        for (receipts[0..shard.pair_authorizations.count]) |receipt| digestBare(&hasher, receipt);
+    }
     digestInt(&hasher, u8, shard.cycles.count);
     for (shard.cycles.records[0..shard.cycles.count]) |cycle| digestBare(&hasher, cycle);
     digestResidualLifecycle(&hasher, &shard.cycles.residual_lifecycle);

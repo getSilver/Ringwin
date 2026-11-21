@@ -259,7 +259,7 @@ fn serveDeployedScanner(init: std.process.Init) !void {
         const bytes = try input.interface.take(size);
         const response = (switch (command) {
             'P' => engine.readStrategyAuthority(owner, init.gpa, bytes, null),
-            'Q' => engine.approvePair(owner, init.gpa, bytes),
+            'Q' => engine.changePairApproval(owner, init.gpa, bytes),
             else => error.InvalidAuthorityFrame,
         }) catch |err| try std.json.Stringify.valueAlloc(init.gpa, .{ .@"error" = @errorName(err) }, .{});
         defer init.gpa.free(response);

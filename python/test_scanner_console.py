@@ -149,6 +149,23 @@ class ConsoleTests(unittest.TestCase):
                 status, result = post("approve", dict(selection, identity="103"))
                 self.assertEqual(status, 400)
                 self.assertIn("expired", result["error"])
+                self.assertEqual(post("stop")[0], 200)
+                self.assertEqual(console.view()["snapshot"]["candidates"], [])
+
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+                restarted_at = int(time.time()) + owner_session.TOTP_STEP
+                restarted = control_plane_web.ControlPlaneApp(directory, commands,
+                    engine_strategy_authority=authority, clock=lambda: restarted_at)
+                self.addCleanup(restarted.scanner_runtime.close)
+                server = control_plane_web.serve(restarted)
+                thread = threading.Thread(target=server.serve_forever, daemon=True)
+                thread.start()
+                status, session = restarted.login(PASSPHRASE,
+                    owner_session.totp_at(restarted.totp.read_secret(), restarted_at), "offline-restart")
+                self.assertEqual(status, 200)
+                headers = {"Cookie": "owner_session=" + session["session_token"], "X-Owner-CSRF": session["csrf_token"]}
                 client = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
                 try:
                     client.request("GET", "/api/strategy-instances", headers=headers)
@@ -158,6 +175,23 @@ class ConsoleTests(unittest.TestCase):
                     self.assertEqual(instance["pair_trading_list"], [pair])
                     self.assertFalse(instance["trading_authorized"])
                     self.assertTrue(other_instance["pair_trading_list_empty"])
+                    request = dict(operation="revoke_pair", strategy_identity=f"{9:032x}",
+                                   portfolio_identity=f"{10:032x}", identity=pair["identity"])
+                    client.request("POST", "/api/strategy-pairs", json.dumps(request), headers=headers)
+                    response = client.getresponse()
+                    self.assertEqual(response.status, 200)
+                    revoked = json.load(response)["result"]
+                    self.assertEqual(revoked["status"], "accepted")
+                    self.assertEqual(revoked["core_version"], "2")
+                    request["operation"] = "pair_revocation_status"
+                    client.request("POST", "/api/strategy-pairs", json.dumps(request), headers=headers)
+                    response = client.getresponse()
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual(json.load(response)["result"], revoked)
+                    client.request("GET", "/api/strategy-instances", headers=headers)
+                    response = client.getresponse()
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual(json.load(response)["instances"][0]["pair_trading_list"], [])
                 finally:
                     client.close()
                 self.assertFalse(errors)

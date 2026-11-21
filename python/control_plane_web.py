@@ -27,6 +27,7 @@ import control_plane
 import owner_session
 import release_lifecycle
 import strategy_instance
+import strategy_package
 import credential_packages
 
 SESSION_COOKIE = "owner_session"
@@ -230,7 +231,8 @@ class ControlPlaneApp:
                  clock=lambda: int(time.time()),
                  projection_provider=None, ui_path=None, release_manager=None,
                  lifecycle_outbox=None, instance_source=None, scanner_console=None, asset_provider=None,
-                 scanner_adapters=None, engine_strategy_reader=None, engine_strategy_authority=None):
+                 scanner_adapters=None, engine_strategy_reader=None, engine_strategy_authority=None,
+                 engine_strategy_query=None):
         self.directory = directory
         self.clock = clock
         self.passphrases = owner_session.PassphraseStore(directory)
@@ -245,6 +247,8 @@ class ControlPlaneApp:
         self.csrf_by_token_hash: dict[str, str] = {}
         self.release_manager = release_manager
         self.engine_strategy_reader = engine_strategy_authority.instances if engine_strategy_authority else engine_strategy_reader
+        self.engine_strategy_query = engine_strategy_authority.request if engine_strategy_authority else engine_strategy_query
+        self.engine_strategy_authority = engine_strategy_authority
         self.instance_manager = (strategy_instance.InstanceManager(directory, release_manager, instance_source)
                                  if instance_source is not None else None)
         self.lifecycle_outbox = lifecycle_outbox
@@ -662,7 +666,9 @@ class ControlPlaneApp:
         if binding is None and self.engine_strategy_reader is not None:
             try:
                 instances = self.engine_strategy_reader()
-                return 200, {"ok": True, "instances": instances, "read_only": True}
+                return 200, {"ok": True, "instances": instances, "read_only": True,
+                             "can_query_pair_receipts": self.engine_strategy_query is not None,
+                             "can_revoke_pairs": self.engine_strategy_authority is not None}
             except (ValueError, OSError) as error:
                 return 503, {"ok": False, "error": f"策略实例或交易名单读取失败（{error}）"}
         if self.instance_manager is None:
@@ -690,6 +696,38 @@ class ControlPlaneApp:
             return 200, {"ok": success, "result": result}
         except (ValueError, OSError, release_lifecycle.ReleaseError) as error:
             return 400, {"ok": False, "error": str(error)}
+
+    def strategy_pairs(self, headers, request):
+        status, body = self.authorize(headers)
+        if status != 200:
+            return status, body
+        try:
+            if type(request) is not dict or request.keys() != {
+                    "operation", "strategy_identity", "portfolio_identity", "identity"}:
+                raise ValueError("invalid pair operation fields")
+            operation = request["operation"]
+            strategy = request["strategy_identity"]
+            portfolio = request["portfolio_identity"]
+            identity = request["identity"]
+            for value in (strategy, portfolio, identity):
+                strategy_package.identity(value)
+            command = dict(operation=operation, portfolio=str(int(portfolio, 16)),
+                           identity=str(int(identity, 16)))
+            if operation == "revoke_pair":
+                submit = self.engine_strategy_authority.request if self.engine_strategy_authority else None
+                command["strategy"] = str(int(strategy, 16))
+            elif operation in ("pair_approval_status", "pair_revocation_status"):
+                submit = self.engine_strategy_query
+                command["strategy_identity"] = strategy
+            else:
+                raise ValueError("unknown pair operation")
+            if submit is None:
+                raise OSError("核心名单权威连接不可用")
+            return 200, {"ok": True, "result": submit(command)}
+        except ValueError as error:
+            return 400, {"ok": False, "error": str(error)}
+        except OSError as error:
+            return 503, {"ok": False, "error": str(error)}
 
 
 def subprocess_error():
@@ -813,6 +851,8 @@ def make_handler(app: ControlPlaneApp):
                     lambda body: app.lifecycle(dict(self.headers), body)),
                 "/api/strategy-instances": lambda: self._post(
                     lambda body: app.strategy_instances(dict(self.headers), body)),
+                "/api/strategy-pairs": lambda: self._post(
+                    lambda body: app.strategy_pairs(dict(self.headers), body)),
                 "/api/scanner": lambda: self._post(
                     lambda body: app.scanner(dict(self.headers), body)),
                 "/api/manual-fees": lambda: self._post(lambda body: app.manual_fees(dict(self.headers), body)),

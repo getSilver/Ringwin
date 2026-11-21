@@ -296,12 +296,14 @@ async function loadInstances(){
   try {
     const [status, body] = await api("GET", "/api/strategy-instances");
     if (status !== 200) { el.textContent = body.error || "实例查询失败"; return; }
-    el.innerHTML = body.instances.map(r=>`<p>${escaped(r.binding.strategy_identity)}：
+    el.innerHTML = body.instances.map(r=>`<div>${escaped(r.binding.strategy_identity)}：
       ${escaped(r.status)} ${escaped(r.reason)}；${r.trading_authorized ? "核心已授权交易" : "无交易授权"}<br>
       ${Array.isArray(r.pair_trading_list) ? r.pair_trading_list.length
-        ? r.pair_trading_list.map(pair => `${escaped(pair.legs.map(leg => `${leg.venue} / ${leg.environment} / ${leg.instrument}`).join(pair.direction === 1 ? " → " : " ← "))} · ${escaped(pair.mode)}<br>`).join("")
+        ? r.pair_trading_list.map(pair => renderPairApproval(pair, body.can_revoke_pairs)).join("")
         : "策略交易名单为空，请从跨所机会扫描器添加配对<br>"
         : r.pair_trading_list === null ? "策略交易名单不可用<br>" : ""}
+      ${(r.inactive_pair_approvals || []).map(pair => renderPairApproval(pair, body.can_revoke_pairs, true)).join("")}
+      ${body.can_query_pair_receipts ? renderPairReceipts(r.binding, body.can_revoke_pairs) : ""}
       ${body.read_only ? "" : `${escaped(r.binding.definition_identity)} / ${escaped(r.binding.config_sha256)}<br>
       ${escaped(JSON.stringify(r.recovery || {}))}<br>
       ${escaped(JSON.stringify(r.evidence || {}))}<br>
@@ -314,9 +316,95 @@ async function loadInstances(){
       ${r.status === "Ready" || r.status === "Trading" ? `<button onclick="updateStrategyConfig('${escaped(r.binding.strategy_identity)}',${r.binding.config_version})">更新参数 Keep/Rebuild</button>` : ""}
       ${r.status === "Ready" ? `<button onclick="controlStrategyInstance('enable_trading','${escaped(r.binding.strategy_identity)}','${BigInt('0x'+r.binding.decision_domain)}')">EnableTrading</button>` : ""}
       ${r.status === "Trading" ? `<button onclick="controlStrategyInstance('trading_pause','${escaped(r.binding.strategy_identity)}','${BigInt('0x'+r.binding.decision_domain)}')">停用交易</button>` : ""}
-      ${r.status === "Stopped" ? `<button onclick="recoverStrategyInstance('${escaped(r.binding.strategy_identity)}')">从 checkpoint 无权恢复</button>` : ""}`}</p>`).join("") || "尚无实例。";
+      ${r.status === "Stopped" ? `<button onclick="recoverStrategyInstance('${escaped(r.binding.strategy_identity)}')">从 checkpoint 无权恢复</button>` : ""}`}</div>`).join("") || "尚无实例。";
   } catch (error) { el.textContent = "实例查询失败，请重试。"; }
 }
+
+function pairIdentity(value) {
+  return typeof value === "string" && /^[0-9a-f]{32}$/.test(value) ? value : "";
+}
+
+function parsePairApprovalIdentity(input) {
+  const value = input.trim().toLowerCase();
+  if (!/^(?:0x[0-9a-f]{1,32}|[0-9]{1,39})$/.test(value)) return "";
+  const number = BigInt(value);
+  return number > 0n && number < (1n << 128n) ? number.toString(16).padStart(32, "0") : "";
+}
+
+function pairReceiptIdentity(strategy, portfolio, identity) {
+  const key = `pair-approval:${strategy}:${portfolio}`;
+  try {
+    if (identity !== undefined) localStorage.setItem(key, "0x" + identity);
+    return parsePairApprovalIdentity(localStorage.getItem(key) || "");
+  } catch {
+    return "";
+  }
+}
+
+function renderPairApproval(pair, canRevoke, inactive = false) {
+  const route = pair.legs.map(leg => `${leg.venue} / ${leg.environment} / ${leg.instrument}`)
+    .join(pair.direction === 1 ? " → " : " ← ");
+  const identity = pairIdentity(pair.identity);
+  const revoke = canRevoke && identity
+    ? ` <button type="button" data-pair-approval="${identity}">撤销批准</button>` : "";
+  return `<div>${inactive ? "当前不可交易 · " : ""}${escaped(route)} · ${escaped(pair.mode)} · <code>${identity ? "0x" + identity : ""}</code>${revoke}</div>`;
+}
+
+function renderPairReceipts(binding, canRevoke) {
+  const strategy = pairIdentity(binding.strategy_identity);
+  const portfolio = pairIdentity(binding.portfolio_identity);
+  if (!strategy || !portfolio) return "";
+  const identity = pairReceiptIdentity(strategy, portfolio);
+  return `<div id="pair-controls-${strategy}" data-pair-portfolio="${portfolio}">
+    <label>批准身份 <input value="${identity ? "0x" + identity : ""}" maxlength="39" size="34"
+      placeholder="0x十六进制或十进制" spellcheck="false"></label>
+    <button type="button" data-pair-operation="pair_approval_status">查询批准回执</button>
+    <button type="button" data-pair-operation="pair_revocation_status">查询撤销回执</button>
+    ${canRevoke ? '<button type="button" data-pair-operation="revoke_pair">按身份撤销</button>' : ""}
+    <output aria-live="polite"></output>
+  </div>`;
+}
+
+document.addEventListener("click", async event => {
+  const button = event.target.closest("[data-pair-approval], [data-pair-operation]");
+  if (!button) return;
+  const controls = button.closest("#instances > div")?.querySelector("[data-pair-portfolio]");
+  if (!controls) return;
+  const strategy = controls.id.slice("pair-controls-".length);
+  const portfolio = controls.dataset.pairPortfolio;
+  const input = controls.querySelector("input");
+  const identity = button.dataset.pairApproval || parsePairApprovalIdentity(input.value);
+  const output = controls.querySelector("output");
+  if (!identity) {
+    output.textContent = "请输入 0x 开头的十六进制批准身份或十进制身份。";
+    return;
+  }
+  const operation = button.dataset.pairOperation || "revoke_pair";
+  if (operation === "revoke_pair" && !confirm(`撤销批准 0x${identity}？`)) return;
+  input.value = "0x" + identity;
+  pairReceiptIdentity(strategy, portfolio, identity);
+  output.textContent = "正在读取核心结果…";
+  let message;
+  try {
+    const [status, body] = await api("POST", "/api/strategy-pairs", {
+      operation, strategy_identity: strategy, portfolio_identity: portfolio, identity,
+    });
+    const result = body.result;
+    if (status !== 200) message = body.error;
+    else if (result.status === "accepted") {
+      const label = operation === "pair_approval_status" ? "批准已提交" : "撤销已提交";
+      message = `${label}，版本 ${result.core_version}，提交序号 ${result.barrier}`;
+    } else if (result.status === "unknown") {
+      message = "核心尚无确认回执，可按相同身份再次查询。";
+    } else message = `请求被拒绝（${result.reason}）`;
+    if (operation === "revoke_pair") await loadInstances();
+  } catch (error) {
+    message = "未收到核心结果，可按相同身份查询或重试。";
+  }
+  const current = document.getElementById(controls.id);
+  if (current) current.querySelector("output").textContent = `0x${identity} · ${message}`;
+});
+
 async function controlStrategyInstance(kind, identity, target){
   const command = {kind, strategy_identity:identity, target_identity:target,
     command_identity:newIdentity(), expected_version:expectedVersion(target)};

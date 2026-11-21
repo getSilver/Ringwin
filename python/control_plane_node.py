@@ -42,14 +42,16 @@ class EngineStrategyAuthority:
 
     def request(self, value):
         operation = value.get("operation")
-        strategy_package.require(operation in ("pair_trading_list", "strategy_instances", "approve_pair",
-                                               "pair_authorization_version", "pair_approval_status"),
+        mutations = ("approve_pair", "revoke_pair")
+        receipts = ("pair_approval_status", "pair_revocation_status")
+        strategy_package.require(operation in ("pair_trading_list", "strategy_instances", "pair_authorization_version")
+                                 or operation in mutations + receipts,
                                  "engine strategy operation unavailable")
         data = strategy_package.canonical(value)
         strategy_package.require(len(data) <= self.max_frame_bytes, "engine request too large")
         with self.lock:
             try:
-                command = b"Q" if operation == "approve_pair" else b"P"
+                command = b"Q" if operation in mutations else b"P"
                 self.stream.sendall(command + struct.pack("<I", len(data)) + data)
                 size, = struct.unpack("<I", self.receive(4))
                 if not 0 < size <= self.max_frame_bytes:
@@ -69,8 +71,13 @@ class EngineStrategyAuthority:
                 elif operation == "pair_authorization_version" and set(result) == {"core_version"} and (
                         isinstance(result["core_version"], str) and result["core_version"].isdigit()):
                     return result
-                elif operation in ("approve_pair", "pair_approval_status") and result.get("status") in (
-                        "accepted", "rejected", "unknown"):
+                elif operation in mutations + receipts and result.get("status") in (
+                        "accepted", "rejected", "unknown") and result.get("identity") == value.get("identity"):
+                    if result["status"] == "accepted" and any(
+                            type(result.get(field)) is not str or not result[field].isascii()
+                            or not result[field].isdigit() or int(result[field]) == 0
+                            for field in ("core_version", "barrier")):
+                        raise OSError("invalid engine receipt version or barrier")
                     return result
                 else:
                     raise OSError("invalid engine response")
@@ -86,7 +93,7 @@ class EngineStrategyAuthority:
 @contextmanager
 def open_node_web(*, directory, ui_path, port, projection, command_server, release_manager=None,
                   lifecycle_outbox=None, instance_source=None, engine_strategy_reader=None,
-                  engine_strategy_authority=None):
+                  engine_strategy_authority=None, engine_strategy_query=None):
     """Open the Web control plane. The node drives committed input via app.instance_manager."""
     if instance_source is not None and instance_source.authority is None:
         raise ValueError("strategy instance access requires node authority")
@@ -99,7 +106,8 @@ def open_node_web(*, directory, ui_path, port, projection, command_server, relea
                               projection_provider=projection, release_manager=release_manager,
                               lifecycle_outbox=lifecycle_outbox, instance_source=instance_source,
                               engine_strategy_reader=engine_strategy_reader,
-                              engine_strategy_authority=engine_strategy_authority)
+                              engine_strategy_authority=engine_strategy_authority,
+                              engine_strategy_query=engine_strategy_query)
         cleanup.callback(app.scanner_runtime.close)
         if app.instance_manager is not None:
             cleanup.callback(app.instance_manager.close)
@@ -121,9 +129,9 @@ def main():
     parser.add_argument("--projection-probe", type=Path, default=DEFAULT_PROJECTION_PROBE)
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--engine-authority-fd", type=int,
-                        help="Supervisor-provided relay for engine strategy queries and pair approval")
+                        help="Supervisor-provided relay for engine strategy queries and pair approval changes")
     parser.add_argument("--engine-pair-approval", action="store_true",
-                        help="Use a supervisor relay authorized to forward pair approval frames")
+                        help="Use a supervisor relay authorized to forward pair approval and revocation frames")
     args = parser.parse_args()
     if args.engine_pair_approval and args.engine_authority_fd is None:
         parser.error("--engine-pair-approval requires --engine-authority-fd")
@@ -144,7 +152,8 @@ def main():
             directory=args.directory, ui_path=args.ui, port=args.port, projection=provider,
             command_server=CommandServer(secrets.token_bytes(32)),
             engine_strategy_reader=authority.instances if authority else None,
-            engine_strategy_authority=authority if args.engine_pair_approval else None))
+            engine_strategy_authority=authority if args.engine_pair_approval else None,
+            engine_strategy_query=authority.request if authority else None))
         print("Web control plane: http://127.0.0.1:" + str(server.server_port), flush=True)
         try:
             server.serve_forever()

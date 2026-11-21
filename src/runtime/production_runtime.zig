@@ -16,7 +16,7 @@ pub const Role = enum { engine, market_feed, execution_gateway, telemetry, contr
 pub const Phase = enum { stopped, starting, ready, recovering, trading, draining, forced_stop, failed };
 pub const RolePhase = enum { stopped, starting, ready, recovering, draining, forced_stop, failed };
 pub const Venue = enum { simulated };
-pub const Command = enum(u8) { enable_risk = 'A', drain = 'D', stop = 'S', business = 'B', settle = 'L', ingest_canonical = 'I', read_committed = 'C', read_strategy_authority = 'P', approve_pair = 'Q', recover_venue = 'U' };
+pub const Command = enum(u8) { enable_risk = 'A', drain = 'D', stop = 'S', business = 'B', settle = 'L', ingest_canonical = 'I', read_committed = 'C', read_strategy_authority = 'P', mutate_pair_approval = 'Q', recover_venue = 'U' };
 pub const Status = enum(u8) { hello = 'H', ready = 'R', risk_enabled = 'A', draining = 'G', stopped = 'T', forced_stop = 'F', failed = 'X', recovery_only = 'V' };
 
 pub const BoundedQueue = struct {
@@ -463,7 +463,7 @@ fn serveRole(init: std.process.Init, role: Role, socket_path: []const u8, startu
                     else => return error.InvalidRoleTransition,
                 }
             },
-            .read_strategy_authority, .approve_pair => {
+            .read_strategy_authority, .mutate_pair_approval => {
                 const active_engine = live_engine orelse return error.EngineUnavailable;
                 const size = try readFrameInt(&stream, init.io, u32);
                 if (size == 0 or size > production_engine.max_authority_bytes) return error.InvalidAuthorityFrame;
@@ -475,7 +475,7 @@ fn serveRole(init: std.process.Init, role: Role, socket_path: []const u8, startu
                 else if (draining)
                     error.EngineDraining
                 else
-                    production_engine.approvePair(active_engine.owner, init.gpa, request)) catch |err|
+                    production_engine.changePairApproval(active_engine.owner, init.gpa, request)) catch |err|
                     try std.json.Stringify.valueAlloc(init.gpa, .{ .@"error" = @errorName(err) }, .{});
                 defer init.gpa.free(response);
                 if (response.len > production_engine.max_authority_bytes) return error.InvalidAuthorityFrame;
@@ -916,6 +916,55 @@ test "formal engine approves only the selected Demo Testnet route and recovers i
     try std.testing.expect(recovered.shard.pairTradingListEmpty(19));
     try std.testing.expectEqual(@as(u16, 1), recovered.shard.pair_authorizations.count);
     try std.testing.expectEqual(@as(u16, 0), recovered.shard.oms.order_count);
+
+    const revoke =
+        \\{"operation":"revoke_pair","strategy":"9","portfolio":"10","identity":"98766"}
+    ;
+    const revoke_status =
+        \\{"operation":"pair_revocation_status","strategy_identity":"00000000000000000000000000000009","portfolio":"10","identity":"98766"}
+    ;
+    const revoke_wrong_portfolio =
+        \\{"operation":"revoke_pair","strategy":"9","portfolio":"11","identity":"98766"}
+    ;
+    const rejected = try production_engine.changePairApproval(recovered, allocator, revoke_wrong_portfolio);
+    defer allocator.free(rejected);
+    try std.testing.expect(std.mem.indexOf(u8, rejected, "UnknownPairApproval") != null);
+    try std.testing.expect(!recovered.shard.pairTradingListEmpty(9));
+
+    var rules = recovered.shard.pairInstrument(20, 103).?.rules;
+    rules.version += 1;
+    _ = try recovered.apply(.{ .core = .{
+        .identity = recovered.shard.authoritativeBarrier() + 1,
+        .account_scope = 20,
+        .payload = .{ .instrument_rules_activated = rules },
+    } });
+    try std.testing.expect(recovered.shard.pairTradingListEmpty(9));
+    const instances = try production_engine.readStrategyAuthority(recovered, allocator, "{\"operation\":\"strategy_instances\"}", null);
+    defer allocator.free(instances);
+    try std.testing.expect(std.mem.indexOf(u8, instances, "\"inactive_pair_approvals\":[{\"identity\":\"000000000000000000000000000181ce\"") != null);
+
+    try recovered.checkpoint();
+    const revoked = try production_engine.changePairApproval(recovered, allocator, revoke);
+    defer allocator.free(revoked);
+    try std.testing.expect(std.mem.indexOf(u8, revoked, "\"status\":\"accepted\"") != null);
+    try std.testing.expect(recovered.shard.pairTradingListEmpty(9));
+    try production_engine.recover(owner, store.interface(), std.testing.io, stream.id, recovered.deployment_anchor.?);
+    const revocation = try production_engine.readStrategyAuthority(owner, allocator, revoke_status, null);
+    defer allocator.free(revocation);
+    try std.testing.expectEqualStrings(revoked, revocation);
+    const retry = try production_engine.changePairApproval(owner, allocator, revoke);
+    defer allocator.free(retry);
+    try std.testing.expectEqualStrings(revoked, retry);
+    const approval_after = try production_engine.readStrategyAuthority(owner, allocator, query, null);
+    defer allocator.free(approval_after);
+    try std.testing.expectEqualStrings(accepted, approval_after);
+    try std.testing.expect(owner.shard.pairTradingListEmpty(9));
+    try std.testing.expectEqual(recovered.shard.authoritativeBarrier(), owner.shard.authoritativeBarrier());
+    try owner.checkpoint();
+    try production_engine.recover(recovered, store.interface(), std.testing.io, stream.id, owner.deployment_anchor.?);
+    const snapshot_receipt = try production_engine.readStrategyAuthority(recovered, allocator, revoke_status, null);
+    defer allocator.free(snapshot_receipt);
+    try std.testing.expectEqualStrings(revoked, snapshot_receipt);
 }
 
 test "bounded role IPC fails closed and drains FIFO" {

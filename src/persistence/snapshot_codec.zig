@@ -373,7 +373,12 @@ fn decodeValueInto(reader: *Reader, destination: anytype) !void {
         },
         .@"struct" => |info| {
             var active_lengths: [info.fields.len]?u32 = @splat(null);
+            comptime var in_optional_tail = false;
             inline for (info.fields, 0..) |field, index| {
+                if (comptime @hasDecl(T, "snapshot_optional_tail") and std.mem.eql(u8, field.name, T.snapshot_optional_tail))
+                    in_optional_tail = true;
+                if (in_optional_tail and @typeInfo(field.type) != .optional)
+                    @compileError("snapshot optional tail must contain only optional fields");
                 if (comptime omsArrayCount(T, field.name)) |_| {
                     const count = try reader.get(u32);
                     const items = &@field(destination.*, field.name);
@@ -382,9 +387,7 @@ fn decodeValueInto(reader: *Reader, destination: anytype) !void {
                     for (items[0..count]) |*item| try decodeValueInto(reader, item);
                     const Child = @typeInfo(field.type).array.child;
                     for (items[count..]) |*item| item.* = std.mem.zeroes(Child);
-                } else if (comptime index == info.fields.len - 1 and @hasDecl(T, "snapshot_optional_tail") and
-                    std.mem.eql(u8, field.name, T.snapshot_optional_tail))
-                {
+                } else if (in_optional_tail) {
                     if (reader.position == reader.bytes.len) {
                         @field(destination.*, field.name) = null;
                     } else try decodeValueInto(reader, &@field(destination.*, field.name));
@@ -414,14 +417,19 @@ test "snapshot codec decodes snapshots before an optional trailing field was int
     const State = struct {
         barrier: u64,
         scope: ?u128,
+        receipt: ?u64,
         pub const snapshot_optional_tail = "scope";
     };
     var bytes: [64]u8 = undefined;
     const Legacy = struct { barrier: u64 };
     const legacy = try encodeBare(&bytes, Legacy{ .barrier = 7 });
-    try std.testing.expectEqual(State{ .barrier = 7, .scope = null }, try decodeBare(legacy, State));
-    const encoded = try encodeBare(&bytes, State{ .barrier = 7, .scope = 9 });
-    try std.testing.expectEqual(State{ .barrier = 7, .scope = 9 }, try decodeBare(encoded, State));
+    try std.testing.expectEqual(State{ .barrier = 7, .scope = null, .receipt = null }, try decodeBare(legacy, State));
+    const WithScope = struct { barrier: u64, scope: ?u128 };
+    const with_scope = try encodeBare(&bytes, WithScope{ .barrier = 7, .scope = 9 });
+    try std.testing.expectEqual(State{ .barrier = 7, .scope = 9, .receipt = null }, try decodeBare(with_scope, State));
+    const state: State = .{ .barrier = 7, .scope = 9, .receipt = 12 };
+    const encoded = try encodeBare(&bytes, state);
+    try std.testing.expectEqual(state, try decodeBare(encoded, State));
     try std.testing.expectError(error.InvalidSnapshotLength, decodeBare(encoded[0 .. encoded.len - 1], State));
 }
 

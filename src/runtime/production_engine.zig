@@ -301,6 +301,49 @@ fn pairReceipt(gpa: std.mem.Allocator, record: pair.Record) ![]u8 {
     }, .{});
 }
 
+const PairMutation = enum { approve_pair, revoke_pair };
+const PairRevocation = struct {
+    operation: PairMutation,
+    identity: u128,
+    strategy: u128,
+    portfolio: u128,
+};
+
+fn revocationRecord(shard: *const trading.TradingShard, index: usize) ?pair.Record {
+    const receipt = shard.pairRevocationReceipt(index) orelse return null;
+    return .{
+        .request = shard.pair_authorizations.records[index].request,
+        .version = receipt.version,
+        .barrier = receipt.barrier,
+    };
+}
+
+pub fn changePairApproval(owner: *Owner, gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    const header = try std.json.parseFromSlice(struct { operation: PairMutation }, gpa, bytes, .{ .ignore_unknown_fields = true });
+    defer header.deinit();
+    return switch (header.value.operation) {
+        .approve_pair => approvePair(owner, gpa, bytes),
+        .revoke_pair => revokePair(owner, gpa, bytes),
+    };
+}
+
+fn revokePair(owner: *Owner, gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
+    const parsed = try std.json.parseFromSlice(PairRevocation, gpa, bytes, .{});
+    defer parsed.deinit();
+    const request: pair.Revocation = .{ .identity = parsed.value.identity, .strategy = parsed.value.strategy, .portfolio = parsed.value.portfolio };
+    const shard = try owner.source();
+    const index = shard.pairRevocationIndex(request) catch |err|
+        return pairOutcome(gpa, request.identity, "rejected", @errorName(err));
+    if (revocationRecord(shard, index)) |record| return pairReceipt(gpa, record);
+    if (shard.currentPairApproval(request.strategy, index) == null)
+        return pairOutcome(gpa, request.identity, "rejected", "PairApprovalSuperseded");
+    const event_identity = try std.math.add(u64, shard.authoritativeBarrier(), 1);
+    _ = owner.apply(.{ .core = .{ .identity = event_identity, .payload = .{ .pair_trading_revocation = request } } }) catch |err|
+        return pairOutcome(gpa, request.identity, "unknown", @errorName(err));
+    const record = revocationRecord(try owner.source(), index) orelse return error.PairConfirmationUnavailable;
+    return pairReceipt(gpa, record);
+}
+
 /// Resolve the selected legs against the Writer's deployment and acknowledge committed approval.
 pub fn approvePair(owner: *Owner, gpa: std.mem.Allocator, bytes: []const u8) ![]u8 {
     const parsed = try std.json.parseFromSlice(PairApproval, gpa, bytes, .{});
@@ -328,7 +371,7 @@ pub fn approvePair(owner: *Owner, gpa: std.mem.Allocator, bytes: []const u8) ![]
 
 pub fn readStrategyAuthority(owner: *const Owner, gpa: std.mem.Allocator, bytes: []const u8, ready_strategy: ?u128) ![]u8 {
     const Request = struct {
-        operation: enum { pair_trading_list, strategy_instances, pair_authorization_version, pair_approval_status },
+        operation: enum { pair_trading_list, strategy_instances, pair_authorization_version, pair_approval_status, pair_revocation_status },
         strategy_identity: ?[]const u8 = null,
         scope_accounts: ?[]const []const u8 = null,
         identity: ?u128 = null,
@@ -347,11 +390,15 @@ pub fn readStrategyAuthority(owner: *const Owner, gpa: std.mem.Allocator, bytes:
     if (id.len != 32) return error.StrategyIdentityMismatch;
     const identity = try std.fmt.parseInt(u128, id, 16);
     if (identity == 0) return error.StrategyIdentityMismatch;
-    if (request.operation == .pair_approval_status) {
+    if (request.operation == .pair_approval_status or request.operation == .pair_revocation_status) {
         if (request.scope_accounts != null) return error.InvalidAuthorityFrame;
         const approval = request.identity orelse return error.InvalidAuthorityFrame;
         const portfolio = request.portfolio orelse return error.InvalidAuthorityFrame;
-        if (shard.pair_authorizations.receipt(approval)) |record| {
+        if (request.operation == .pair_revocation_status) {
+            const index = shard.pairRevocationIndex(.{ .identity = approval, .strategy = identity, .portfolio = portfolio }) catch
+                return pairOutcome(gpa, approval, "unknown", null);
+            if (revocationRecord(shard, index)) |record| return pairReceipt(gpa, record);
+        } else if (shard.pair_authorizations.receipt(approval)) |record| {
             if (record.request.strategy == identity and record.request.portfolio == portfolio)
                 return pairReceipt(gpa, record);
         }
@@ -379,6 +426,7 @@ fn readStrategyInstances(gpa: std.mem.Allocator, shard: *const trading.TradingSh
         trading_authorized: bool = false,
         pair_trading_list: []strategy_authority.PairListEntry,
         pair_trading_list_empty: bool,
+        inactive_pair_approvals: []strategy_authority.PairListEntry,
     };
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
@@ -388,6 +436,13 @@ fn readStrategyInstances(gpa: std.mem.Allocator, shard: *const trading.TradingSh
         const identity = authority.strategy_identity;
         if (identity == 0 or !authority.strategy_active or shard.strategyFenced(identity)) continue;
         const pairs = try strategy_authority.effectivePairList(arena.allocator(), shard, identity);
+        var inactive: std.ArrayList(strategy_authority.PairListEntry) = .empty;
+        for (0..shard.pair_authorizations.count) |pair_index| {
+            const record = shard.currentPairApproval(identity, pair_index) orelse continue;
+            shard.validatePairAuthorization(record.request) catch {
+                try inactive.append(arena.allocator(), strategy_authority.pairListEntry(record.request));
+            };
+        }
         var instance: Instance = .{
             .binding = .{
                 .strategy_identity = undefined,
@@ -398,6 +453,7 @@ fn readStrategyInstances(gpa: std.mem.Allocator, shard: *const trading.TradingSh
             .status = if (identity == ready_strategy) "Ready" else "Stopped",
             .pair_trading_list = pairs,
             .pair_trading_list_empty = pairs.len == 0,
+            .inactive_pair_approvals = inactive.items,
         };
         _ = try std.fmt.bufPrint(&instance.binding.strategy_identity, "{x:0>32}", .{identity});
         _ = try std.fmt.bufPrint(&instance.binding.decision_domain, "{x:0>32}", .{shard.decision_domain_identity});

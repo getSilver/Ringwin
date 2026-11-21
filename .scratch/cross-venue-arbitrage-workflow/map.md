@@ -36,7 +36,6 @@ Status: open
 
 ## Frontier
 
-- [09 从策略页查询和撤销持久批准](issues/09-revoke.md)
 - [11 从前端批准跑通双 IOC 完整周期](issues/11-dual-ioc.md)
 - [15 滚动归档并测出持续扫描容量](issues/15-capacity.md)
 
@@ -59,6 +58,8 @@ Status: open
 [07](issues/07-empty-list.md) 已通过空名单、存量敞口及正式 Linux 联合验收。默认 Web 从 Writer 读取名单，正式 engine 恢复 Venue 输入，StrategyHost 从 checkpoint 追平并确认核心提交序号。双 IOC 正常交易周期及单腿失败恢复分别由 [11](issues/11-dual-ioc.md) 和 [12](issues/12-ioc-recovery.md) 接续。
 
 [08](issues/08-approve.md) 已通过合成 Demo × Testnet 的认证 Web、Zig Writer 和恢复定向验收。机会批准绑定显示的评估和指定组合，核心回执可独立核对观察来源与部署账户。完整交易周期由 [11](issues/11-dual-ioc.md) 接续。
+
+[09](issues/09-revoke.md) 已通过策略页持久身份、停扫和 Web 重启、失效批准、丢回执及历史满载撤销的离线定向验收。Writer 提交撤销后立即限制新开仓。
 
 [10](issues/10-limit-price.md) 已通过 Host 限价定向验收。Gateway 请求保留各腿 ticks 和规则版本，TradingShard 校验 tick 单位并逐腿记录拒绝原因。
 
