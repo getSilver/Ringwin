@@ -153,6 +153,7 @@ const selected = switch (@import("entry_options").index) {
     149 => @import("testing/acceptance/core/scanner_authorization_acceptance.zig"),
     150 => @import("runtime/scanner_market_node.zig"),
     151 => @import("runtime/credential_enrollment.zig"),
+    152 => @import("testing/acceptance/platform/production_engine_fixture.zig"),
     else => @compileError("unknown standalone source entry"),
 };
 

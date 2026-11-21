@@ -284,6 +284,33 @@ barrier. It records HostActivated, supplies the actual session and batch, then
 enables the Host gateway only after the runtime receives an exact cursor ACK.
 An absent node adapter leaves EnableTrading unavailable.
 
+The formal Linux engine role opens the existing Linux DurableStore in its
+state directory and recovers the configured decision stream. Provision that
+directory with a committed checkpoint for a sealed deployment and an
+`engine.json` containing a positive `decision_stream` and the 64-character
+hexadecimal `deployment_digest` from the deployment configuration. The
+operator supplies the digest independently of the recovered journal.
+
+After authenticating on the engine's existing Unix control socket, the
+controller receives `H` followed by `V` (recovery only). It can deliver an
+adapter-produced canonical frame with `I` followed by a little-endian
+`u32` byte count and the canonical event bytes. The originating adapter
+retains its durable input until the engine replies with the committed decision
+barrier (`u64`, followed by zero as a `u32`).
+
+The controller can read the next committed decision record with `C` followed
+by its last consumed `u64` cursor. The reply starts with the next `u64`
+cursor and `u32` payload length. A zero length indicates the cursor has
+reached the committed barrier. A nonempty reply carries `u16` type, `u16`
+schema, `u32` flags, the four `u64` journal clocks (source, receive,
+monotonic, wall), one byte of time-presence flags, and the stable record
+payload. All integers are little-endian. This includes derived facts and cold
+history proof records in decision order.
+
+The formal role still requires a Venue-owned RawIngress recovery sweep and
+the node-owned journal-to-StrategyHost batch producer before the Web strategy
+management connection can activate a Host.
+
 The node calls `InstanceManager.deliver` with its committed canonical input;
 there is no HTTP input/frame injection endpoint. The locked Host wrapper creates
 the existing QSHO envelope around fixed API OrderIntent or complete IntentGroup

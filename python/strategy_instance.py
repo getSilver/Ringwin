@@ -330,30 +330,31 @@ class InstanceManager:
             self._successor_commands[progress["operation_identity"]] = json.loads(package.canonical(record))
 
     def view(self, *, include_pair_trading_list=True):
-        if not self._lock.acquire(blocking=False):
-            return json.loads(package.canonical(list(self._records.values())))
+        locked = self._lock.acquire(blocking=False)
         try:
-            for identity, host in list(self._hosts.items()):
-                if identity not in self._hosts:
-                    continue
-                if not host.get("native") and host["process"].poll() is not None:
-                    self._fail(identity, self._records[identity], "candidate Host exited")
-                elif self._records[identity]["status"] == "Trading":
-                    try:
-                        authority = self.source.authority.request(dict(operation="status", strategy_identity=identity))
-                        if not authority["trading_authorized"]:
-                            self._fail(identity, self._records[identity], "native authority revoked; recovery and explicit enable required")
-                        else:
-                            self._records[identity]["authority"] = authority
-                    except (ValueError, OSError, KeyError) as error:
-                        self._fail(identity, self._records[identity], str(error))
+            if locked:
+                for identity, host in list(self._hosts.items()):
+                    if identity not in self._hosts:
+                        continue
+                    if not host.get("native") and host["process"].poll() is not None:
+                        self._fail(identity, self._records[identity], "candidate Host exited")
+                    elif self._records[identity]["status"] == "Trading":
+                        try:
+                            authority = self.source.authority.request(dict(operation="status", strategy_identity=identity))
+                            if not authority["trading_authorized"]:
+                                self._fail(identity, self._records[identity], "native authority revoked; recovery and explicit enable required")
+                            else:
+                                self._records[identity]["authority"] = authority
+                        except (ValueError, OSError, KeyError) as error:
+                            self._fail(identity, self._records[identity], str(error))
             records = json.loads(package.canonical(list(self._records.values())))
-            if include_pair_trading_list:
-                for record in records:
-                    self._read_pair_trading_list(record)
-            return records
         finally:
-            self._lock.release()
+            if locked:
+                self._lock.release()
+        if include_pair_trading_list:
+            for record in records:
+                self._read_pair_trading_list(record)
+        return records
 
     @staticmethod
     def _scope_accounts(binding):
@@ -364,13 +365,15 @@ class InstanceManager:
         accounts = self._scope_accounts(binding)
         if len(accounts) < 2:
             return record
+        record["pair_trading_list"] = None
         record["pair_trading_list_empty"] = None
         if self.source.authority is not None:
             try:
                 result = self.source.authority.request(dict(operation="pair_trading_list",
                     strategy_identity=binding["strategy_identity"], scope_accounts=accounts))
-                if type(result.get("empty")) is bool:
-                    record["pair_trading_list_empty"] = result["empty"]
+                if type(result.get("pairs")) is list:
+                    record["pair_trading_list"] = result["pairs"]
+                    record["pair_trading_list_empty"] = not result["pairs"]
             except (OSError, ValueError):
                 pass
         return record

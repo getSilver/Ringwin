@@ -1701,13 +1701,17 @@ pub const TradingShard = struct {
     }
 
     pub fn pairTradingListEmpty(self: *const TradingShard, strategy: u128) bool {
-        for (self.pair_authorizations.records[0..self.pair_authorizations.count], 0..) |record, index| {
-            const request = record.request;
-            if (request.strategy != strategy or !self.pair_authorizations.isCurrent(index)) continue;
-            self.validatePairAuthorization(request) catch continue;
-            return false;
-        }
+        for (0..self.pair_authorizations.count) |index|
+            if (self.effectivePairAuthorization(strategy, index) != null) return false;
         return true;
+    }
+
+    pub fn effectivePairAuthorization(self: *const TradingShard, strategy: u128, index: usize) ?@import("pair_trading_authorization.zig").Record {
+        if (index >= self.pair_authorizations.count) return null;
+        const record = self.pair_authorizations.records[index];
+        if (record.request.strategy != strategy or !self.pair_authorizations.isCurrent(index)) return null;
+        self.validatePairAuthorization(record.request) catch return null;
+        return record;
     }
 
     fn pairSettlementCompatible(self: *const TradingShard, entries: [2]InstrumentEntry) bool {

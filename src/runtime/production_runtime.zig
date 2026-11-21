@@ -1,12 +1,13 @@
 //! Linux production role dispatcher and its bounded Unix-domain control seam.
 //!
-//! This module owns process lifecycle only. TradingShard remains an in-memory
-//! state machine; credentials and venue sockets are deliberately absent here.
+//! The engine owns its durable TradingShard. Venue sockets and credentials
+//! remain outside the engine process.
 
 const std = @import("std");
 const builtin = @import("builtin");
 const business = @import("../testing/support/linux_role_business.zig");
 const simulated = @import("../adapters/simulated/simulated_venue.zig");
+const production_engine = @import("production_engine.zig");
 
 pub const max_control_queue = 8;
 pub const max_frame_bytes = 1;
@@ -15,8 +16,8 @@ pub const Role = enum { engine, market_feed, execution_gateway, telemetry, contr
 pub const Phase = enum { stopped, starting, ready, recovering, trading, draining, forced_stop, failed };
 pub const RolePhase = enum { stopped, starting, ready, recovering, draining, forced_stop, failed };
 pub const Venue = enum { simulated };
-pub const Command = enum(u8) { enable_risk = 'A', drain = 'D', stop = 'S', business = 'B', settle = 'L' };
-pub const Status = enum(u8) { hello = 'H', ready = 'R', risk_enabled = 'A', draining = 'G', stopped = 'T', forced_stop = 'F', failed = 'X' };
+pub const Command = enum(u8) { enable_risk = 'A', drain = 'D', stop = 'S', business = 'B', settle = 'L', ingest_canonical = 'I', read_committed = 'C', read_pair_trading_list = 'P' };
+pub const Status = enum(u8) { hello = 'H', ready = 'R', risk_enabled = 'A', draining = 'G', stopped = 'T', forced_stop = 'F', failed = 'X', recovery_only = 'V' };
 
 pub const BoundedQueue = struct {
     values: [max_control_queue]Command = undefined,
@@ -172,6 +173,22 @@ fn readCommand(stream: *std.Io.net.Stream, io: std.Io) !?Command {
     }
 }
 
+fn readExact(stream: *std.Io.net.Stream, io: std.Io, bytes: []u8) !void {
+    var remaining = bytes;
+    while (remaining.len != 0) {
+        var buffers = [_][]u8{remaining};
+        const count = try stream.read(io, &buffers);
+        if (count == 0) return error.IncompleteEngineFrame;
+        remaining = remaining[count..];
+    }
+}
+
+fn readFrameInt(stream: *std.Io.net.Stream, io: std.Io, comptime T: type) !T {
+    var bytes: [@sizeOf(T)]u8 = undefined;
+    try readExact(stream, io, &bytes);
+    return std.mem.readInt(T, &bytes, .little);
+}
+
 fn waitForCommand(stream: *std.Io.net.Stream, io: std.Io, drain_deadline: ?i96) !?Command {
     if (comptime builtin.os.tag == .linux) {
         var descriptors: [1]std.posix.pollfd = .{.{
@@ -234,6 +251,26 @@ fn verifyController(stream: std.Io.net.Stream, fixture: bool, parent: std.os.lin
 
 pub fn runRole(init: std.process.Init, role: Role, socket_path: []const u8, startup: Startup) !void {
     if (comptime builtin.os.tag != .linux) return error.LinuxOnlyProductionRole;
+    if (role != .engine or startup == .fixture_generation) return serveRole(init, role, socket_path, startup);
+
+    // Writer recovery uses large fixed-size journal and shard values.
+    const Runner = struct {
+        failure: ?anyerror = null,
+
+        fn run(self: *@This(), process: std.process.Init, path: []const u8, mode: Startup) void {
+            serveRole(process, .engine, path, mode) catch |err| {
+                self.failure = err;
+            };
+        }
+    };
+    var runner: Runner = .{};
+    const thread = try std.Thread.spawn(.{ .stack_size = 256 * 1024 * 1024 }, Runner.run, .{ &runner, init, socket_path, startup });
+    thread.join();
+    if (runner.failure) |failure| return failure;
+}
+
+fn serveRole(init: std.process.Init, role: Role, socket_path: []const u8, startup: Startup) !void {
+    if (comptime builtin.os.tag != .linux) return error.LinuxOnlyProductionRole;
     if (!std.fs.path.isAbsolute(socket_path)) return error.InvalidRoleConfiguration;
     const parent = std.os.linux.getppid();
     const fixture = startup == .fixture_generation;
@@ -247,6 +284,11 @@ pub fn runRole(init: std.process.Init, role: Role, socket_path: []const u8, star
     if (owner) |file| if (!try file.tryLock(init.io, .exclusive)) return error.RoleAlreadyRunning;
     const generation = if (state_dir) |dir| try advanceGeneration(init.io, dir) else startup.fixture_generation;
     if (generation == 0) return error.InvalidRoleConfiguration;
+    const live_engine = if (role == .engine and state_dir != null)
+        try production_engine.Engine.open(init, state_dir.?, startup.state_dir)
+    else
+        null;
+    defer if (live_engine) |engine| engine.close(init);
     try installTermHandler();
     const address = try std.Io.net.UnixAddress.init(socket_path);
     std.Io.Dir.cwd().deleteFile(init.io, socket_path) catch |err| switch (err) {
@@ -259,7 +301,9 @@ pub fn runRole(init: std.process.Init, role: Role, socket_path: []const u8, star
 
     var stdout_buffer: [256]u8 = undefined;
     var stdout = std.Io.File.stdout().writer(init.io, &stdout_buffer);
-    try stdout.interface.print("production_role: role={s}, generation={d}, ipc=unix, venue=SimulatedVenue\n", .{ roleName(role), generation });
+    try stdout.interface.print("production_role: role={s}, generation={d}, ipc=unix\n", .{ roleName(role), generation });
+    if (live_engine) |active_engine| if (active_engine.recovery_failure) |failure|
+        try stdout.interface.print("production_role: venue_recovery={s}\n", .{@errorName(failure)});
     try stdout.interface.flush();
 
     active_socket.store(server.socket.handle, .seq_cst);
@@ -272,7 +316,7 @@ pub fn runRole(init: std.process.Init, role: Role, socket_path: []const u8, star
     active_socket.store(stream.socket.handle, .seq_cst);
     try verifyController(stream, fixture, parent);
     try writeStatus(&stream, init.io, .hello);
-    try writeStatus(&stream, init.io, .ready);
+    try writeStatus(&stream, init.io, if (live_engine != null and live_engine.?.recovery_failure != null) .recovery_only else .ready);
 
     var draining = false;
     var drain_deadline: ?i96 = null;
@@ -324,6 +368,7 @@ pub fn runRole(init: std.process.Init, role: Role, socket_path: []const u8, star
                 draining = true;
                 drain_deadline = std.Io.Clock.awake.now(init.io).nanoseconds + 5 * std.time.ns_per_s;
                 if (engine) |owner_| try owner_.revoke(init);
+                if (live_engine) |active_engine| try production_engine.revokeHosts(active_engine.owner);
                 try writeStatus(&stream, init.io, .draining);
             },
             .stop => {
@@ -334,6 +379,13 @@ pub fn runRole(init: std.process.Init, role: Role, socket_path: []const u8, star
                 if ((engine != null and engine.?.pending) or backend.pending != null) {
                     try writeStatus(&stream, init.io, .forced_stop);
                     return error.BusinessOutputPending;
+                }
+                if (live_engine) |active_engine| {
+                    if (!(try active_engine.owner.source()).oms.openOrdersClosed()) {
+                        try writeStatus(&stream, init.io, .forced_stop);
+                        return error.BusinessOutputPending;
+                    }
+                    if (active_engine.owner.decision_journal.records != 0) try active_engine.owner.checkpoint();
                 }
                 if (role == .execution_gateway and business_started)
                     try backend.adapter().stop(.{ .monotonic_ns = @intCast(std.Io.Clock.awake.now(init.io).nanoseconds) });
@@ -394,6 +446,48 @@ pub fn runRole(init: std.process.Init, role: Role, socket_path: []const u8, star
                     },
                     else => return error.InvalidBusinessTransition,
                 }
+            },
+            .read_pair_trading_list => {
+                const active_engine = live_engine orelse return error.EngineUnavailable;
+                const size = try readFrameInt(&stream, init.io, u32);
+                if (size == 0 or size > production_engine.max_authority_bytes) return error.InvalidAuthorityFrame;
+                const request = try init.gpa.alloc(u8, size);
+                defer init.gpa.free(request);
+                try readExact(&stream, init.io, request);
+                const response = production_engine.readPairTradingList(active_engine.owner, init.gpa, request) catch |err|
+                    try std.json.Stringify.valueAlloc(init.gpa, .{ .@"error" = @errorName(err) }, .{});
+                defer init.gpa.free(response);
+                if (response.len > production_engine.max_authority_bytes) return error.InvalidAuthorityFrame;
+                var output_buffer: [256]u8 = undefined;
+                var output = stream.writer(init.io, &output_buffer);
+                try output.interface.writeInt(u32, @intCast(response.len), .little);
+                try output.interface.writeAll(response);
+                try output.interface.flush();
+            },
+            .ingest_canonical, .read_committed => {
+                const active_engine = live_engine orelse return error.EngineUnavailable;
+                var frame: [production_engine.max_record_bytes]u8 = undefined;
+                const result: production_engine.CommittedRecord = if (command == .ingest_canonical) blk: {
+                    if (active_engine.recovery_failure != null) return error.VenueRecoveryIncomplete;
+                    const size = try readFrameInt(&stream, init.io, u32);
+                    if (size == 0 or size > production_engine.max_input_bytes) return error.InvalidCanonicalFrame;
+                    try readExact(&stream, init.io, frame[0..size]);
+                    break :blk .{ .cursor = try production_engine.ingest(active_engine.owner, frame[0..size]) };
+                } else try production_engine.nextCommittedRecord(active_engine.owner, try readFrameInt(&stream, init.io, u64), &frame);
+                var output_buffer: [256]u8 = undefined;
+                var output = stream.writer(init.io, &output_buffer);
+                try output.interface.writeInt(u64, result.cursor, .little);
+                try output.interface.writeInt(u32, if (result.record) |record| @intCast(record.payload.len) else 0, .little);
+                if (result.record) |record| {
+                    try output.interface.writeInt(u16, record.type_id, .little);
+                    try output.interface.writeInt(u16, record.schema_version, .little);
+                    try output.interface.writeInt(u32, record.flags, .little);
+                    for ([_]u64{ record.source_time, record.receive_time, record.monotonic_time, record.wall_time }) |time|
+                        try output.interface.writeInt(u64, time, .little);
+                    try output.interface.writeByte(@bitCast(record.time_presence));
+                    try output.interface.writeAll(record.payload);
+                }
+                try output.interface.flush();
             },
         }
     }
@@ -566,6 +660,105 @@ pub fn runIntegration(init: std.process.Init, executable: []const u8) !void {
         .{max_control_queue},
     );
     try output.interface.flush();
+}
+
+test "formal engine recovers its Writer and reads canonical observations only after commit" {
+    const durable = @import("../persistence/durable_store.zig");
+    const codec = @import("../persistence/canonical_event_codec.zig");
+    const Owner = @import("demo/demo_authority.zig").Owner;
+    const fixture = @import("../testing/support/trading_shard_fixture.zig");
+    const account = @import("../testing/acceptance/core/multi_account_authority_acceptance.zig");
+    const allocator = std.testing.allocator;
+    var directory = std.testing.tmpDir(.{ .iterate = true });
+    defer directory.cleanup();
+    const storage = try allocator.create(durable.LinuxFileAdapter);
+    defer allocator.destroy(storage);
+    storage.* = .{ .dir = directory.dir };
+    defer storage.deinit();
+    const owner = try allocator.create(Owner);
+    defer allocator.destroy(owner);
+    const decision_stream: durable.StreamIdentity = .{ .domain = .decision_log, .id = 91 };
+    try Owner.bootstrapInto(owner, storage.interface(), std.testing.io, decision_stream);
+    try account.initializePythonOwner(owner);
+    const digest = owner.deployment_anchor.?;
+    const before = owner.shard.authoritativeBarrier();
+
+    const recovered = try allocator.create(Owner);
+    defer allocator.destroy(recovered);
+    try std.testing.expectError(error.DeploymentDigestMismatch, production_engine.recover(recovered, storage.interface(), std.testing.io, decision_stream.id, @splat(1)));
+    try std.testing.expectError(error.DecisionLogUnavailable, recovered.source());
+    try production_engine.recover(recovered, storage.interface(), std.testing.io, decision_stream.id, digest);
+    try std.testing.expect(recovered.shard.recovery_admission_pending);
+    const list_request =
+        \\{"operation":"pair_trading_list","strategy_identity":"00000000000000000000000000000009","scope_accounts":["00000000000000000000000000000014","0000000000000000000000000000001e"]}
+    ;
+    const pair_list = try production_engine.readPairTradingList(recovered, allocator, list_request);
+    defer allocator.free(pair_list);
+    try std.testing.expectEqualStrings("{\"pairs\":[]}", pair_list);
+    var buffer: [production_engine.max_record_bytes]u8 = undefined;
+    try std.testing.expectError(error.InvalidCanonicalFrame, production_engine.ingest(recovered, &.{}));
+    try std.testing.expect((try production_engine.nextCommittedRecord(recovered, before, &buffer)).record == null);
+    try std.testing.expectError(error.CursorAheadOfCommit, production_engine.nextCommittedRecord(recovered, before + 1, &buffer));
+
+    var event = fixture.canonicalAt(46, 1, .{ .reference_price = .{
+        .instrument = 101,
+        .kind = .index,
+        .price = .{ .instrument = 101, .rules_version = 1, .ticks = 42 },
+    } });
+    event.venue.envelope.scope = .instrument;
+    event.venue.envelope.exchange_account = null;
+    event.venue.envelope.instrument = 101;
+    event.venue.envelope.identity.stream = 9000;
+    event.venue.envelope.source_stream = 9000;
+    const frame = try codec.encode(&buffer, event.venue);
+    const committed = try production_engine.ingest(recovered, frame);
+    try std.testing.expect(committed > before);
+    try std.testing.expectEqual(committed, (try storage.interface().recover(std.testing.io, decision_stream)).committed_barrier);
+    try std.testing.expectEqual(committed, try production_engine.ingest(recovered, frame));
+    try recovered.checkpoint();
+
+    storage.deinit();
+    storage.* = .{ .dir = directory.dir };
+    try production_engine.recover(owner, storage.interface(), std.testing.io, decision_stream.id, digest);
+    const input = try production_engine.nextCommittedRecord(owner, before, &buffer);
+    try std.testing.expectEqual(before + 1, input.cursor);
+    const decoded = (try @import("../trading/trading_shard.zig").decodeStableInput(input.record.?)).venue;
+    try std.testing.expectEqualDeep(event.venue.envelope.identity, decoded.envelope.identity);
+    try std.testing.expectEqual(@as(i128, 42), decoded.event.reference_price.price.ticks);
+    var cursor = input.cursor;
+    while (cursor < owner.shard.authoritativeBarrier()) {
+        const next = try production_engine.nextCommittedRecord(owner, cursor, &buffer);
+        try std.testing.expectEqual(cursor + 1, next.cursor);
+        try std.testing.expect(next.record != null);
+        cursor = next.cursor;
+    }
+    try std.testing.expect((try production_engine.nextCommittedRecord(owner, cursor, &buffer)).record == null);
+    try std.testing.expect(owner.shard.recovery_admission_pending);
+
+    try @import("../testing/acceptance/core/scanner_authorization_acceptance.zig").configurePairAssets(owner);
+    _ = try owner.apply(fixture.atGroup(46, .{ .identity = 98765, .payload = .{ .pair_trading_authorization = .{
+        .identity = 98765,
+        .strategy = 9,
+        .portfolio = 10,
+        .activation = 1,
+        .config_version = 1,
+        .expected_version = 0,
+        .legs = .{
+            .{ .venue = 1, .environment = .simulation, .account = 20, .instrument = 101, .rules_version = 2 },
+            .{ .venue = 21, .environment = .simulation, .account = 30, .instrument = 102, .rules_version = 2 },
+        },
+        .direction = 1,
+        .mode = .taker_taker,
+        .enabled = true,
+    } } }));
+    const populated = try production_engine.readPairTradingList(owner, allocator, list_request);
+    defer allocator.free(populated);
+    const projected = try std.json.parseFromSlice(struct {
+        pairs: []const struct { identity: []const u8 },
+    }, allocator, populated, .{ .ignore_unknown_fields = true });
+    defer projected.deinit();
+    try std.testing.expectEqual(@as(usize, 1), projected.value.pairs.len);
+    try std.testing.expectEqualStrings("000000000000000000000000000181cd", projected.value.pairs[0].identity);
 }
 
 test "bounded role IPC fails closed and drains FIFO" {

@@ -245,7 +245,7 @@ class ControlPlaneApp:
         self.csrf_by_token_hash: dict[str, str] = {}
         self.release_manager = release_manager
         self.instance_manager = (strategy_instance.InstanceManager(directory, release_manager, instance_source)
-                                 if release_manager is not None and instance_source is not None else None)
+                                 if instance_source is not None else None)
         self.lifecycle_outbox = lifecycle_outbox
         from opportunity_scanner.exchange_settings import ExchangeSettings
         from opportunity_scanner.scanner_runtime import DEFAULT_SCANNER_ADAPTERS, ScannerRuntime
@@ -425,7 +425,7 @@ class ControlPlaneApp:
               file=_sys.stderr, flush=True)
         instance_result = None
         if "strategy_identity" in command:
-            if self.instance_manager is None or kind not in ("enable_trading", "trading_pause", "stop_keep_positions", "kill_switch"):
+            if self.instance_manager is None or self.release_manager is None or kind not in ("enable_trading", "trading_pause", "stop_keep_positions", "kill_switch"):
                 return 400, {"ok": False, "error": "strategy instance command unavailable"}
             try:
                 instance_result = self.instance_manager.control(command["strategy_identity"],
@@ -660,6 +660,8 @@ class ControlPlaneApp:
         try:
             if binding is None:
                 return 200, {"ok": True, "instances": self.instance_manager.view()}
+            if self.release_manager is None:
+                return 503, {"ok": False, "error": "strategy release and Host services unavailable"}
             if type(binding) is dict and binding.get("operation") == "recover":
                 if binding.keys() != {"operation", "strategy_identity"}:
                     raise ValueError("unexpected recovery fields")

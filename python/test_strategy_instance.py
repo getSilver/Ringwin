@@ -1184,6 +1184,7 @@ finally:
         ready = self.create()[1]["result"]
         self.assertEqual(ready["status"], "Ready", ready)
         self.assertIs(ready["pair_trading_list_empty"], True, ready)
+        self.assertEqual(ready["pair_trading_list"], [])
         identity = self.binding["strategy_identity"]
         with self.assertRaisesRegex(ValueError, "NoHostActivation"):
             authority.request(dict(operation="applied", strategy_identity=identity, cursor=ready["evidence"]["cursor"]))
@@ -1866,14 +1867,14 @@ class InstanceContractTests(unittest.TestCase):
         accounts = [f"{20:032x}", f"{30:032x}"]
 
         class Authority:
-            empty = False
+            pairs = [{"identity": "1" * 32}]
 
             def request(self, request):
                 if request != dict(operation="pair_trading_list", strategy_identity=identity, scope_accounts=accounts):
                     raise AssertionError(request)
-                if self.empty is None:
+                if self.pairs is None:
                     raise OSError("authority disconnected")
-                return dict(empty=self.empty)
+                return dict(pairs=self.pairs)
 
         authority = Authority()
         source = SimpleNamespace(authority=authority)
@@ -1882,12 +1883,16 @@ class InstanceContractTests(unittest.TestCase):
             manager._save(dict(binding=dict(strategy_identity=identity, scopes=[
                 dict(venue="okx", exchange_account=accounts[0]),
                 dict(venue="bybit", exchange_account=accounts[1])]), status="Ready"))
-            self.assertIs(manager.view()[0]["pair_trading_list_empty"], False)
-            authority.empty = True
+            self.assertEqual(manager.view()[0]["pair_trading_list"], authority.pairs)
+            authority.pairs = []
             self.assertIs(manager.view()[0]["pair_trading_list_empty"], True)
             restarted = strategy_instance.InstanceManager(directory, None, source)
             self.assertIs(restarted.view()[0]["pair_trading_list_empty"], True)
-            authority.empty = None
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                with restarted._lock:
+                    concurrent_view = executor.submit(restarted.view).result(timeout=3)
+            self.assertIs(concurrent_view[0]["pair_trading_list_empty"], True)
+            authority.pairs = None
             self.assertIsNone(restarted.view()[0]["pair_trading_list_empty"])
 
     def test_fixed_api_rejects_a_partial_group(self):

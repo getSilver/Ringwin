@@ -7,6 +7,19 @@ const ipc = @import("strategy_host_ipc.zig");
 const channel = @import("../runtime/control_channel.zig");
 const cutover = @import("../runtime/recovery_cutover.zig");
 const native = @import("native_instance.zig");
+const pair_authorization = @import("../trading/pair_trading_authorization.zig");
+
+const PairListEntry = struct {
+    identity: [32]u8,
+    direction: i8,
+    mode: pair_authorization.Mode,
+    legs: [2]struct {
+        venue: u64,
+        environment: @FieldType(pair_authorization.Leg, "environment"),
+        account: [32]u8,
+        instrument: [32]u8,
+    },
+};
 
 /// The node supplies these bindings from its sealed deployment, never from Web input.
 pub const AuthoritySet = struct {
@@ -183,14 +196,17 @@ pub const Authority = struct {
         const op = value.operation;
         if (std.mem.eql(u8, op, "cycle_fx_projection")) {
             var projected = try @import("../runtime/strategy_fx_projection.zig").project(
-                gpa, self.shard, self.journal, self.strategy, value.cycle_first_sequence,
+                gpa,
+                self.shard,
+                self.journal,
+                self.strategy,
+                value.cycle_first_sequence,
             );
             defer projected.deinit(gpa);
             return projected.json(gpa);
         }
         if (std.mem.eql(u8, op, "pair_trading_list")) {
-            const applies = self.shard.pairTradingScopeBound(self.strategy) or try self.crossesVenues(value.scope_accounts);
-            return std.json.Stringify.valueAlloc(gpa, .{ .empty = if (applies) self.shard.pairTradingListEmpty(self.strategy) else null }, .{});
+            return pairTradingList(gpa, self.shard, self.strategy, value.scope_accounts);
         }
         if (std.mem.eql(u8, op, "pair_authorization_version")) {
             const version = try std.fmt.allocPrint(gpa, "{d}", .{self.shard.pair_authorizations.version});
@@ -459,21 +475,6 @@ pub const Authority = struct {
         try self.revokeFor(.fault);
     }
 
-    fn crossesVenues(self: *const Authority, accounts: []const []const u8) !bool {
-        if (accounts.len < 2) return false;
-        if (accounts.len > self.shard.deployment.accounts.len) return error.InvalidAuthorityPlacement;
-        var first: ?u64 = null;
-        var crosses = false;
-        for (accounts) |identity| {
-            const account = self.shard.deployment.account(try AuthoritySet.nativeIdentity(identity)) orelse
-                return error.InvalidAuthorityPlacement;
-            if (first) |venue| {
-                crosses = crosses or account.venue != venue;
-            } else first = account.venue;
-        }
-        return crosses;
-    }
-
     fn revokeFor(self: *Authority, reason: @import("../trading/trading_shard_event.zig").HostRevocationReason) !void {
         const authority = self.shard.strategyAuthority(self.strategy);
         if (authority.host_activation_identity != 0) try self.commit(self.context, .{ .host_activation_revoked = .{
@@ -530,3 +531,41 @@ pub const Authority = struct {
         }, .{});
     }
 };
+
+pub fn pairTradingList(gpa: std.mem.Allocator, shard: *const trading.TradingShard, strategy: u128, accounts: []const []const u8) ![]u8 {
+    const applies = shard.pairTradingScopeBound(strategy) or try crossesVenues(shard, accounts);
+    if (!applies) return std.json.Stringify.valueAlloc(gpa, .{ .pairs = null }, .{});
+    var pairs: [@typeInfo(@FieldType(pair_authorization.State, "records")).array.len]PairListEntry = undefined;
+    var count: usize = 0;
+    for (0..shard.pair_authorizations.count) |index| {
+        const record = shard.effectivePairAuthorization(strategy, index) orelse continue;
+        const request_value = record.request;
+        const entry = &pairs[count];
+        _ = try std.fmt.bufPrint(&entry.identity, "{x:0>32}", .{request_value.identity});
+        entry.direction = request_value.direction;
+        entry.mode = request_value.mode;
+        for (request_value.legs, &entry.legs) |leg, *projected| {
+            projected.venue = leg.venue;
+            projected.environment = leg.environment;
+            _ = try std.fmt.bufPrint(&projected.account, "{x:0>32}", .{leg.account});
+            _ = try std.fmt.bufPrint(&projected.instrument, "{x:0>32}", .{leg.instrument});
+        }
+        count += 1;
+    }
+    return std.json.Stringify.valueAlloc(gpa, .{ .pairs = pairs[0..count] }, .{});
+}
+
+fn crossesVenues(shard: *const trading.TradingShard, accounts: []const []const u8) !bool {
+    if (accounts.len < 2) return false;
+    if (accounts.len > shard.deployment.accounts.len) return error.InvalidAuthorityPlacement;
+    var first: ?u64 = null;
+    var crosses = false;
+    for (accounts) |identity| {
+        const account = shard.deployment.account(try AuthoritySet.nativeIdentity(identity)) orelse
+            return error.InvalidAuthorityPlacement;
+        if (first) |venue| {
+            crosses = crosses or account.venue != venue;
+        } else first = account.venue;
+    }
+    return crosses;
+}

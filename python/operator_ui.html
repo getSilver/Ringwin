@@ -298,7 +298,10 @@ async function loadInstances(){
     if (status !== 200) { el.textContent = body.error || "实例查询失败"; return; }
     el.innerHTML = body.instances.map(r=>`<p>${escaped(r.binding.strategy_identity)}：
       ${escaped(r.status)} ${escaped(r.reason)}；${r.trading_authorized ? "核心已授权交易" : "无交易授权"}<br>
-      ${r.pair_trading_list_empty === true ? "策略交易名单为空，请从跨所机会扫描器添加配对<br>" : ""}
+      ${Array.isArray(r.pair_trading_list) ? r.pair_trading_list.length
+        ? r.pair_trading_list.map(pair => `${escaped(pair.legs.map(leg => `${leg.venue} / ${leg.environment} / ${leg.instrument}`).join(pair.direction === 1 ? " → " : " ← "))} · ${escaped(pair.mode)}<br>`).join("")
+        : "策略交易名单为空，请从跨所机会扫描器添加配对<br>"
+        : r.pair_trading_list === null ? "策略交易名单不可用<br>" : ""}
       ${escaped(r.binding.definition_identity)} / ${escaped(r.binding.config_sha256)}<br>
       ${escaped(JSON.stringify(r.recovery || {}))}<br>
       ${escaped(JSON.stringify(r.evidence || {}))}<br>
