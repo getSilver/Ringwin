@@ -16,7 +16,7 @@ pub const Role = enum { engine, market_feed, execution_gateway, telemetry, contr
 pub const Phase = enum { stopped, starting, ready, recovering, trading, draining, forced_stop, failed };
 pub const RolePhase = enum { stopped, starting, ready, recovering, draining, forced_stop, failed };
 pub const Venue = enum { simulated };
-pub const Command = enum(u8) { enable_risk = 'A', drain = 'D', stop = 'S', business = 'B', settle = 'L', ingest_canonical = 'I', read_committed = 'C', read_pair_trading_list = 'P', recover_venue = 'U' };
+pub const Command = enum(u8) { enable_risk = 'A', drain = 'D', stop = 'S', business = 'B', settle = 'L', ingest_canonical = 'I', read_committed = 'C', read_strategy_authority = 'P', recover_venue = 'U' };
 pub const Status = enum(u8) { hello = 'H', ready = 'R', risk_enabled = 'A', draining = 'G', stopped = 'T', forced_stop = 'F', failed = 'X', recovery_only = 'V' };
 
 pub const BoundedQueue = struct {
@@ -458,7 +458,7 @@ fn serveRole(init: std.process.Init, role: Role, socket_path: []const u8, startu
                     else => return error.InvalidRoleTransition,
                 }
             },
-            .read_pair_trading_list => {
+            .read_strategy_authority => {
                 const active_engine = live_engine orelse return error.EngineUnavailable;
                 const size = try readFrameInt(&stream, init.io, u32);
                 if (size == 0 or size > production_engine.max_authority_bytes) return error.InvalidAuthorityFrame;

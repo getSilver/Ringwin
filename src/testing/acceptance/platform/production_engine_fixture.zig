@@ -43,9 +43,6 @@ fn provision(init: std.process.Init) !void {
     defer init.gpa.destroy(owner);
     try Owner.bootstrapInto(owner, store.interface(), init.io, .{ .domain = .decision_log, .id = 91 });
     try fixture.initializePythonOwner(owner);
-    if (web_empty or web_approved) {
-        _ = try owner.apply(.{ .core = .{ .identity = owner.shard.authoritativeBarrier() + 1, .payload = .{ .pair_trading_scope_bound = 9 } } });
-    }
     if (web_approved) {
         try @import("../core/scanner_authorization_acceptance.zig").configurePairAssets(owner);
         _ = try owner.apply(@import("../../support/trading_shard_fixture.zig").atGroup(45, .{

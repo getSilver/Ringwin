@@ -237,8 +237,8 @@ fn readStrategyInstances(gpa: std.mem.Allocator, shard: *const trading.TradingSh
         },
         status: []const u8 = "Stopped",
         trading_authorized: bool = false,
-        pair_trading_list: ?[]strategy_authority.PairListEntry,
-        pair_trading_list_empty: ?bool,
+        pair_trading_list: []strategy_authority.PairListEntry,
+        pair_trading_list_empty: bool,
     };
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
@@ -247,10 +247,7 @@ fn readStrategyInstances(gpa: std.mem.Allocator, shard: *const trading.TradingSh
         const authority = if (index == 0) shard.strategyAuthority(shard.strategy_identity) else shard.portfolio_authorities[index - 1];
         const identity = authority.strategy_identity;
         if (identity == 0 or !authority.strategy_active or shard.strategyFenced(identity)) continue;
-        const pairs = if (shard.pairTradingScopeBound(identity) or shard.pair_authorizations.hasHistory(identity))
-            try strategy_authority.effectivePairList(arena.allocator(), shard, identity)
-        else
-            null;
+        const pairs = try strategy_authority.effectivePairList(arena.allocator(), shard, identity);
         var instance: Instance = .{
             .binding = .{
                 .strategy_identity = undefined,
@@ -258,13 +255,13 @@ fn readStrategyInstances(gpa: std.mem.Allocator, shard: *const trading.TradingSh
                 .config_version = authority.strategy_config_version,
             },
             .pair_trading_list = pairs,
-            .pair_trading_list_empty = if (pairs) |entries| entries.len == 0 else null,
+            .pair_trading_list_empty = pairs.len == 0,
         };
         _ = try std.fmt.bufPrint(&instance.binding.strategy_identity, "{x:0>32}", .{identity});
         _ = try std.fmt.bufPrint(&instance.binding.decision_domain, "{x:0>32}", .{shard.decision_domain_identity});
         try instances.append(arena.allocator(), instance);
     }
-    return std.json.Stringify.valueAlloc(gpa, .{ .instances = instances.items }, .{ .emit_null_optional_fields = false });
+    return std.json.Stringify.valueAlloc(gpa, .{ .instances = instances.items }, .{});
 }
 
 pub const CommittedRecord = struct {
