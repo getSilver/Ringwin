@@ -1852,9 +1852,19 @@ class IntegrationTests(unittest.TestCase):
         self.start()
         shared = set(self.runtime.source.registered)
         self.runtime.source.acquire("other-public-consumer",shared)
+        fresh_coverage = self.call("start")["market"]["coverage"]
+        self.assertEqual((fresh_coverage["fresh"], fresh_coverage["expired"]), (1, 0))
         self.now[0] += 6_000_000_000
         expired = self.call("start")
-        self.assertTrue(all(c["reason"] == "expired" for c in expired["snapshot"]["candidates"]))
+        coverage = expired["market"]["coverage"]
+        self.assertEqual((coverage["fresh"], coverage["expired"]), (0, 1))
+        self.assertEqual([route["status"] for route in coverage["routes"]], ["expired"])
+        candidates = expired["snapshot"]["candidates"]
+        self.assertTrue(candidates)
+        for candidate in candidates:
+            self.assertEqual(expired["remaining_validity_ns"][candidate["id"]], "0")
+            self.assertFalse(candidate["recommended"])
+            self.assertFalse(candidate["trading_qualified"])
         self.assertTrue(all(not o["continuous"] for o in expired["market"]["observations"]))
         self.call("stop")
         self.assertEqual(self.runtime.source.owners["other-public-consumer"], shared)
