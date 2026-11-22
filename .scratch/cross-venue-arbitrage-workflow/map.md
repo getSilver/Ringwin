@@ -36,7 +36,8 @@ Status: open
 
 ## Frontier
 
-- [11 从前端批准跑通双 IOC 完整周期](issues/11-dual-ioc.md)
+- [12 双 IOC 单腿失败与重启恢复](issues/12-ioc-recovery.md)
+- [13 Maker 撤换单、增量对冲与恢复](issues/13-maker.md)
 - [15 滚动归档并测出持续扫描容量](issues/15-capacity.md)
 
 ## Decisions so far
@@ -62,6 +63,8 @@ Status: open
 [09](issues/09-revoke.md) 已通过策略页持久身份、停扫和 Web 重启、失效批准、丢回执及历史满载撤销的离线定向验收。Writer 提交撤销后立即限制新开仓。
 
 [10](issues/10-limit-price.md) 已通过 Host 限价定向验收。Gateway 请求保留各腿 ticks 和规则版本，TradingShard 校验 tick 单位并逐腿记录拒绝原因。
+
+[11](issues/11-dual-ioc.md) 已在远端 Linux 完成批准评估交付、独立 Gateway 进程分派、两腿开平仓和原币与汇差对账的模拟场所验收。
 
 [14](issues/14-coverage.md) 已用 20 个盘口、10 条路线完成离线双腿轮转验收。持续归档和容量测量由 [15](issues/15-capacity.md) 接续。
 

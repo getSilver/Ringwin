@@ -16,7 +16,8 @@ from strategies.cross_venue import arbitrage_checkpoint as checkpoint
 from opportunity_scanner import arbitrage_scanner as scanner
 from opportunity_scanner.scanner_archive import freeze, load, MAX_BYTES
 from opportunity_scanner.scanner_history import History, encoded
-from opportunity_scanner.scanner_config import ConfigStore, uint_text
+from opportunity_scanner.scanner_config import ConfigStore, atomic_json, uint_text
+from opportunity_scanner.approved_evaluation import MAX_BYTES as MAX_APPROVED_EVALUATION_BYTES
 
 MAX_CORE_ID = (1 << 128) - 1
 MAX_CORE_VERSION = (1 << 64) - 1
@@ -729,6 +730,10 @@ class ScannerConsole:
                     raise ValueError("core pair confirmation version")
                 self._verify_deployed_receipt(result.get("pair"), request["core"])
                 response["observation_legs"] = request["candidate"].get("legs", [])
+                if self.config_store is not None:
+                    path = self.config_store.path.parent / "approved-evaluations" / (identity + ".json")
+                    atomic_json(path, dict(schema="approved_evaluation_v1", selection=selection,
+                                           evaluation=request["candidate"], receipt=result), MAX_APPROVED_EVALUATION_BYTES)
         except (OSError, ValueError, KeyError, TypeError) as error:
             response = dict(identity=identity, status="unknown", reason=str(error), trading_qualified=False)
         if submit:

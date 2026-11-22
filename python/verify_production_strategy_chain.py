@@ -21,6 +21,7 @@ import owner_session
 import strategy_host
 import strategy_package
 from venue_recovery import recover_market_inputs
+from venue_dispatch import read_committed_snapshot
 from verify_production_strategy_web import child, receive, relay_strategy_reads, request
 from verify_production_venue_recovery import read_committed, role
 
@@ -208,21 +209,33 @@ class Strategy:
 DUAL_IOC = '''
 import json
 from dataclasses import replace
+from pathlib import Path
 from strategy_host import decode_market_trade
+from opportunity_scanner.approved_evaluation import read_approved_evaluation
 from strategies.cross_venue.arbitrage_cycle import Action, Cycle, Intent
 from test_arbitrage_cycle import with_price_units
 from test_strategy_cycle_recovery import CORE_UTC, core_plan
 
 
 def validate_config(config):
-    assert config == b"{}"
+    assert Path(json.loads(config)["approval"]).is_absolute()
 
 
 def create(context, config):
-    return Strategy()
+    paths = json.loads(config)
+    approved = read_approved_evaluation(paths["approval"], strategy_identity=int(context.strategy_identity, 16))
+    refreshed = json.loads(Path(paths["refreshed"]).read_bytes())
+    assert refreshed["id"] == approved[1]["id"] and refreshed["status"] == "evaluated"
+    return Strategy(*approved, refreshed)
 
 
 class Strategy:
+    def __init__(self, portfolio, evaluated, pair, refreshed):
+        self.portfolio = portfolio
+        self.evaluated = evaluated
+        self.pair = pair
+        self.refreshed = refreshed
+
     def validate(self):
         assert self.next_intent_sequence >= 7
 
@@ -241,8 +254,14 @@ class Strategy:
         reducing = trigger == 4
         assert self.step == (2 if reducing else 1), "fee rejection advanced private state"
         plan = core_plan()
-        legs = tuple(replace(leg, rules=replace(leg.rules, version=2)) for leg in plan.legs)
-        plan = replace(plan, legs=legs, first_sequence=self.next_intent_sequence, entry_limits=(100, 100))
+        evaluation = self.refreshed if trigger >= 3 else self.evaluated
+        direction = self.pair["direction"]
+        legs = tuple(replace(leg, account=int(bound["account"], 16), direction=direction if index == 0 else -direction,
+            rules=replace(leg.rules, instrument=int(bound["instrument"], 16), version=2))
+            for index, (leg, bound) in enumerate(zip(plan.legs, self.pair["legs"])))
+        plan = replace(plan, portfolio=self.portfolio, legs=legs, first_sequence=self.next_intent_sequence,
+            policy=replace(plan.policy, direction=direction, model_hash=evaluation["model_hash"]),
+            entry_limits=(100, 100), target_atoms=int(evaluation["target_atoms"]))
         if reducing:
             action = Action(plan, event.sequence, "fixture_exit",
                 tuple(Intent(self.next_intent_sequence + index, index, 10_000, 100, True)
@@ -250,7 +269,8 @@ class Strategy:
         else:
             action = Cycle(plan).start(cursor=event.sequence, at_ns=CORE_UTC)
         self.next_intent_sequence += len(action.intents)
-        return (with_price_units(action, base_scale=4).package_output(fee_version=None if reducing else str(trigger)),)
+        version = "2" if trigger == 2 else evaluation["input_versions"]["fees"]
+        return (with_price_units(action, base_scale=4).package_output(fee_version=None if reducing else version),)
 '''
 
 
@@ -274,6 +294,9 @@ def configure_host(core, root, cursor, *, bad_ack=False, dual_ioc=False):
                    scopes=[dict(exchange_account=f"{20:032x}", instrument=f"{101:032x}")])
     if dual_ioc:
         binding["scopes"].append(dict(exchange_account=f"{30:032x}", instrument=f"{102:032x}"))
+        config = strategy_package.canonical(dict(approval=str(root / "approved-evaluations" / "98765.json"),
+                                                 refreshed=str(root / "refreshed-evaluation.json")))
+        binding.update(config_json=config.decode("ascii"), config_sha256=hashlib.sha256(config).hexdigest())
     manifest = dict(entrypoint="acceptance_strategy:create",
                     compatibility=dict(python_abi=strategy_host.PYTHON_ABI,
                                        host_build=f"{strategy_host.HOST_BUILD:032x}",
@@ -337,6 +360,22 @@ host.run(sys.argv[3], tuple(map(int, sys.argv[5:])))
         for index, revision in enumerate((rows[:1], rows), 1):
             fees.save(dict(expected_version=str(index), rows=revision))
             shutil.copyfile(path, root / f"fees-{index + 1}.json")
+        from opportunity_scanner.arbitrage_scanner import scan
+        from test_arbitrage_evaluation import T
+        from verify_scanner_console import canonical_fixture
+
+        observations, plan = canonical_fixture(environments=("simulation", "simulation"), mixed_stablecoins=True)
+        assert fees.view()["version"] == "3"
+        # The complete revision restores the two no-fee schedules used by the
+        # offline evaluation. Verify both before re-evaluating its economics.
+        current_rules = [fees.rule(observation) for observation in observations]
+        assert all(rule.maker_ppm == rule.taker_ppm == 0 for rule in current_rules)
+        plan = replace(plan, fee_version="3")
+        result = scan(observations, (plan,), at_ns=T, cursor=2, max_age_ns=1000,
+                      max_skew_ns=1000, input_versions={plan.policy.scope:
+                          {str(plan.policy.original_base): {"fees": "3"}}})
+        evaluated, = [row for row in result["candidates"] if row["status"] == "evaluated"]
+        (root / "refreshed-evaluation.json").write_bytes(strategy_package.canonical(evaluated))
         shutil.copyfile(root / "fees-1.json", path)
     config_path.write_bytes(strategy_package.canonical(config))
 
@@ -389,6 +428,7 @@ def ingest_live_capture(binary, provision, feed, feed_socket, engine, activation
         inputs = [record for record in records if record[4] & 1]
         assert any(record[41] == 2 for record in inputs), inputs
         assert any(record[41] != 2 for record in inputs), "live Host output never reached the Writer"
+        assert read_committed_snapshot(engine)
         return barrier
 
 

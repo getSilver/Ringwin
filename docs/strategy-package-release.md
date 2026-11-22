@@ -349,6 +349,25 @@ would otherwise regenerate an actionable output. Reduce-only intents continue th
 the normal admission path. Exact limit prices carry price ticks, the
 InstrumentRules version and the scale-18 decimal tick coefficient.
 
+The Web scanner writes `approved-evaluations/<approval-id>.json` under
+its state directory after checking the committed Writer receipt. A deployed
+dual IOC package can scope its plan to that evaluation and resolved pair using
+`read_approved_evaluation`. The Writer still checks current pair authority at
+order admission.
+
+For an offline simulation deployment, the independent execution role reads
+`gateway.json` from its own state directory. It accepts `environment` set to
+`simulation`, the pinned `deployment_digest` and a `dispatch_stream`. A
+fresh isolated directory can provision its dispatch log with
+`initialize_dispatch`. The trusted Unix controller requests a committed
+Writer snapshot with `X` and sends it to the execution role with `Y` and
+the committed command ID. The execution role verifies the snapshot and
+uses the durable Gateway to send the command. Its bounded canonical
+receipt batch returns to the Writer through the existing ingest path.
+`venue_dispatch.relay_committed_commands` implements the controller relay.
+The trusted controller fetches a fresh snapshot for each group and
+reconciles any interrupted dispatch before retrying.
+
 The configured `market_feed` role reads its own capture. For OKX public data,
 its `market-recovery.json` contains the same `source`, the original
 `environment`, `config_version`, and `okx_binding`. This replay uses protocol

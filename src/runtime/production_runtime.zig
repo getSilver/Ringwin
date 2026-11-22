@@ -8,6 +8,8 @@ const builtin = @import("builtin");
 const business = @import("../testing/support/linux_role_business.zig");
 const simulated = @import("../adapters/simulated/simulated_venue.zig");
 const production_engine = @import("production_engine.zig");
+const production_gateway = @import("production_gateway.zig");
+const dispatch_snapshot_limit = @import("../persistence/durable_store.zig").max_snapshot_bytes;
 
 pub const max_control_queue = 8;
 pub const max_frame_bytes = 1;
@@ -16,7 +18,7 @@ pub const Role = enum { engine, market_feed, execution_gateway, telemetry, contr
 pub const Phase = enum { stopped, starting, ready, recovering, trading, draining, forced_stop, failed };
 pub const RolePhase = enum { stopped, starting, ready, recovering, draining, forced_stop, failed };
 pub const Venue = enum { simulated };
-pub const Command = enum(u8) { enable_risk = 'A', drain = 'D', stop = 'S', business = 'B', settle = 'L', ingest_canonical = 'I', read_committed = 'C', read_strategy_authority = 'P', mutate_pair_approval = 'Q', recover_venue = 'U' };
+pub const Command = enum(u8) { enable_risk = 'A', drain = 'D', stop = 'S', business = 'B', settle = 'L', ingest_canonical = 'I', read_committed = 'C', read_strategy_authority = 'P', mutate_pair_approval = 'Q', recover_venue = 'U', dispatch_snapshot = 'X', dispatch_committed = 'Y' };
 pub const Status = enum(u8) { hello = 'H', ready = 'R', risk_enabled = 'A', draining = 'G', stopped = 'T', forced_stop = 'F', failed = 'X', recovery_only = 'V' };
 
 pub const BoundedQueue = struct {
@@ -251,7 +253,7 @@ fn verifyController(stream: std.Io.net.Stream, fixture: bool, parent: std.os.lin
 
 pub fn runRole(init: std.process.Init, role: Role, socket_path: []const u8, startup: Startup) !void {
     if (comptime builtin.os.tag != .linux) return error.LinuxOnlyProductionRole;
-    if ((role != .engine and role != .market_feed) or startup == .fixture_generation) return serveRole(init, role, socket_path, startup);
+    if ((role != .engine and role != .market_feed and role != .execution_gateway) or startup == .fixture_generation) return serveRole(init, role, socket_path, startup);
 
     // Durable recovery uses large fixed-size journal, shard and adapter values.
     const Runner = struct {
@@ -293,6 +295,11 @@ fn serveRole(init: std.process.Init, role: Role, socket_path: []const u8, startu
             std.log.err("strategy_host_revoke: {s}", .{@errorName(err)});
         engine.close(init);
     };
+    const live_gateway = if (role == .execution_gateway and state_dir != null)
+        try production_gateway.GatewayRole.open(init, state_dir.?, startup.state_dir)
+    else
+        null;
+    defer if (live_gateway) |gateway| gateway.close(init);
     try installTermHandler();
     const address = try std.Io.net.UnixAddress.init(socket_path);
     std.Io.Dir.cwd().deleteFile(init.io, socket_path) catch |err| switch (err) {
@@ -511,6 +518,30 @@ fn serveRole(init: std.process.Init, role: Role, socket_path: []const u8, startu
                     try output.interface.writeAll(record.payload);
                 }
                 try output.interface.flush();
+            },
+            .dispatch_snapshot => {
+                const current = if (live_engine) |*e| e else return error.EngineUnavailable;
+                if (draining or current.owner.checkpoint_pending or current.owner.shard.recovery_admission_pending)
+                    return error.DecisionSnapshotUnavailable;
+                const storage = try init.gpa.alloc(u8, dispatch_snapshot_limit);
+                defer init.gpa.free(storage);
+                const bytes = try current.owner.committedSnapshot(storage);
+                var output = stream.writer(init.io, &.{});
+                try output.interface.writeInt(u32, @intCast(bytes.len), .little);
+                try output.interface.writeAll(bytes);
+                try output.interface.flush();
+            },
+            .dispatch_committed => {
+                const gateway = live_gateway orelse return error.ExecutionGatewayUnavailable;
+                if (draining) return error.InvalidRoleTransition;
+                const id = try readFrameInt(&stream, init.io, u64);
+                const size = try readFrameInt(&stream, init.io, u32);
+                if (id == 0 or size == 0 or size > dispatch_snapshot_limit) return error.InvalidDispatchSnapshot;
+                const snapshot = try init.gpa.alloc(u8, size);
+                defer init.gpa.free(snapshot);
+                try readExact(&stream, init.io, snapshot);
+                const batch = try gateway.dispatch(init.io, snapshot, id);
+                try business.writeBatch(stream, init.io, &batch);
             },
         }
     }

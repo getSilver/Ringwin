@@ -26,6 +26,8 @@ pub const SimulatedVenue = struct {
     pending: ?canonical.AdapterOutputBatch = null,
     next_event_identity: u64 = 1,
     unknown_order: ?canonical.OrderIdentity = null,
+    ioc_fee_atoms: ?i128 = null,
+    reducing_ioc_rebate_atoms: i128 = 0,
 
     pub fn adapter(self: *SimulatedVenue) venue.VenueAdapter {
         return .{ .ptr = self, .vtable = &.{
@@ -160,7 +162,15 @@ pub const SimulatedVenue = struct {
         self.state = .stopped;
     }
 
-    fn emitOrderCommand(self: *SimulatedVenue, batch: *canonical.AdapterOutputBatch, binding: Binding, command: canonical.OrderCommand) !void {
+    fn emitOrderCommand(self: *SimulatedVenue, batch: *canonical.AdapterOutputBatch, binding: Binding, request: canonical.OrderCommand) !void {
+        var command = request;
+        if (request.operation == .place and request.time_in_force == .immediate_or_cancel) {
+            if (self.ioc_fee_atoms) |fee| command.fee_atoms = if (request.portfolio_reduce_only) 0 else fee;
+            if (request.portfolio_reduce_only and self.reducing_ioc_rebate_atoms != 0) {
+                command.rebate_asset = command.fee_asset;
+                command.rebate_atoms = self.reducing_ioc_rebate_atoms;
+            }
+        }
         const source_order_identity = self.next_event_identity;
         const dispatch_state: canonical.DispatchState = if (self.unknown_order != null and command.operation != .cancel)
             .not_sent

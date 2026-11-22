@@ -12,23 +12,23 @@ const fixture = @import("../support/trading_shard_fixture.zig");
 const accounts = @import("../acceptance/core/multi_account_authority_acceptance.zig");
 const dual = @import("../acceptance/core/dual_ioc_dispatch_acceptance.zig");
 
-pub fn run(init: std.process.Init, python: []const u8) !void {
+pub fn run(init: std.process.Init, python: []const u8, executable_gateway: ?[]const u8) !void {
     const Runner = struct {
         failure: ?anyerror = null,
 
-        fn runFixture(self: *@This(), process: std.process.Init, executable: []const u8) void {
-            exercise(process, executable) catch |err| {
+        fn runFixture(self: *@This(), process: std.process.Init, executable: []const u8, gateway: ?[]const u8) void {
+            exercise(process, executable, gateway) catch |err| {
                 self.failure = err;
             };
         }
     };
     var runner: Runner = .{};
-    const thread = try std.Thread.spawn(.{ .stack_size = 256 * 1024 * 1024 }, Runner.runFixture, .{ &runner, init, python });
+    const thread = try std.Thread.spawn(.{ .stack_size = 256 * 1024 * 1024 }, Runner.runFixture, .{ &runner, init, python, executable_gateway });
     thread.join();
     if (runner.failure) |err| return err;
 }
 
-fn exercise(init: std.process.Init, python: []const u8) !void {
+fn exercise(init: std.process.Init, python: []const u8, executable_gateway: ?[]const u8) !void {
     const gpa = init.gpa;
     const io = init.io;
     const cwd = try std.Io.Dir.cwd().realPathFileAlloc(io, ".", gpa);
@@ -61,6 +61,17 @@ fn exercise(init: std.process.Init, python: []const u8) !void {
             .account_scope = if (instrument == 101) 20 else 30,
             .payload = .{ .mark_price = .{ .instrument = instrument, .price_atoms = 100 } },
         }));
+        if (executable_gateway != null) {
+            const account: u128 = if (instrument == 101) 20 else 30;
+            var capability = owner.shard.pairInstrument(account, instrument).?.capability.?;
+            capability.version += 1;
+            capability.max_dispatch_age_ns = 15 * std.time.ns_per_s;
+            _ = try owner.apply(fixture.atGroup(45, .{
+                .identity = @intCast(16000 + instrument),
+                .account_scope = account,
+                .payload = .{ .capability_profile_activation = capability },
+            }));
+        }
     }
     try std.testing.expect(owner.shard.pairTradingListEmpty(9));
     try approveFromWeb(init, owner, python, path);
@@ -80,6 +91,8 @@ fn exercise(init: std.process.Init, python: []const u8) !void {
     const host = try formal.Host.start(init, owner, 1, config.value.strategy_host);
     defer host.close(init);
     try std.testing.expectEqual(@as(?u128, 9), try host.readyStrategy(owner));
+    var remote = if (executable_gateway) |executable| try RemoteGateway.start(init, executable, path, owner.shard.deployment.header.?.expected_digest) else null;
+    defer if (remote) |*process| process.close(init.io);
 
     try store.dir.rename("fees-2.json", store.dir, "manual-fees.json", io);
     for (1..4) |step| {
@@ -108,10 +121,18 @@ fn exercise(init: std.process.Init, python: []const u8) !void {
         .capability = .{ .version = 2, .rules_version = 2, .config_version = 1, .session = 1, .supports_native_amend = true },
         .supported_products = execution.productMask(.isolated_linear),
     });
-    try fillPair(gpa, owner, gateway, &adapters, approved.request.legs, false);
+    if (remote) |*process| {
+        try process.fillPair(gpa, owner, approved.request.legs, false);
+        // The independent simulation emits the full lifecycle, including
+        // dispatch outcomes and partial execution before terminal reports.
+        try owner.checkpoint();
+    } else try fillPair(gpa, owner, gateway, &adapters, approved.request.legs, false);
     try publishTrade(owner, host, 4);
     try std.testing.expectEqual(@as(u16, 4), owner.shard.oms.order_count);
-    try fillPair(gpa, owner, gateway, &adapters, approved.request.legs, true);
+    if (remote) |*process|
+        try process.fillPair(gpa, owner, approved.request.legs, true)
+    else
+        try fillPair(gpa, owner, gateway, &adapters, approved.request.legs, true);
 
     for (approved.request.legs) |leg| try accounts.reconcileDomainAccount(owner, leg.account, gateway);
     for (approved.request.legs, [_]u64{ 1, 3 }, [_]i128{ 394, 594 }) |leg, asset, expected| {
@@ -129,13 +150,18 @@ fn exercise(init: std.process.Init, python: []const u8) !void {
     var fx = try @import("../../runtime/strategy_fx_projection.zig").project(gpa, try owner.source(), &owner.decision_journal, 9, first_sequence);
     defer fx.deinit(gpa);
     try std.testing.expect(fx.closed and fx.complete);
-    try std.testing.expectEqual(@as(usize, 2), fx.flows.items.len);
-    try std.testing.expectEqual(@as(i128, -10), fx.flows.items[0].atoms);
-    try std.testing.expectEqual(@as(i128, 4), fx.flows.items[1].atoms);
+    var fees: i128 = 0;
+    var rebates: i128 = 0;
+    for (fx.flows.items) |flow| {
+        if (flow.atoms < 0) fees += flow.atoms else rebates += flow.atoms;
+    }
+    try std.testing.expectEqual(@as(i128, -10), fees);
+    try std.testing.expectEqual(@as(i128, 4), rebates);
     const projection = try fx.json(gpa);
     defer gpa.free(projection);
     try store.dir.writeFile(io, .{ .sub_path = "cycle-fx.json", .data = projection });
     try runPython(init, &.{ python, "python/verify_production_strategy_chain.py", "--verify-dual-ioc-fx", path });
+    if (remote) |*process| try process.finish(io);
     std.debug.print("formal_dual_ioc: approval={d} first_intent={d} orders=4 fee=-10 rebate=4 asset=3 closed=true\n", .{ approved.request.identity, first_sequence });
 }
 
@@ -146,6 +172,117 @@ fn runPython(init: std.process.Init, argv: []const []const u8) !void {
     if (result.stderr.len != 0) std.debug.print("{s}", .{result.stderr});
     if (result.term != .exited or result.term.exited != 0) return error.StrategyFixtureFailed;
 }
+
+const RemoteGateway = struct {
+    child: std.process.Child,
+    stream: std.Io.net.Stream,
+
+    fn start(init: std.process.Init, executable: []const u8, state: []const u8, digest: [32]u8) !RemoteGateway {
+        const io = init.io;
+        var dir_path: [2048]u8 = undefined;
+        const path = try std.fmt.bufPrint(&dir_path, "{s}/gateway", .{state});
+        try std.Io.Dir.cwd().createDir(io, path, @enumFromInt(0o700));
+        var dir = try std.Io.Dir.openDirAbsolute(io, path, .{});
+        defer dir.close(io);
+        var config: [256]u8 = undefined;
+        try dir.writeFile(io, .{ .sub_path = "gateway.json", .data = try std.fmt.bufPrint(&config, "{{\"environment\":\"simulation\",\"deployment_digest\":\"{s}\",\"dispatch_stream\":92,\"initialize_dispatch\":true,\"ioc_fee_atoms\":10,\"reducing_ioc_rebate_atoms\":4}}", .{std.fmt.bytesToHex(digest, .lower)}) });
+        var socket_path: [2048]u8 = undefined;
+        const socket = try std.fmt.bufPrint(&socket_path, "{s}/g.sock", .{path});
+        var child = try std.process.spawn(io, .{
+            .argv = &.{ executable, "--production-role", "execution_gateway", "--socket", socket, "--state-dir", path },
+        });
+        errdefer child.kill(io);
+        const address = try std.Io.net.UnixAddress.init(socket);
+        for (0..200) |_| {
+            const stream = address.connect(io) catch {
+                try io.sleep(.fromMilliseconds(20), .awake);
+                continue;
+            };
+            errdefer stream.close(io);
+            var buffer: [8]u8 = undefined;
+            var reader = stream.reader(io, &buffer);
+            if (!std.mem.eql(u8, try reader.interface.take(2), "HR")) return error.GatewayUnavailable;
+            return .{ .child = child, .stream = stream };
+        }
+        return error.GatewayUnavailable;
+    }
+
+    fn close(self: *RemoteGateway, io: std.Io) void {
+        self.stream.close(io);
+        self.child.kill(io);
+    }
+
+    fn finish(self: *RemoteGateway, io: std.Io) !void {
+        var buffer: [8]u8 = undefined;
+        var reader = self.stream.reader(io, &buffer);
+        var writer = self.stream.writer(io, &.{});
+        try writer.interface.writeByte('D');
+        try writer.interface.flush();
+        try std.testing.expectEqual(@as(u8, 'G'), try reader.interface.takeByte());
+        try writer.interface.writeByte('S');
+        try writer.interface.flush();
+        try std.testing.expectEqual(@as(u8, 'T'), try reader.interface.takeByte());
+        const termination = try self.child.wait(io);
+        try std.testing.expect(termination == .exited and termination.exited == 0);
+    }
+
+    fn fillPair(self: *RemoteGateway, gpa: std.mem.Allocator, owner: *Owner, legs: [2]@import("../../trading/pair_trading_authorization.zig").Leg, reducing: bool) !void {
+        const business = @import("../support/linux_role_business.zig");
+        const storage = try gpa.alloc(u8, durable.max_snapshot_bytes);
+        defer gpa.free(storage);
+        const first: u64 = if (reducing) 3 else 1;
+        for (legs, 0..) |leg, index| {
+            const order = owner.shard.oms.orderById(first + index).?;
+            const snapshot = try owner.committedSnapshot(storage);
+            var writer = self.stream.writer(owner.io, &.{});
+            try writer.interface.writeByte('Y');
+            try writer.interface.writeInt(u64, first + index, .little);
+            try writer.interface.writeInt(u32, @intCast(snapshot.len), .little);
+            try writer.interface.writeAll(snapshot);
+            try writer.interface.flush();
+            const batch = try business.readBatch(self.stream, owner.io);
+            var lots: i128 = 0;
+            var sequence: u64 = 0;
+            for (batch.slice()) |record| {
+                try std.testing.expectEqual(leg.venue, record.envelope.venue);
+                try std.testing.expectEqual(@as(?u128, leg.account), record.envelope.exchange_account);
+                sequence = record.envelope.identity.sequence;
+                if (record.event == .fill) {
+                    const fill = record.event.fill;
+                    try std.testing.expectEqual(order.id, fill.order);
+                    try std.testing.expectEqual(leg.instrument, fill.instrument);
+                    try std.testing.expectEqualDeep(order.limit_price, fill.price);
+                    try std.testing.expectEqual(@as(canonical.OrderSide, if (order.side == .buy) .buy else .sell), fill.side);
+                    lots += fill.quantity.lots;
+                }
+            }
+            try std.testing.expectEqual(@as(i128, 10000), lots);
+            owner.applyAdapterBatch(batch) catch |err| {
+                std.debug.print("routed receipt commit command={d} barrier={d}: {s}\n", .{ first + index, owner.shard.authoritativeBarrier(), @errorName(err) });
+                return err;
+            };
+            const state = owner.shard.accountState(leg.account).?;
+            const position: i64 = if (reducing) 0 else if (index == 0) 10000 else -10000;
+            try std.testing.expectEqual(position, state.economic_projection.portfolioLayer(10).?.positionForInstrument(leg.instrument).quantity);
+            var observed = fixture.canonicalAt(54, sequence + 1, .{ .account_observed = .{
+                .identity = order.id,
+                .exchange_account = leg.account,
+                .bootstrap = state.canonical_account.bootstrap.?,
+                .source_stream = state.canonical_account.source_stream.?,
+                .source_sequence = state.canonical_account.last_sequence + 1,
+                .value = .{ .position = .{ .instrument = leg.instrument, .side = .net, .value = .{
+                    .instrument = leg.instrument,
+                    .side = .net,
+                    .quantity = .{ .instrument = leg.instrument, .rules_version = leg.rules_version, .lots = position },
+                } } },
+            } });
+            observed.venue.envelope.times = batch.slice()[batch.len - 1].envelope.times;
+            observed.venue.envelope.exchange_account = leg.account;
+            observed.venue.envelope.venue = leg.venue;
+            _ = try owner.apply(observed);
+        }
+    }
+};
 
 fn approveFromWeb(init: std.process.Init, owner: *Owner, python: []const u8, path: []const u8) !void {
     var web = try std.process.spawn(init.io, .{
