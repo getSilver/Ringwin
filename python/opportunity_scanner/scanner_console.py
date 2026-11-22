@@ -52,6 +52,7 @@ class CanonicalSource:
         self.subscribe, self.unsubscribe = subscribe, unsubscribe
         self.assets = json.loads(encoded(assets))
         self.runtime_status = lambda: {}
+        self.replay_raw_book = None
         for asset in self.assets:
             if (set(asset) != {"identity", "code", "atomic_scale"} or type(asset["code"]) is not str
                     or not 1 <= len(asset["code"]) <= 32 or type(asset["atomic_scale"]) is not int
@@ -759,7 +760,18 @@ class ScannerConsole:
             selected_pairs=archive.get("pairs"), evaluation_details=archive["schema"] == "scanner_inputs_v3")
         registered = {tuple(map(int, x)) for x in archive["selected_identities"]}
         result["candidates"] = [r for r in result["candidates"] if all(tuple(map(int, x)) in registered for x in r["pair"])]
-        return dict(replayable=True, matches=result == archive["snapshot"], snapshot=result)
+        reply = dict(replayable=True, matches=result == archive["snapshot"], snapshot=result)
+        if self.source.replay_raw_book is not None:
+            reply["raw_books"] = []
+            try:
+                for observation in archive["canonical_observations"]:
+                    evidence = archive.get("supplied_evidence", {}).get(str(observation.identity), {})
+                    if observation.book is not None and "raw_path" in evidence:
+                        raw_book = self.source.replay_raw_book(evidence, scanner.decode_depth_snapshot(observation.book))
+                        reply["raw_books"].append(dict(raw_book, identity=list(map(str, observation.identity))))
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                return dict(replayable=False, matches=False, reason="raw_capture_unavailable", detail=str(error))
+        return reply
 
     def _envelope(self):
         return dict(schema="scanner_console_v1", session=self.session, config_version=self.config["version"],

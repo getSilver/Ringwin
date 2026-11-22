@@ -14,6 +14,7 @@ pub const Sink = struct {
     max_bytes: usize = 120 * 1024,
     written: u64 = 0,
     failed: bool = false,
+    full: bool = false,
     digest: [32]u8 = @splat(0),
 
     pub fn append(self: *Sink, allocator: std.mem.Allocator, metadata: []const u8, record: protocol.RawIngressRecord, bytes: []const u8) protocol.RawSinkError!u64 {
@@ -26,6 +27,7 @@ pub const Sink = struct {
         const needed = header.len + bytes.len + 2048;
         if (needed > self.budget -| self.written) {
             self.failed = true;
+            self.full = true;
             return error.Unavailable;
         }
         self.appendRecord(record, header_origin, header) catch {
@@ -66,10 +68,24 @@ pub const Audit = struct {
     expected_digest: [32]u8 = @splat(0),
     last_digest: [32]u8 = @splat(0),
     hasher: std.crypto.hash.sha2.Sha256 = .init(.{}),
+    target: ?u64 = null,
+    allow_incomplete_tail: bool = false,
+    matched: bool = false,
+    collecting: bool = false,
+    metadata: std.ArrayList(u8) = .empty,
+    payload: std.ArrayList(u8) = .empty,
+    monotonic_ns: u64 = 0,
+    utc_ns: u64 = 0,
+    header_record: ?protocol.RawIngressRecord = null,
+
+    pub fn deinit(self: *Audit) void {
+        self.metadata.deinit(self.allocator);
+        self.payload.deinit(self.allocator);
+    }
     pub fn consumer(self: *Audit) raw.ReplayConsumer {
         return .{ .ptr = self, .consume_fn = consume };
     }
-    fn consume(ptr: *anyopaque, _: u64, record: protocol.RawIngressRecord, bytes: []const u8) !void {
+    fn consume(ptr: *anyopaque, sequence: u64, record: protocol.RawIngressRecord, bytes: []const u8) !void {
         const self: *Audit = @ptrCast(@alignCast(ptr));
         self.records += 1;
         if (record.origin == header_origin) {
@@ -83,8 +99,20 @@ pub const Audit = struct {
             self.length = 0;
             self.expected_digest = h.digest;
             self.hasher = .init(.{});
+            self.header_record = record;
+            self.collecting = self.target == sequence + h.chunks;
+            if (self.collecting) {
+                try self.metadata.appendSlice(self.allocator, h.metadata);
+                self.monotonic_ns = record.monotonic_time_ns;
+                self.utc_ns = record.receive_time_utc_ns;
+            }
         } else if (record.origin == chunk_origin) {
             if (self.remaining == 0) return error.InvalidCapture;
+            const header = self.header_record.?;
+            if (record.source_session != header.source_session or record.monotonic_time_ns != header.monotonic_time_ns or
+                record.receive_time_utc_ns != header.receive_time_utc_ns or record.wall_time_utc_ns != header.wall_time_utc_ns) return error.InvalidCapture;
+            if (bytes.len > self.expected_length - self.length) return error.InvalidCapture;
+            if (self.collecting) try self.payload.appendSlice(self.allocator, bytes);
             self.hasher.update(bytes);
             self.length += bytes.len;
             self.remaining -= 1;
@@ -93,12 +121,15 @@ pub const Audit = struct {
                 if (self.length != self.expected_length or !std.mem.eql(u8, &digest, &self.expected_digest)) return error.InvalidCapture;
                 self.captures += 1;
                 self.last_digest = digest;
+                if (self.collecting) self.matched = true;
             }
         } else return error.InvalidCapture;
     }
     pub fn run(self: *Audit, store: durable.Store, io: std.Io, stream: durable.StreamIdentity) !void {
         try raw.replayCommitted(store, io, stream, self.consumer());
-        if (self.remaining != 0) return error.IncompleteCapture;
+        // A write fault after a header does not invalidate an earlier complete capture.
+        if (self.remaining != 0 and !self.matched and !self.allow_incomplete_tail) return error.IncompleteCapture;
+        if (self.target != null and !self.matched) return error.CaptureNotFound;
     }
 };
 
@@ -115,11 +146,32 @@ test "public captures reassemble large protocol bytes through committed RawIngre
     var record: protocol.RawIngressRecord = .{ .source_session = 9, .receive_time_utc_ns = 1, .monotonic_time_ns = 1, .wall_time_utc_ns = 1, .byte_len = @intCast(bytes.len), .sha256 = undefined };
     std.crypto.hash.sha2.Sha256.hash(bytes, &record.sha256, .{});
     try std.testing.expectEqual(@as(u64, 3), try sink.append(allocator, "synthetic_protocol_fixture", record, bytes));
-    var audit: Audit = .{ .allocator = allocator };
+    var audit: Audit = .{ .allocator = allocator, .target = 3 };
+    defer audit.deinit();
     try audit.run(store.interface(), std.testing.io, sink.durable_sink.stream);
     try std.testing.expectEqual(@as(u64, 1), audit.captures);
     try std.testing.expectEqualSlices(u8, &record.sha256, &audit.last_digest);
+    try std.testing.expectEqualStrings("synthetic_protocol_fixture", audit.metadata.items);
+    try std.testing.expectEqualSlices(u8, bytes, audit.payload.items);
     sink.budget = sink.written;
     try std.testing.expectError(error.Unavailable, sink.append(allocator, "fixture", record, bytes));
     try std.testing.expect(sink.failed);
+
+    const header = try std.json.Stringify.valueAlloc(allocator, Header{
+        .length = @intCast(bytes.len),
+        .chunks = 2,
+        .digest = record.sha256,
+        .metadata = "interrupted_capture",
+    }, .{});
+    defer allocator.free(header);
+    try sink.appendRecord(record, header_origin, header);
+    var strict_audit: Audit = .{ .allocator = allocator };
+    try std.testing.expectError(error.IncompleteCapture, strict_audit.run(store.interface(), std.testing.io, sink.durable_sink.stream));
+    var archive_audit: Audit = .{ .allocator = allocator, .allow_incomplete_tail = true };
+    try archive_audit.run(store.interface(), std.testing.io, sink.durable_sink.stream);
+    try std.testing.expectEqual(@as(u64, 1), archive_audit.captures);
+    var prefix: Audit = .{ .allocator = allocator, .target = 3 };
+    defer prefix.deinit();
+    try prefix.run(store.interface(), std.testing.io, sink.durable_sink.stream);
+    try std.testing.expectEqualSlices(u8, bytes, prefix.payload.items);
 }

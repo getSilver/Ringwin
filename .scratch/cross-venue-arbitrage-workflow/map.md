@@ -1,6 +1,6 @@
 # 跨所价差套利从扫描到交易
 
-Status: open
+Status: closed
 
 ## Destination
 
@@ -36,7 +36,7 @@ Status: open
 
 ## Frontier
 
-- [15 滚动归档并测出持续扫描容量](issues/15-capacity.md)
+当前无待处理工单。
 
 ## Decisions so far
 
@@ -70,9 +70,11 @@ Status: open
 
 [14](issues/14-coverage.md) 已用 20 个盘口、10 条路线完成离线双腿轮转验收。持续归档和容量测量由 [15](issues/15-capacity.md) 接续。
 
+[15](issues/15-capacity.md) 验证按来源和大小归档、热段回收后的双腿原文重放，以及 16、64、256 个盘口的离线容量。16 个盘口可反复完成采样，三档均未达到持续全路新鲜。
+
 ## Not yet specified
 
-以分级负载测量确定持续覆盖规模和延迟目标。
+真实场所的延迟目标与持续新鲜规模仍需实地测量。
 
 ## Out of scope
 

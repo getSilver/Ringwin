@@ -95,6 +95,11 @@ pub fn main(init: std.process.Init) !void {
     defer args.deinit();
     _ = args.next();
     const raw_path = args.next() orelse return error.RawPathRequired;
+    if (args.next()) |session| {
+        const stream = try std.fmt.parseInt(u64, session, 10);
+        const target = if (args.next()) |seq| try std.fmt.parseInt(u64, seq, 10) else null;
+        return replayCapture(init, raw_path, stream, target);
+    }
     const storage = try init.gpa.alloc(u8, 5 * 1024 * 1024 + 4);
     defer init.gpa.free(storage);
     var input = std.Io.File.stdin().reader(init.io, storage);
@@ -156,14 +161,19 @@ pub fn main(init: std.process.Init) !void {
             if (!cfg.discovery or r.payload.len > 4 * 1024 * 1024) return error.DiscoveryCapacity;
             var digest: [32]u8 = undefined;
             std.crypto.hash.sha2.Sha256.hash(r.payload, &digest, .{});
-            _ = try Raw.ok(&raw, .{
+            _ = Raw.ok(&raw, .{
                 .source_session = cfg.session,
                 .receive_time_utc_ns = r.utc_ns,
                 .monotonic_time_ns = r.monotonic_ns,
                 .wall_time_utc_ns = r.utc_ns,
                 .byte_len = @intCast(r.payload.len),
                 .sha256 = digest,
-            }, r.payload);
+            }, r.payload) catch |err| {
+                try std.json.Stringify.value(.{ .schema = 1, .session = cfg.session, .sequence = sequence, .failure = @errorName(err), .capture_full = raw.sink.full, .capture_failed = raw.sink.failed and !raw.sink.full }, .{}, &output.interface);
+                try output.interface.writeByte('\n');
+                try output.interface.flush();
+                continue;
+            };
             const document = try std.json.parseFromSlice(std.json.Value, init.gpa, r.payload, .{});
             defer document.deinit();
             const root = document.value;
@@ -295,10 +305,35 @@ pub fn main(init: std.process.Init) !void {
                 payload = &hex;
             }
         }
-        try std.json.Stringify.value(.{ .schema = 1, .session = cfg.session, .sequence = sequence, .healthy = healthy, .depth = payload, .failure = failure, .raw_sequence = raw.sink.durable_sink.next_sequence - 1, .raw_sha256 = std.fmt.bytesToHex(raw.sink.digest, .lower) }, .{}, &output.interface);
+        try std.json.Stringify.value(.{ .schema = 1, .session = cfg.session, .sequence = sequence, .healthy = healthy, .depth = payload, .failure = failure, .raw_sequence = raw.sink.durable_sink.next_sequence - 1, .raw_sha256 = std.fmt.bytesToHex(raw.sink.digest, .lower), .capture_bytes = raw.sink.written, .capture_full = raw.sink.full, .capture_failed = raw.sink.failed and !raw.sink.full }, .{}, &output.interface);
         try output.interface.writeByte('\n');
         try output.interface.flush();
     }
+}
+
+fn replayCapture(init: std.process.Init, path: []const u8, session: u64, target: ?u64) !void {
+    const store = try init.gpa.create(durable.LinuxFileAdapter);
+    defer init.gpa.destroy(store);
+    store.* = .{ .dir = try std.Io.Dir.openDirAbsolute(init.io, path, .{ .iterate = builtin.os.tag == .linux }) };
+    defer store.close(init.io);
+    var audit: capture.Audit = .{ .allocator = init.gpa, .target = target, .allow_incomplete_tail = target == null };
+    defer audit.deinit();
+    try audit.run(store.interface(), init.io, .{ .domain = .raw_ingress, .id = session });
+    var buffer: [4096]u8 = undefined;
+    var output = std.Io.File.stdout().writer(init.io, &buffer);
+    if (target) |sequence| {
+        var digest: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(audit.payload.items, &digest, .{});
+        try std.json.Stringify.value(.{
+            .raw_sequence = sequence,
+            .raw_sha256 = std.fmt.bytesToHex(digest, .lower),
+            .metadata = audit.metadata.items,
+            .payload = audit.payload.items,
+            .visible_at_ns = audit.monotonic_ns,
+            .utc_ns = audit.utc_ns,
+        }, .{}, &output.interface);
+    } else try std.json.Stringify.value(.{ .captures = audit.captures, .records = audit.records, .incomplete_tail = audit.remaining != 0 }, .{}, &output.interface);
+    try output.interface.flush();
 }
 
 test {

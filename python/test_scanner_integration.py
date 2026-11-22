@@ -2,6 +2,7 @@
 
 Synthetic protocol fixtures replace only the external public transport.
 """
+import errno
 import http.client
 import json
 from fractions import Fraction
@@ -9,6 +10,8 @@ import os
 from pathlib import Path
 import tempfile
 import threading
+import time
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -1046,6 +1049,12 @@ class IntegrationTests(unittest.TestCase):
         self.now[0]+=100_000_000; self.now[1]+=100_000_000
         self.runtime.step()
 
+    def wait_for_storage(self, predicate):
+        deadline = time.monotonic() + 10
+        while not predicate():
+            self.assertLess(time.monotonic(), deadline, "scanner storage condition timed out")
+            time.sleep(.02)
+
     def tearDown(self):
         self.server.shutdown(); self.server.server_close(); self.thread.join()
         self.runtime.close(); self.temp.cleanup()
@@ -1936,13 +1945,117 @@ class IntegrationTests(unittest.TestCase):
         self.assertTrue(any("Unavailable" in value for value in view["market"]["failures"].values()))
         self.assertFalse(any(c["recommended"] for c in view["snapshot"]["candidates"]))
 
+    def test_candidate_replays_both_raw_books_after_hot_segments_are_reclaimed(self):
+        self.start()
+        digest, = self.runtime.console.last_evidence
+        captured = self.call("start")["market"]["evidence"]
+        self.assertEqual(len(captured), 2)
+        self.call("stop")
+        self.wait_for_storage(lambda: all(not Path(item["raw_path"]).exists() for item in captured))
+        replay = self.runtime.console.replay(digest)
+        self.assertTrue(replay["matches"])
+        self.assertEqual(len(replay["raw_books"]), 2)
+        for evidence in captured:
+            book = next(row for row in replay["raw_books"] if row["session"] == evidence["session"])
+            self.assertEqual(book["raw_sequence"], evidence["raw_sequence"])
+            self.assertEqual(book["raw_sha256"], evidence["raw_sha256"])
+            self.assertEqual(book["payload"], self.transport.captured[int(evidence["venue"])])
+            self.assertEqual(book["visible_at_ns"], str(self.now[0]))
+            self.assertGreater(int(book["rules_version"]), 0)
+
+    def test_size_rotation_keeps_both_legs_live_and_raw_books_replayable(self):
+        self.save_settings()
+        for row in self.runtime.bindings.values():
+            row["raw_budget_bytes"] = 32 * 1024
+        self.start()
+        digest, = self.runtime.console.last_evidence
+        captured = self.call("start")["market"]["evidence"]
+        for _ in range(14):
+            self.tick()
+            market = self.call("start")["market"]
+            self.assertEqual(market["coverage"]["fresh"], 1)
+            self.assertFalse(market["capture_storage"]["faults"])
+            if all(not Path(item["raw_path"]).exists() for item in captured):
+                break
+        self.wait_for_storage(lambda: all(not Path(item["raw_path"]).exists() for item in captured))
+        self.assertTrue(self.runtime.console.replay(digest)["matches"])
+
+    def test_storage_full_withdraws_affected_route_then_rewarms(self):
+        self.start()
+        self.transport.fail.add(1)
+        self.tick()
+        self.transport.fail.clear()
+        from opportunity_scanner import scanner_segments
+        with patch.object(scanner_segments.shutil, "disk_usage", return_value=SimpleNamespace(free=0)):
+            self.tick()
+            view = self.call("start")
+            self.assertEqual(view["market"]["capture_storage"]["disk_free_bytes"], 0)
+            self.assertEqual(set(view["market"]["capture_storage"]["faults"]), {"1:production"})
+            self.assertTrue(next(row["continuous"] for row in view["market"]["observations"] if row["venue"] == "21"))
+            self.assertTrue(all(not row["recommended"] for row in view["snapshot"]["candidates"]))
+        self.tick()
+        view = self.call("start")
+        self.assertEqual(view["market"]["coverage"]["fresh"], 1)
+        self.assertFalse(view["market"]["capture_storage"]["faults"])
+
+    def test_archive_enospc_keeps_replayable_hot_segment_until_retry(self):
+        self.start()
+        digest, = self.runtime.console.last_evidence
+        evidence = self.call("start")["market"]["evidence"]
+        rename = Path.rename
+
+        def no_space(path, target):
+            if path.name.startswith("market-1-"):
+                raise OSError(errno.ENOSPC, "fixture archive disk full")
+            return rename(path, target)
+
+        with patch.object(Path, "rename", no_space):
+            self.call("stop")
+            self.wait_for_storage(lambda: self.runtime.status()["capture_storage"]["faults"])
+            view = self.call("stop")
+            self.assertEqual(set(view["market"]["capture_storage"]["faults"]), {"1:production"})
+            self.assertTrue(Path(next(row["raw_path"] for row in evidence if row["venue"] == "1")).is_dir())
+            self.assertTrue(self.runtime.console.replay(digest)["matches"])
+        self.tick()
+        self.wait_for_storage(lambda: not self.runtime.status()["capture_storage"]["faults"])
+        self.wait_for_storage(lambda: all(not Path(row["raw_path"]).exists() for row in evidence))
+        self.assertTrue(self.runtime.console.replay(digest)["matches"])
+
+    def test_slow_archive_audit_does_not_hold_scanner_publication(self):
+        self.start()
+        read = self.runtime.segments._read
+        started, resume = threading.Event(), threading.Event()
+
+        def slow_read(path, venue, session, sequence=None):
+            if venue == 1 and sequence is None:
+                started.set()
+                if not resume.wait(15):
+                    raise TimeoutError("fixture audit release missing")
+            return read(path, venue, session, sequence)
+
+        with patch.object(self.runtime.segments, "_read", slow_read):
+            try:
+                self.transport.fail.add(1)
+                self.tick()
+                self.assertTrue(started.wait(5))
+                self.transport.fail.clear()
+                self.tick()
+                self.assertEqual(self.call("start")["market"]["coverage"]["fresh"], 1)
+                self.assertFalse(resume.is_set())
+            finally:
+                resume.set()
+
     def test_duplicate_protocol_does_not_refresh_depth_time(self):
         self.start()
         previous={o["venue"]:o["visible_at_ns"] for o in self.call("start")["market"]["observations"]}
         self.transport.replay=True; self.tick()
         self.assertEqual(previous,{o["venue"]:o["visible_at_ns"] for o in self.call("start")["market"]["observations"]})
         self.now[0]+=6_000_000_000
-        self.assertTrue(all(c["reason"]=="expired" for c in self.call("start")["snapshot"]["candidates"]))
+        view = self.call("start")
+        coverage = view["market"]["coverage"]
+        self.assertEqual((coverage["fresh"], coverage["expired"]), (0, 1))
+        self.assertTrue(all(not row["recommended"] and view["remaining_validity_ns"][row["id"]] == "0"
+                            for row in view["snapshot"]["candidates"]))
 
     def test_local_scope_change_keeps_other_source_incarnation(self):
         self.start()

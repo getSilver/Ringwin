@@ -26,6 +26,7 @@ from opportunity_scanner.arbitrage_scanner import Observation, compatible_pairs,
 from opportunity_scanner.scanner_console import CanonicalSource, CatalogueEntry, ScannerConsole
 from opportunity_scanner.scanner_config import atomic_json, _object
 from opportunity_scanner.scanner_history import History
+from opportunity_scanner.scanner_segments import CaptureSegments, CaptureStorageError
 from opportunity_scanner.scanner_assets import AssetBindings
 from opportunity_scanner.scanner_evaluation import EvaluationInputs
 from strategy_instance import NativeAuthority
@@ -305,6 +306,7 @@ class ScannerRuntime:
         self.adapters = {adapter.venue: adapter for adapter in adapters}
         if len(self.adapters) != len(adapters) or len({adapter.kind for adapter in adapters}) != len(adapters):
             raise ValueError("duplicate scanner adapter")
+        self.segments = CaptureSegments(self.directory, self.adapters)
         self.clock, self.utc_clock, self.transport = clock, utc_clock, transport or PublicTransport(adapters)
         self.asset_provider = asset_provider or (lambda: dict(schema=1, bindings=[]))
         self.asset_bindings = AssetBindings(dict(schema=1, bindings=[]))
@@ -355,8 +357,8 @@ class ScannerRuntime:
             entries.append(entry)
         self.source = CanonicalSource(entries, subscribe=self.acquire, unsubscribe=self.release, assets=configuration["assets"])
         self.source.runtime_status = self.status
+        self.source.replay_raw_book = self.segments.replay
         self.workers, self.observations, self.evidence, self.failures = {}, {}, {}, {}
-        self.blocked = set()
         self.pending, self.generations, self.touched = {}, {}, {}
         self.quotes, self.quote_pending = {}, {}
         self.book_requests, self.metadata_requests = {}, {}
@@ -367,6 +369,7 @@ class ScannerRuntime:
         self.diagnostic_markets = set()
         self.round_remaining = set()
         self.round_started_ns = self.round_duration_ns = None
+        self.completed_rounds = 0
         self.executor = ThreadPoolExecutor(max_workers=ACTIVE_BOOKS, thread_name_prefix="scanner-market")
         self.cursor = self.dispatch = 0
         self.console = ScannerConsole(self.source, History(), clock=clock,
@@ -508,8 +511,11 @@ class ScannerRuntime:
                     evidence.append(capture)
                     try:
                         result = self._input(worker, "discover", self.transport.catalogue(setting, product))
+                        if result.get("failure"):
+                            raise ValueError(result["failure"])
                         audit = self._input(worker, "audit", "")
                         capture.update(raw_sha256=result["raw_sha256"], raw_sequence=result["raw_sequence"], captures=audit["captures"])
+                        self.segments.report_capture(row["venue"], row["environment"], row["instrument"])
                     finally:
                         self._close_worker(worker)
                     for result_row in result["items"]:
@@ -733,37 +739,35 @@ class ScannerRuntime:
             if identity not in self.workers:
                 self.workers[identity] = None
                 self.generations[identity] = object()
-                self.blocked.discard(identity)
 
     def release(self, identity):
         with self.lock:
+            self.segments.forget_capture(identity[0], identity[2])
             worker = self.workers.pop(identity, None)
             generation = self.generations.pop(identity, None)
             self.touched.pop(identity, None)
             pending = self.pending.get(identity)
             if pending and pending[0] is generation:
                 worker = None  # The in-flight job owns the worker until it returns.
-            self.blocked.discard(identity)
             self.observations.pop(identity, None)
             self.evidence.pop(identity, None)
             self.failures.pop(identity, None)
         if worker:
             self._close_worker(worker)
 
-    @staticmethod
-    def _close_worker(worker):
-        process, channel, _, _ = worker
+    def _close_worker(self, worker):
+        process, channel, _, path = worker
         if process.poll() is None:
             process.kill()
         process.wait(timeout=5)
         channel.pipes.close()
+        self.segments.retire(path)
 
     def _open(self, identity, *, row=None, discovery=False):
         row = self.bindings[identity] if row is None else row
         session = secrets.randbelow((1<<53)-1)+1
-        if sum(p.stat().st_size for p in self.directory.glob("market-*.raw/**/*") if p.is_file()) >= 64 * 1024 * 1024:
-            raise OSError("scanner RawIngress capacity exhausted; archive files before restarting")
-        path = self.directory / ("market-" + secrets.token_hex(16) + ".raw")
+        self.segments.check_space(row["venue"], row["environment"], row["instrument"])
+        path = self.segments.hot_path(row["venue"], row["environment"], session)
         adapter = self.adapters[row["venue"]]
         process = subprocess.Popen([str(adapter.executable), str(path)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         # Full Hyperliquid metadata also travels inside the JSON request envelope.
@@ -779,9 +783,11 @@ class ScannerRuntime:
         try:
             channel.request(config)
         except Exception:
-            self._close_worker((process, channel, None, None))
+            self._close_worker((process, channel, None, str(path)))
             raise
-        return process, channel, dict(session=session, sequence=0, epoch=0, next_metadata_ns=0, venue=row["venue"]), str(path)
+        return process, channel, dict(session=session, sequence=0, epoch=0, next_metadata_ns=0, venue=row["venue"],
+            environment=row["environment"], instrument=row["instrument"], budget=config["raw_budget_bytes"],
+            capture_bytes=0, sampled=False), str(path)
 
     def _input(self, worker, operation, payload):
         _, channel, state, _ = worker
@@ -794,6 +800,17 @@ class ScannerRuntime:
         result = channel.request(request)
         if (result.get("schema"), result.get("session"), result.get("sequence")) != (1, state["session"], state["sequence"]):
             raise ValueError("native market response identity")
+        if result.get("capture_failed"):
+            error = "RawIngress write Unavailable"
+            self.segments.report_capture(state["venue"], state["environment"], state["instrument"], error)
+            raise CaptureStorageError(error)
+        if result.get("capture_full"):
+            if not state["sampled"]:
+                self.segments.report_capture(state["venue"], state["environment"], state["instrument"],
+                                             "RawIngress segment budget Unavailable")
+            else:
+                raise CaptureStorageError("RawIngress segment full")
+        state["capture_bytes"] = result.get("capture_bytes", state["capture_bytes"])
         return result
 
     def audit(self):
@@ -804,6 +821,7 @@ class ScannerRuntime:
 
     def step(self, *, blocking=True):
         """Advance scheduling. The service publishes without waiting on network jobs."""
+        self.segments.retry()
         self._refresh_catalogues()
         with self.poll_lock:
             self._collect_samples()
@@ -842,6 +860,12 @@ class ScannerRuntime:
 
     def _sample(self, identity, row, worker):
         try:
+            if worker is not None:
+                state = worker[2]
+                reserve = min(MAX_FRAME + 8192, state["budget"] // 4)
+                if state["sampled"] and state["budget"] - state["capture_bytes"] < reserve:
+                    retired, worker = worker, None
+                    self._close_worker(retired)
             if worker is None:
                 worker = self._open(identity, row=row)
                 result = self._input(worker, "metadata", self._metadata(row))
@@ -849,7 +873,9 @@ class ScannerRuntime:
                     raise ValueError(result["failure"])
                 worker[2]["next_metadata_ns"] = self.clock()+30_000_000_000
                 worker[2]["epoch"] += 1
-                self._input(worker, "subscribe", json.dumps({"event":"polling_started"}))
+                result = self._input(worker, "subscribe", json.dumps({"event":"polling_started"}))
+                if result["failure"]:
+                    raise ValueError(result["failure"])
             if self.clock() >= worker[2]["next_metadata_ns"]:
                 result = self._input(worker, "metadata", self._metadata(row))
                 worker[2]["next_metadata_ns"] = self.clock()+30_000_000_000
@@ -858,6 +884,8 @@ class ScannerRuntime:
             result = self._input(worker, "book", self._book(row))
             if result["failure"]:
                 raise ValueError(result["failure"])
+            worker[2]["sampled"] = True
+            self.segments.report_capture(row["venue"], row["environment"], row["instrument"])
             return worker, result, None
         except Exception as error:
             return worker, None, (str(error) or type(error).__name__)[:2048]
@@ -878,6 +906,7 @@ class ScannerRuntime:
                 self.pending.pop(identity)
                 worker, result, error = future.result()
                 if self.generations.get(identity) is not generation:
+                    self.segments.forget_capture(identity[0], identity[2])
                     if worker:
                         self._close_worker(worker)
                     continue
@@ -886,8 +915,6 @@ class ScannerRuntime:
                     if old:
                         self.observations[identity] = replace(old, continuous=False)
                     self.failures[identity] = error
-                    if "Unavailable" in error or "capacity exhausted" in error:
-                        self.blocked.add(identity)
                     if worker:
                         self._close_worker(worker)
                     self.workers[identity] = None
@@ -895,14 +922,16 @@ class ScannerRuntime:
                 self.workers[identity] = worker
                 row = self.bindings[identity]
                 if result["depth"] is not None:
+                    depth = bytes.fromhex(result["depth"])
                     previous = self.observations.get(identity)
-                    if (previous and result["healthy"] and self.evidence[identity]["raw_sha256"] == result["raw_sha256"]):
+                    if (previous and result["healthy"] and (previous.book == depth or
+                            self.evidence[identity]["raw_sha256"] == result["raw_sha256"])):
                         # A reopened worker can accept the last frame in a new native epoch.
                         # Preserve its canonical time and matching archive evidence.
                         self.failures.pop(identity, None)
                         continue
                     self.observations[identity] = replace(self._observation(identity),
-                        book=bytes.fromhex(result["depth"]), continuous=result["healthy"])
+                        book=depth, continuous=result["healthy"])
                 elif not result["healthy"] and identity in self.observations:
                     self.observations[identity] = replace(self.observations[identity], continuous=False)
                 self.evidence[identity] = dict(result, venue=str(row["venue"]), instrument=row["instrument"],
@@ -964,6 +993,7 @@ class ScannerRuntime:
         self.round_remaining = set(self.coverage_routes)
         self.round_started_ns = now
         self.round_duration_ns = None
+        self.completed_rounds = 0
 
     def _schedule_samples(self):
         with self.console.lock, self.source.lock, self.lock:
@@ -1018,10 +1048,10 @@ class ScannerRuntime:
             singles = sorted((self.diagnostic_markets | external) - self.paired_markets,
                              key=lambda i: (self.touched.get(i, -1), i))
             for pair in (*routes, *((i,) for i in singles)):
-                if len(pair) == 2 and any(i in outstanding or i in self.blocked or i in self.source.unavailable for i in pair):
+                if len(pair) == 2 and any(i in outstanding or i in self.source.unavailable for i in pair):
                     continue
                 wanted = [i for i in pair if i in self.workers and i not in self.pending
-                          and i not in scheduled and i not in self.blocked and i not in self.source.unavailable]
+                          and i not in scheduled and i not in self.source.unavailable]
                 if not wanted or any(inflight.get(i[0], 0) >= VENUE_CONCURRENCY for i in wanted):
                     continue
                 if len(pair) == 2 and any(self._quote_source(self.bindings[i]) in self.quote_pending
@@ -1058,8 +1088,9 @@ class ScannerRuntime:
         recent = []
         for pair, sampled in routes.items():
             a, z = (times.get(i) for i in pair)
-            if (a is not None and z is not None and abs(a-z) <= self.console.max_skew_ns
-                    and all(self.observations[i].continuous for i in pair)):
+            books = (a, z) if a is not None and z is not None and all(
+                self.observations[i].continuous for i in pair) else None
+            if books is not None and abs(a-z) <= self.console.max_skew_ns:
                 cutoff = min(a, z)
                 if sampled is None or cutoff > sampled:
                     sampled = cutoff
@@ -1083,9 +1114,10 @@ class ScannerRuntime:
                 edge = self._quote_edge(pair, now)
                 state = "pending_depth" if edge is not None and edge > 0 else "pending"
             counts[state] += 1
-            recent.append((pair, sampled, state))
+            recent.append((pair, sampled, state, books))
         if advance and routes and not self.round_remaining:
             self.round_duration_ns = now-self.round_started_ns
+            self.completed_rounds += 1
             self.round_started_ns = now
             self.round_remaining = set(routes)
             self.skew_retried.clear()
@@ -1093,6 +1125,7 @@ class ScannerRuntime:
         metrics = dict(selected=len(selected), discovered=len(routes),
             unpaired_markets=len(set(selected) - self.paired_markets),
             backlog=len(self.round_remaining), active=len(self.pending),
+            completed_rounds=self.completed_rounds,
             full_round_ns=str(self.round_duration_ns) if self.round_duration_ns is not None else None,
             **counts)
         return metrics, recent[:256]
@@ -1108,7 +1141,7 @@ class ScannerRuntime:
                     self._refresh_coverage_scope(self.console._selected(include_unavailable=True), at_ns)
                     _, recent = self._coverage(at_ns, advance=True)
                     pairs, ids = [], set()
-                    for pair, _, _ in recent:
+                    for pair, _, _, _ in recent:
                         if set(pair) <= selected_ids and len(ids.union(pair)) <= 64:
                             pairs.append(pair)
                             ids.update(pair)
@@ -1144,9 +1177,10 @@ class ScannerRuntime:
                 self._refresh_coverage_scope(self.console._selected(include_unavailable=True), now)
                 coverage, recent = self._coverage(now)
                 coverage["routes"] = [dict(pair=[list(map(str, i)) for i in pair], status=state,
+                    book_times_ns=list(map(str, books)) if books is not None else None,
                     sampled_at_ns=str(sampled) if sampled is not None else None,
                     sample_age_ms=(now-sampled)//1_000_000 if sampled is not None else None)
-                    for pair, sampled, state in recent]
+                    for pair, sampled, state, books in recent]
             scales = {int(a["identity"]): a["atomic_scale"] for a in self.source.assets}
             bases = {identity: row.get("asset_basis") for identity, row in self.evidence.items()}
             active = {i for i, worker in self.workers.items() if worker is not None} | set(self.pending)
@@ -1175,6 +1209,7 @@ class ScannerRuntime:
                         for adapter in self.adapters.values() for environment, (url, actual) in adapter.routes.items()],
                     failures=failures, observations=observations,
                     evidence=evidence, trading_qualified=False,
+                    capture_storage=self.segments.status(),
                     evaluation=copy.deepcopy(self.evaluation.state),
                     missing_evaluation=list(self.evaluation.state["missing"]))
 
@@ -1203,3 +1238,4 @@ class ScannerRuntime:
             self._collect_samples()
             for identity in tuple(self.workers):
                 self.release(identity)
+        self.segments.close()

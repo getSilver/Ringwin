@@ -66,7 +66,11 @@ OKX 动态目录的 `specification` 返回产品、资产、状态、tick、lot�
 
 盘口保持来源覆盖：OKX 至多 5 档，Hyperliquid 验证来源有限快照、保留至多 8 档并标记截断。不推断不可见深度；价格／数量使用整数与分数。重复快照不刷新深度时间；过旧、乱序、冲突、断连和写入失败撤销输入。Console 独立执行 5 秒 TTL，无新帧也不保留推荐。
 
-每个 `.raw` 来源目录使用现有 DurableStore 保存 segment、manifest 和 snapshot；RawIngress 在适配器解码前提交。每帧保留配置、实际环境、会话、原文长度、摘要及序号，大帧分段存储并可经已提交重放重新校验完整摘要。每来源会话默认捕获预算 4 MiB（含保守的记录开销预算），不是物理单文件上限。运行目录达到 64 MiB 时拒绝新来源；写入容量故障锁住订阅，需停止、归档旧来源目录并重新启动。这是资源边界，不是持续运行资格。24 小时派生历史仍是现有有界内存，无 SQLite；刷新保留，服务重启清空并更换覆盖身份，不续接中断寿命。
+每个 `.raw` 来源目录使用 DurableStore。RawIngress 在适配器解码前提交并保留配置、实际环境、会话、原文、接收时刻、摘要及连续序号。每来源会话默认捕获预算 4 MiB，包含记录开销预算。盘口 worker 在接近预算时续开会话并重验元数据，捕获预算耗尽会触发轮转。连续轮转和归档的实测结果见 [扫描容量验收](research/2026-11-22-scanner-capacity.md)。
+
+停止、轮转、退订或重连后，已关闭的热段通过 native RawIngress 重放和摘要校验，再原子移入同一状态目录下的 `scanner-archive/<Venue>-<请求环境>/`。归档失败保留热段并重试。新格式的热段总用量达到 64 MiB 或磁盘可用空间低于 4 MiB 时，拒绝开新段。已有旧格式段保留原路径，占用实际磁盘空间。机会页通过 `market.capture_storage` 显示磁盘和热段余量，以及故障涉及的来源和阶段。捕获不可用会撤回相关路线。恢复后须重新取得新鲜盘口才可发布。
+
+候选复算材料按捕获段身份和原始序号解析热段或归档，逐腿校验原文摘要、请求及实际来源、品种、规则版本和接收时刻。扫描段归档持续占用状态目录所在磁盘。派生历史为有界内存，刷新保留，服务重启清空并更换覆盖身份。保留期内的候选材料仍受该内存窗口的容量约束。
 
 ## 实际扫描覆盖
 
@@ -103,7 +107,7 @@ node tools/verify-scanner-integration-browser.mjs --ui-root D:/github/RingwinUi 
 
 只验证本次设置／范围改动且不构建整个前端时，可运行 `node tools/verify-scanner-integration-browser.mjs --dev --ui-root D:/github/RingwinUi`。runner 启动本地 Vite 并代理到临时认证后端，使用相同正式页面；要求现有 `ringwin-scanner-market` 二进制、Playwright 和 Chromium。设置存储及服务恢复回归为 `python -m unittest discover -s python -p test_exchange_settings.py`，范围与真实适配器回归为 `test_scanner_console.py`、`test_scanner_integration.py`。
 
-本交付只验项目内部整合。在线端点、真实盘口、新鲜度、限流和长期运行另验；trading_qualified 恒为 false，12–15 及经济／运行／生产资格不变。
+上述浏览器验收覆盖项目内部整合。在线端点、真实盘口的时效与限流，以及长期运行容量需在目标环境测量。扫描结果的 `trading_qualified` 恒为 `false`。
 
 OKX 动态发现定向浏览器验收：`node tools/verify-okx-discovery-browser.mjs --dev --ui-root D:/github/RingwinUi`。仅依赖定向生成的 native worker，不需要全量构建；Zig 直接测试应沿用 build.zig 的 `--stack 536870912`，并按用例名称过滤，避免入口的传递测试扩展到无关核心模块。
 
