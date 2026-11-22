@@ -115,8 +115,10 @@ pub const SimulatedVenue = struct {
             .order_batch => |commands| for (commands.slice()) |command| self.emitOrderCommand(&batch, binding, command) catch return error.InvalidRequest,
             .order_reconciliation => |reconciliation| {
                 self.append(&batch, binding, reconciliation.identity, .{ .reconciliation_started = reconciliation.identity }) catch return error.InvalidRequest;
-                self.append(&batch, binding, reconciliation.identity + 1, .{ .order_reconciliation_result = .{ .identity = reconciliation.identity, .complete = false } }) catch return error.InvalidRequest;
-                if (self.unknown_order == reconciliation.order) self.unknown_order = null;
+                self.append(&batch, binding, reconciliation.identity + 1, .{ .order_reconciliation_result = .{
+                    .identity = reconciliation.identity,
+                    .complete = false,
+                } }) catch return error.InvalidRequest;
             },
             .account_reconciliation => |reconciliation| self.emitAccountReconciliation(&batch, binding, reconciliation) catch return error.InvalidRequest,
         }
@@ -440,27 +442,6 @@ test "simulated venue emits deterministic order lifecycle facts" {
     try std.testing.expectEqual(canonical.ExecutionReportStatus.filled, batch.events[5].event.execution_report.status);
     try contract.exerciseFillRecovery(batch.slice(), .{ .venue = 1, .exchange_account = 2, .adapter_session = 3 });
 
-    var unknown = command;
-    unknown.identity = 11;
-    unknown.dispatch_deadline_monotonic_ns = 0;
-    _ = try adapter.trySend(.{ .order_command = unknown });
-    const unknown_batch = (try adapter.tryDrain()).?;
-    try std.testing.expectEqual(canonical.DispatchState.unknown, unknown_batch.events[0].event.order_dispatch_result.state);
-
-    var blocked = command;
-    blocked.identity = 13;
-    _ = try adapter.trySend(.{ .order_command = blocked });
-    try std.testing.expectEqual(canonical.DispatchState.not_sent, (try adapter.tryDrain()).?.events[0].event.order_dispatch_result.state);
-    _ = try adapter.trySend(.{ .order_reconciliation = .{ .identity = 14, .exchange_account = 2, .order = unknown.identity } });
-    try std.testing.expectEqual(canonical.ReconciliationResult{ .identity = 14, .complete = false }, (try adapter.tryDrain()).?.events[1].event.order_reconciliation_result);
-
-    var cancel = command;
-    cancel.identity = 12;
-    cancel.operation = .cancel;
-    _ = try adapter.trySend(.{ .order_command = cancel });
-    const cancel_batch = (try adapter.tryDrain()).?;
-    try std.testing.expectEqual(canonical.ExecutionReportStatus.canceled, cancel_batch.events[1].event.execution_report.status);
-
     var commands = canonical.OrderCommandBatch{};
     try commands.append(command);
     var amended = command;
@@ -472,6 +453,30 @@ test "simulated venue emits deterministic order lifecycle facts" {
     try std.testing.expectEqual(@as(u8, 8), command_batch.len);
     try std.testing.expectEqual(canonical.DispatchState.submitted, command_batch.events[0].event.order_dispatch_result.state);
     try std.testing.expectEqual(canonical.ExecutionReportStatus.amended, command_batch.events[7].event.execution_report.status);
+
+    var unknown = command;
+    unknown.identity = 11;
+    unknown.dispatch_deadline_monotonic_ns = 0;
+    _ = try adapter.trySend(.{ .order_command = unknown });
+    const unknown_batch = (try adapter.tryDrain()).?;
+    try std.testing.expectEqual(canonical.DispatchState.unknown, unknown_batch.events[0].event.order_dispatch_result.state);
+
+    var blocked = command;
+    blocked.identity = 13;
+    _ = try adapter.trySend(.{ .order_command = blocked });
+    try std.testing.expectEqual(canonical.DispatchState.not_sent, (try adapter.tryDrain()).?.events[0].event.order_dispatch_result.state);
+    _ = try adapter.trySend(.{ .order_reconciliation = .{ .identity = 14, .exchange_account = 2, .order = unknown.orderIdentity() } });
+    try std.testing.expectEqual(canonical.ReconciliationResult{ .identity = 14, .complete = false }, (try adapter.tryDrain()).?.events[1].event.order_reconciliation_result);
+
+    var cancel = command;
+    cancel.identity = 12;
+    cancel.operation = .cancel;
+    _ = try adapter.trySend(.{ .order_command = cancel });
+    const cancel_batch = (try adapter.tryDrain()).?;
+    try std.testing.expectEqual(canonical.ExecutionReportStatus.canceled, cancel_batch.events[1].event.execution_report.status);
+
+    _ = try adapter.trySend(.{ .order_command = blocked });
+    try std.testing.expectEqual(canonical.DispatchState.not_sent, (try adapter.tryDrain()).?.events[0].event.order_dispatch_result.state);
     try adapter.stop(.{ .monotonic_ns = 1 });
 }
 

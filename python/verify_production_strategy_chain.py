@@ -211,6 +211,7 @@ import json
 from dataclasses import replace
 from pathlib import Path
 from strategy_host import decode_market_trade
+from strategy_api import OrderQuery
 from opportunity_scanner.approved_evaluation import read_approved_evaluation
 from strategies.cross_venue.arbitrage_cycle import Action, Cycle, Intent
 from test_arbitrage_cycle import with_price_units
@@ -248,6 +249,13 @@ class Strategy:
         return json.dumps({"next": self.next_intent_sequence, "step": self.step}, separators=(",", ":")).encode()
 
     def on_event(self, event):
+        if event.event_type == 9:
+            projection = json.loads(event.payload_bytes)
+            assert projection["barrier"] == event.sequence
+            cycle, = projection["cycles"]
+            assert cycle["first_sequence"] == 7 and cycle["portfolio"] == self.portfolio
+            return tuple(OrderQuery(cycle["first_sequence"], order["intent_sequence"])
+                         for order in cycle["orders"] if order["state"] == "unknown")
         assert event.event_type == 8
         self.step += 1
         trigger = decode_market_trade(event.payload_bytes)["trade_identity"]
@@ -274,7 +282,7 @@ class Strategy:
 '''
 
 
-def configure_host(core, root, cursor, *, bad_ack=False, dual_ioc=False):
+def configure_host(core, root, cursor, *, bad_ack=False, dual_ioc=False, order_queries=False):
     runtime = Path(strategy_host.__file__).resolve().parent
     package_root = root / "package"
     code = package_root / "code"
@@ -309,6 +317,9 @@ def configure_host(core, root, cursor, *, bad_ack=False, dual_ioc=False):
                                 max_warmup_events=100))
     if dual_ioc:
         manifest.update(subscriptions=[dict(event_type=8, schema_version=1)], output_kinds=["intent_group"])
+        if order_queries:
+            manifest["subscriptions"].append(dict(event_type=9, schema_version=1))
+            manifest["output_kinds"].append("order_query")
         checkpoint = strategy_host.encode_payload_checkpoint(dict(
             schema_registry=strategy_host.SCHEMA_REGISTRY, strategy=9, definition=42, state_schema=61,
             state_schema_version=1, config_version=1, cursor=cursor, next_intent=7), b'{"next":7,"step":0}')
@@ -512,9 +523,10 @@ def main(binary, provision):
 if __name__ == "__main__":
     if sys.argv[1:2] == ["--approve-dual-ioc"]:
         approve_dual_ioc(Path(sys.argv[2]))
-    elif sys.argv[1:2] == ["--prepare-dual-ioc"]:
+    elif sys.argv[1:2] in (["--prepare-dual-ioc"], ["--prepare-dual-ioc-query"]):
         state = Path(sys.argv[2]).resolve()
-        configure_host(state, state, int(sys.argv[3]), dual_ioc=True)
+        configure_host(state, state, int(sys.argv[3]), dual_ioc=True,
+                       order_queries=sys.argv[1].endswith("-query"))
     elif sys.argv[1:2] == ["--verify-dual-ioc-fx"]:
         verify_dual_ioc_fx(Path(sys.argv[2]), sys.argv[3:] or ("3", "250000000"))
     else:

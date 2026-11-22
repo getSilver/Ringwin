@@ -322,7 +322,7 @@ def validate_bundle(data, policy, version=1):
         require(all(s in policy["subscriptions"] for s in manifest["subscriptions"]),
                 "unsupported subscription schema")
         outputs = manifest["output_kinds"]
-        require(type(outputs) is list and all(o in ("order_intent", "intent_group") for o in outputs)
+        require(type(outputs) is list and all(o in ("order_intent", "intent_group", "order_query") for o in outputs)
                 and outputs == sorted(set(outputs)), "unsupported or duplicate output kinds")
         fields(manifest["limits"], LIMITS)
         for key, limit in manifest["limits"].items():

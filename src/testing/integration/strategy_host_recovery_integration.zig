@@ -222,6 +222,10 @@ pub fn main(init: std.process.Init) !void {
             return @import("production_dual_ioc_integration.zig").run(init, python, script);
         if (std.mem.eql(u8, value, "--ioc-recovery-only"))
             return runCycleRecovery(init, python, .reconciling, .keep, .ioc_failure);
+        if (std.mem.eql(u8, value, "--formal-ioc-query-only"))
+            return @import("production_dual_ioc_integration.zig").runQuery(init, python, null);
+        if (std.mem.eql(u8, value, "--routed-ioc-query-only"))
+            return @import("production_dual_ioc_integration.zig").runQuery(init, python, script);
         if (!std.mem.eql(u8, value, "--public-depth-only")) return error.UnknownArgument;
         return runCycleRecovery(init, python, .holding, .keep, .public_depth);
     }

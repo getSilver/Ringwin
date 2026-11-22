@@ -985,6 +985,10 @@ pub const TradingShard = struct {
                     return .{ .identity = .{ .report = report.identity }, .digest = history.hash(try snapshot_codec.encodeBare(&bytes, converted)) };
                 },
                 .order_reconciliation_result => |result| {
+                    // A Venue can report that its query yielded no order evidence.
+                    // This latches reconciliation safety without updating an Order.
+                    if (result.status == .unresolved and !result.complete and result.order == 0 and result.evidence == null)
+                        return null;
                     const evidence = result.evidence orelse return error.IncompleteReconciliationEvidence;
                     try self.validateHistoryEnvelope(event, evidence.scope.instrument);
                     if (!reconciliationEvidenceValid(result, event.envelope)) return error.IncompleteReconciliationEvidence;

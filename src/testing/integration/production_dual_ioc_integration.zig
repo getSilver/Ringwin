@@ -13,22 +13,30 @@ const accounts = @import("../acceptance/core/multi_account_authority_acceptance.
 const dual = @import("../acceptance/core/dual_ioc_dispatch_acceptance.zig");
 
 pub fn run(init: std.process.Init, python: []const u8, executable_gateway: ?[]const u8) !void {
+    return runScenario(init, python, executable_gateway, false);
+}
+
+pub fn runQuery(init: std.process.Init, python: []const u8, executable_gateway: ?[]const u8) !void {
+    return runScenario(init, python, executable_gateway, true);
+}
+
+fn runScenario(init: std.process.Init, python: []const u8, executable_gateway: ?[]const u8, query: bool) !void {
     const Runner = struct {
         failure: ?anyerror = null,
 
-        fn runFixture(self: *@This(), process: std.process.Init, executable: []const u8, gateway: ?[]const u8) void {
-            exercise(process, executable, gateway) catch |err| {
+        fn runFixture(self: *@This(), process: std.process.Init, executable: []const u8, gateway: ?[]const u8, queries: bool) void {
+            exercise(process, executable, gateway, queries) catch |err| {
                 self.failure = err;
             };
         }
     };
     var runner: Runner = .{};
-    const thread = try std.Thread.spawn(.{ .stack_size = 256 * 1024 * 1024 }, Runner.runFixture, .{ &runner, init, python, executable_gateway });
+    const thread = try std.Thread.spawn(.{ .stack_size = 256 * 1024 * 1024 }, Runner.runFixture, .{ &runner, init, python, executable_gateway, query });
     thread.join();
     if (runner.failure) |err| return err;
 }
 
-fn exercise(init: std.process.Init, python: []const u8, executable_gateway: ?[]const u8) !void {
+fn exercise(init: std.process.Init, python: []const u8, executable_gateway: ?[]const u8, query: bool) !void {
     const gpa = init.gpa;
     const io = init.io;
     const cwd = try std.Io.Dir.cwd().realPathFileAlloc(io, ".", gpa);
@@ -83,7 +91,7 @@ fn exercise(init: std.process.Init, python: []const u8, executable_gateway: ?[]c
     var cursor_buffer: [20]u8 = undefined;
     const cursor = try std.fmt.bufPrint(&cursor_buffer, "{d}", .{owner.shard.authoritativeBarrier()});
     try store.dir.writeFile(io, .{ .sub_path = "engine.json", .data = "{}" });
-    try runPython(init, &.{ python, "python/verify_production_strategy_chain.py", "--prepare-dual-ioc", path, cursor });
+    try runPython(init, &.{ python, "python/verify_production_strategy_chain.py", if (query) "--prepare-dual-ioc-query" else "--prepare-dual-ioc", path, cursor });
     const config_bytes = try store.dir.readFileAlloc(io, "engine.json", gpa, .limited(16384));
     defer gpa.free(config_bytes);
     const config = try std.json.parseFromSlice(struct { strategy_host: formal.Config }, gpa, config_bytes, .{});
@@ -110,6 +118,11 @@ fn exercise(init: std.process.Init, python: []const u8, executable_gateway: ?[]c
     }
     const first_sequence = 7;
     try std.testing.expect(owner.shard.cycles.find(9, first_sequence) != null);
+    if (query) {
+        try exerciseQuery(init, path, owner, host, config.value.strategy_host, if (remote) |*process| process else null);
+        if (remote) |*process| try process.finish(io);
+        return;
+    }
 
     const gateway = try gpa.create(execution.Gateway);
     defer gpa.destroy(gateway);
@@ -170,6 +183,74 @@ fn exercise(init: std.process.Init, python: []const u8, executable_gateway: ?[]c
     std.debug.print("formal_dual_ioc: approval={d} first_intent={d} orders=4 fee=-10 rebate=4 asset=3 closed=true\n", .{ approved.request.identity, first_sequence });
 }
 
+fn exerciseQuery(init: std.process.Init, path: []const u8, owner: *Owner, host: *formal.Host, host_config: formal.Config, remote: ?*RemoteGateway) !void {
+    const gateway_role = @import("../../runtime/production_gateway.zig").GatewayRole;
+    var dispatch: trading.oms.DispatchBatch = .{ .count = 1 };
+    dispatch.items[0] = .{ .command_id = 2, .state = .unknown };
+    _ = try owner.apply(fixture.atGroup(50, .{ .identity = 98001, .account_scope = 30, .payload = .{ .oms_dispatch_batch = dispatch } }));
+    try host.pump(owner);
+    const query = (try host.takeOrderQuery(owner)) orelse return error.MissingFormalOrderQuery;
+    try std.testing.expectEqual(@as(u64, 7), query.first_sequence);
+    try std.testing.expectEqual(@as(u64, 8), query.intent_sequence);
+    var root = try std.Io.Dir.openDirAbsolute(init.io, path, .{});
+    defer root.close(init.io);
+    var checkpoint_storage: [8192]u8 = undefined;
+    const metadata: @import("../../strategy/strategy_host_recovery.zig").Metadata = .{
+        .schema_registry = host.gateway.config.schema_registry,
+        .strategy_instance = 9,
+        .strategy_definition = 42,
+        .state_schema = 61,
+        .state_schema_version = 1,
+        .strategy_config_version = 1,
+        .strategy_cursor = host.cursor,
+        .next_intent_sequence = 9,
+    };
+    try host.process.requestCheckpoint(init.io, 2, metadata);
+    const checkpoint = try host.process.receiveCheckpoint(init.io, &checkpoint_storage);
+    try root.writeFile(init.io, .{ .sub_path = "checkpoint.bin", .data = checkpoint });
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(checkpoint, &digest, .{});
+    const digest_hex = std.fmt.bytesToHex(digest, .lower);
+    var restart_config = host_config;
+    restart_config.checkpoint_sha256 = &digest_hex;
+    try engine.revokeHosts(owner);
+    const restarted = try formal.Host.start(init, owner, 2, restart_config);
+    defer restarted.close(init);
+    const recovered_query = (try restarted.takeOrderQuery(owner)) orelse return error.MissingRecoveredFormalQuery;
+    try std.testing.expectEqual(query.first_sequence, recovered_query.first_sequence);
+    try std.testing.expectEqual(query.intent_sequence, recovered_query.intent_sequence);
+    try std.testing.expect(recovered_query.cursor > query.cursor);
+    try std.testing.expectEqual(null, try host.takeOrderQuery(owner));
+    const storage = try init.gpa.alloc(u8, durable.max_snapshot_bytes);
+    defer init.gpa.free(storage);
+    const snapshot = try owner.committedSnapshot(storage);
+    if (builtin.os.tag == .linux and remote != null) {
+        const process = remote.?;
+        try commitUnresolvedQuery(owner, recovered_query.cursor, try process.queryOrder(init.io, snapshot, recovered_query));
+        try process.settleOrderQuery(init.io, try owner.committedSnapshot(storage), recovered_query);
+    } else {
+        var config: [256]u8 = undefined;
+        try root.writeFile(init.io, .{ .sub_path = "gateway.json", .data = try std.fmt.bufPrint(&config, "{{\"environment\":\"simulation\",\"deployment_digest\":\"{s}\",\"dispatch_stream\":92,\"initialize_dispatch\":true}}", .{std.fmt.bytesToHex(owner.shard.deployment.header.?.expected_digest, .lower)}) });
+        const gateway = (try gateway_role.open(init, root, path)) orelse return error.GatewayUnavailable;
+        defer gateway.close(init);
+        try commitUnresolvedQuery(owner, recovered_query.cursor, try gateway.queryCycleOrder(init.io, snapshot, recovered_query));
+        try gateway.settleCycleQuery(try owner.committedSnapshot(storage), recovered_query);
+    }
+    try restarted.pump(owner);
+    try std.testing.expectEqual(null, try restarted.takeOrderQuery(owner));
+    try std.testing.expectEqual(.unknown, owner.shard.oms.orderById(2).?.state);
+    try std.testing.expectEqual(@as(u16, 2), owner.shard.oms.order_count);
+    std.debug.print("formal_ioc_query: cycle=7 intent=8 order=2 status=unresolved orders=2\n", .{});
+}
+
+fn commitUnresolvedQuery(owner: *Owner, query_cursor: u64, batch: canonical.AdapterOutputBatch) !void {
+    try std.testing.expectEqual(@as(u8, 2), batch.len);
+    const result = batch.events[1].event.order_reconciliation_result;
+    try std.testing.expectEqual(@as(u128, query_cursor), result.identity);
+    try std.testing.expectEqual(.unresolved, result.status);
+    try owner.applyAdapterBatch(batch);
+}
+
 fn runPython(init: std.process.Init, argv: []const []const u8) !void {
     const result = try std.process.run(init.gpa, init.io, .{ .argv = argv });
     defer init.gpa.free(result.stdout);
@@ -181,6 +262,29 @@ fn runPython(init: std.process.Init, argv: []const []const u8) !void {
 const RemoteGateway = struct {
     child: std.process.Child,
     stream: std.Io.net.Stream,
+
+    fn queryOrder(self: *RemoteGateway, io: std.Io, snapshot: []const u8, query: @import("../../strategy/strategy_host_gateway.zig").OrderQuery) !canonical.AdapterOutputBatch {
+        try self.sendQuery(io, 'Z', snapshot, query);
+        return @import("../support/linux_role_business.zig").readBatch(self.stream, io);
+    }
+
+    fn settleOrderQuery(self: *RemoteGateway, io: std.Io, snapshot: []const u8, query: @import("../../strategy/strategy_host_gateway.zig").OrderQuery) !void {
+        try self.sendQuery(io, 'K', snapshot, query);
+        var bytes: [1]u8 = undefined;
+        var reader = self.stream.reader(io, &bytes);
+        if (try reader.interface.takeByte() != 'K') return error.InvalidQuerySettlement;
+    }
+
+    fn sendQuery(self: *RemoteGateway, io: std.Io, command: u8, snapshot: []const u8, query: @import("../../strategy/strategy_host_gateway.zig").OrderQuery) !void {
+        var output = self.stream.writer(io, &.{});
+        try output.interface.writeByte(command);
+        try output.interface.writeInt(u128, query.strategy, .little);
+        for ([_]u64{ query.first_sequence, query.intent_sequence, query.cursor }) |value|
+            try output.interface.writeInt(u64, value, .little);
+        try output.interface.writeInt(u32, @intCast(snapshot.len), .little);
+        try output.interface.writeAll(snapshot);
+        try output.interface.flush();
+    }
 
     fn start(init: std.process.Init, executable: []const u8, state: []const u8, digest: [32]u8) !RemoteGateway {
         const io = init.io;

@@ -399,7 +399,7 @@ pub fn validateBatchAt(
         if (record_len < event_header_len or record_len % 8 != 0 or
             record_len > bytes.len - offset or
             payload_len > record_len - event_header_len or
-            get(u16, bytes, offset + 8) < 1 or get(u16, bytes, offset + 8) > 8 or
+            get(u16, bytes, offset + 8) < 1 or get(u16, bytes, offset + 8) > 9 or
             get(u16, bytes, offset + 10) != 1 or
             get(u32, bytes, offset + 12) & ~@as(u32, 0x1f) != 0 or
             get(u64, bytes, offset + 56) != 0 or

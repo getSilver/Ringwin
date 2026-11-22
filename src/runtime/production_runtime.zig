@@ -18,7 +18,7 @@ pub const Role = enum { engine, market_feed, execution_gateway, telemetry, contr
 pub const Phase = enum { stopped, starting, ready, recovering, trading, draining, forced_stop, failed };
 pub const RolePhase = enum { stopped, starting, ready, recovering, draining, forced_stop, failed };
 pub const Venue = enum { simulated };
-pub const Command = enum(u8) { enable_risk = 'A', drain = 'D', stop = 'S', business = 'B', settle = 'L', ingest_canonical = 'I', read_committed = 'C', read_strategy_authority = 'P', mutate_pair_approval = 'Q', recover_venue = 'U', dispatch_snapshot = 'X', dispatch_committed = 'Y' };
+pub const Command = enum(u8) { enable_risk = 'A', drain = 'D', stop = 'S', business = 'B', settle = 'L', ingest_canonical = 'I', read_committed = 'C', read_strategy_authority = 'P', mutate_pair_approval = 'Q', recover_venue = 'U', dispatch_snapshot = 'X', dispatch_committed = 'Y', take_order_query = 'J', query_committed_order = 'Z', settle_order_query = 'K' };
 pub const Status = enum(u8) { hello = 'H', ready = 'R', risk_enabled = 'A', draining = 'G', stopped = 'T', forced_stop = 'F', failed = 'X', recovery_only = 'V' };
 
 pub const BoundedQueue = struct {
@@ -542,6 +542,43 @@ fn serveRole(init: std.process.Init, role: Role, socket_path: []const u8, startu
                 try readExact(&stream, init.io, snapshot);
                 const batch = try gateway.dispatch(init.io, snapshot, id);
                 try business.writeBatch(stream, init.io, &batch);
+            },
+            .take_order_query => {
+                const current = if (live_engine) |*e| e else return error.EngineUnavailable;
+                if (draining or current.owner.shard.recovery_admission_pending) return error.InvalidRoleTransition;
+                const query = if (current.host) |host| try host.takeOrderQuery(current.owner) else null;
+                var output = stream.writer(init.io, &.{});
+                try output.interface.writeByte(@intFromBool(query != null));
+                if (query) |request| {
+                    try output.interface.writeInt(u128, request.strategy, .little);
+                    for ([_]u64{ request.first_sequence, request.intent_sequence, request.cursor }) |value|
+                        try output.interface.writeInt(u64, value, .little);
+                }
+                try output.interface.flush();
+            },
+            .query_committed_order, .settle_order_query => {
+                const gateway = live_gateway orelse return error.ExecutionGatewayUnavailable;
+                if (draining) return error.InvalidRoleTransition;
+                const query: @import("../strategy/strategy_host_gateway.zig").OrderQuery = .{
+                    .strategy = try readFrameInt(&stream, init.io, u128),
+                    .first_sequence = try readFrameInt(&stream, init.io, u64),
+                    .intent_sequence = try readFrameInt(&stream, init.io, u64),
+                    .cursor = try readFrameInt(&stream, init.io, u64),
+                };
+                const size = try readFrameInt(&stream, init.io, u32);
+                if (size == 0 or size > dispatch_snapshot_limit) return error.InvalidDispatchSnapshot;
+                const snapshot = try init.gpa.alloc(u8, size);
+                defer init.gpa.free(snapshot);
+                try readExact(&stream, init.io, snapshot);
+                if (command == .query_committed_order) {
+                    const batch = try gateway.queryCycleOrder(init.io, snapshot, query);
+                    try business.writeBatch(stream, init.io, &batch);
+                } else {
+                    try gateway.settleCycleQuery(snapshot, query);
+                    var output = stream.writer(init.io, &.{});
+                    try output.interface.writeByte('K');
+                    try output.interface.flush();
+                }
             },
         }
     }

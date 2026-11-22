@@ -368,6 +368,25 @@ receipt batch returns to the Writer through the existing ingest path.
 The trusted controller fetches a fresh snapshot for each group and
 reconciles any interrupted dispatch before retrying.
 
+A package can subscribe to `cycle_projection` (event 9, schema 1). The
+formal Host delivers the strategy's active cycles at the current committed
+Writer barrier, including scoped positions and separate reported, applied
+and possible lots for each order. At the activation cutoff the projection
+permits read-only queries. The Writer retains admission authority and the
+package owns its private state. Provision the matching checkpoint and SHA-256
+when restarting an active package.
+
+A package that declares `order_query` can return an `OrderQuery` naming
+the cycle's first intent and the original order intent. These outputs leave
+the next order intent sequence unchanged. After recovery and private ingress, the
+trusted controller can use `venue_dispatch.relay_order_queries` to pull
+requests with `J`, forward them with `Z` and a fresh committed snapshot,
+and commit the resulting canonical records through `I`. The controller
+then returns the new committed snapshot with `K` so the Gateway can
+settle a durable Unknown supported by the Writer's evidence. The Gateway
+resolves scope from the Writer snapshot. An unresolved response preserves
+the original order and offers no dispatch permission.
+
 The configured `market_feed` role reads its own capture. For OKX public data,
 its `market-recovery.json` contains the same `source`, the original
 `environment`, `config_version`, and `okx_binding`. This replay uses protocol

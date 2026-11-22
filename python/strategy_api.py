@@ -51,6 +51,11 @@ class FeeCheckedIntentGroup(NamedTuple):
     fee_version: str
 
 
+class OrderQuery(NamedTuple):
+    cycle_first_sequence: int
+    intent_sequence: int
+
+
 def validate_outputs(outputs, before, after, manifest, binding):
     """Check the existing 128-byte envelope / 80-byte intent codec capacities."""
     uint(before)
@@ -61,6 +66,13 @@ def validate_outputs(outputs, before, after, manifest, binding):
     count = 0
     scopes = {(int(s["exchange_account"], 16), int(s["instrument"], 16)) for s in binding["scopes"]}
     for output in outputs:
+        if type(output) is OrderQuery:
+            require("order_query" in manifest["output_kinds"] and limits["max_output_frame_bytes"] >= 144,
+                    "undeclared order query or frame capacity")
+            uint(output.cycle_first_sequence)
+            uint(output.intent_sequence)
+            require(output.intent_sequence >= output.cycle_first_sequence, "query precedes cycle")
+            continue
         if type(output) is OrderIntent:
             kind, members = "order_intent", (output,)
         else:

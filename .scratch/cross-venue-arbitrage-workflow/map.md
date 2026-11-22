@@ -36,7 +36,6 @@ Status: open
 
 ## Frontier
 
-- [12 双 IOC 单腿失败与重启恢复](issues/12-ioc-recovery.md)
 - [13 Maker 撤换单、增量对冲与恢复](issues/13-maker.md)
 - [15 滚动归档并测出持续扫描容量](issues/15-capacity.md)
 
@@ -66,7 +65,7 @@ Status: open
 
 [11](issues/11-dual-ioc.md) 已在远端 Linux 完成批准评估交付、独立 Gateway 进程分派、两腿开平仓和原币与汇差对账的模拟场所验收。
 
-[12](issues/12-ioc-recovery.md) 已验证模拟场所单腿部分成交、另一腿 Unknown 后拒绝时的持久恢复、单笔减仓和费用归档。正式 Host 周期投影与独立 Gateway 查询接线待完成。
+[12](issues/12-ioc-recovery.md) 已验证模拟场所的持久恢复、单笔减仓和费用归档。正式 Host 可从当前 Writer 截面提出原订单查询，本地 WSL1 独立 Gateway 回执写回后保留 Unknown 和原订单身份。
 
 [14](issues/14-coverage.md) 已用 20 个盘口、10 条路线完成离线双腿轮转验收。持续归档和容量测量由 [15](issues/15-capacity.md) 接续。
 

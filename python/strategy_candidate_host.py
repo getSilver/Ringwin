@@ -74,6 +74,8 @@ def config_transition(root, manifest, old_binding, binding, method):
 def check_opening_fees(outputs, source):
     current = None
     for output in outputs:
+        if type(output) is api.OrderQuery:
+            continue
         members = (output,) if type(output) is api.OrderIntent else output.members
         if all(member.portfolio_reduce_only for member in members):
             continue
@@ -268,8 +270,11 @@ def instance_frames(request, *, engine_session=False, opening_fees=None):
             outputs = instance.on_event(api.Event(record.shard_sequence, record.event_type,
                                                   record.schema_version, record.payload))
             api.validate_outputs(outputs, before, instance.next_intent_sequence, manifest, binding)
-            if activation == 0 or record.shard_sequence <= activation_barrier:
+            if activation == 0 or record.shard_sequence < activation_barrier:
                 continue
+            if record.shard_sequence == activation_barrier:
+                package.require(record.event_type == 9 and all(type(o) is api.OrderQuery for o in outputs),
+                                "activation cutoff is read-only")
             try:
                 check_opening_fees(outputs, opening_fees)
             except (KeyError, OSError, ValueError, RecursionError) as error:
@@ -281,6 +286,11 @@ def instance_frames(request, *, engine_session=False, opening_fees=None):
                 print("strategy_opening_fees: " + str(error)[:256], file=sys.stderr, flush=True)
                 continue
             for output in outputs:
+                if type(output) is api.OrderQuery:
+                    package.require(engine_session and record.event_type == 9, "query requires committed cycle input")
+                    frames.append(bridge.output_query_frame(payload, session, int(context.strategy_identity, 16),
+                        context.config_version, activation, *output))
+                    continue
                 members = (output,) if type(output) is api.OrderIntent else output.members
                 encoded = []
                 for member in members:

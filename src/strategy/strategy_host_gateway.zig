@@ -55,6 +55,14 @@ pub const EventType = enum(u16) {
     fill = 6,
     depth_snapshot = 7,
     market_trade = 8,
+    cycle_projection = 9,
+};
+
+pub const OrderQuery = struct {
+    strategy: u128,
+    first_sequence: u64,
+    intent_sequence: u64,
+    cursor: u64,
 };
 
 pub const EventEnvelope = struct {
@@ -543,36 +551,8 @@ pub const Gateway = struct {
             get(u32, frame, 104) != frame.len - output_header_len or
             wireCrc(frame) != get(u32, frame, 124))
             return error.Malformed;
-        if (get(u64, frame, 32) != self.config.session.fencing or
-            get(u32, frame, 40) != self.config.session.shard or
-            get(u64, frame, 48) != self.config.session.generation)
-            return error.OldSession;
-        if (get(u128, frame, 16) != self.config.schema_registry or
-            get(u16, frame, 96) != 1 or get(u16, frame, 98) != 1)
-            return error.UnknownSchema;
-        if (!self.trading_enabled or
-            self.authority_shard == null or self.authority_journal == null or
-            self.authority_shard.?.strategyAuthority(self.config.authorization.strategy_identity).host_activation_identity != self.config.authorization.activation_identity or
-            self.authority_shard.?.strategyAuthority(self.config.authorization.strategy_identity).host_activation_fact_sequence != self.activation_sequence or
-            self.authority_journal.?.last_sequence != self.authority_shard.?.authoritativeBarrier() or
-            get(u128, frame, 64) != self.config.authorization.strategy_identity or
-            get(u64, frame, 88) != self.config.authorization.config_version or
-            get(u128, frame, 108) != self.config.authorization.activation_identity)
-            return error.Unauthorized;
-
-        const source_batch = get(u64, frame, 56);
-        const batch = for (self.published[0..self.published_count]) |published| {
-            if (published.sequence == source_batch) break published;
-        } else return error.InvalidCursor;
-        const cursor = get(u64, frame, 80);
-        if (cursor != batch.last_shard_sequence or
-            cursor <= self.config.authorization.activation_barrier or
-            cursor <= self.activation_sequence)
-            return error.InvalidCursor;
-        if (now_ns < batch.published_monotonic_ns or
-            now_ns - batch.published_monotonic_ns > stale_intent_ns)
-            return error.Stale;
-
+        if (get(u16, frame, 98) != 1) return error.UnknownSchema;
+        const cursor = try self.outputCursor(frame, now_ns, false);
         const payload = frame[128..];
         if (self.authority_shard.?.strategyAuthority(self.config.authorization.strategy_identity).portfolio_identity != get(u128, payload, 16)) return error.Unauthorized;
         if (std.enums.fromInt(Side, payload[2]) == null or
@@ -598,6 +578,59 @@ pub const Gateway = struct {
             .limit_price_micros = if (payload.len == order_intent_len) get(i64, payload, 72) else 0,
             .exact_limit_price = try memberExactPrice(payload),
         };
+    }
+
+    pub fn isOrderQuery(frame: []const u8) bool {
+        return frame.len >= output_header_len and get(u16, frame, 98) == 3;
+    }
+
+    pub fn decodeOrderQuery(self: *const Gateway, frame: []const u8, now_ns: i64) !OrderQuery {
+        if (frame.len != output_header_len + 16 or !isOrderQuery(frame) or
+            !std.mem.eql(u8, frame[0..4], &output_magic) or
+            get(u16, frame, 4) != 1 or get(u16, frame, 6) != output_header_len or
+            get(u32, frame, 8) != 0 or get(u32, frame, 12) != frame.len or
+            get(u32, frame, 44) != 0 or get(u32, frame, 100) != 1 or
+            get(u32, frame, 104) != 16 or wireCrc(frame) != get(u32, frame, 124))
+            return error.Malformed;
+        const cursor = try self.outputCursor(frame, now_ns, true);
+        const first = get(u64, frame, 128);
+        const intent = get(u64, frame, 136);
+        if (first == 0 or intent < first) return error.Malformed;
+        return .{ .strategy = self.config.authorization.strategy_identity, .first_sequence = first, .intent_sequence = intent, .cursor = cursor };
+    }
+
+    fn outputCursor(self: *const Gateway, frame: []const u8, now_ns: i64, read_only: bool) !u64 {
+        if (get(u64, frame, 32) != self.config.session.fencing or
+            get(u32, frame, 40) != self.config.session.shard or
+            get(u64, frame, 48) != self.config.session.generation)
+            return error.OldSession;
+        if (get(u128, frame, 16) != self.config.schema_registry or
+            get(u16, frame, 96) != 1)
+            return error.UnknownSchema;
+        if (!self.trading_enabled or
+            self.authority_shard == null or self.authority_journal == null or
+            self.authority_shard.?.strategyAuthority(self.config.authorization.strategy_identity).host_activation_identity != self.config.authorization.activation_identity or
+            self.authority_shard.?.strategyAuthority(self.config.authorization.strategy_identity).host_activation_fact_sequence != self.activation_sequence or
+            self.authority_journal.?.last_sequence != self.authority_shard.?.authoritativeBarrier() or
+            get(u128, frame, 64) != self.config.authorization.strategy_identity or
+            get(u64, frame, 88) != self.config.authorization.config_version or
+            get(u128, frame, 108) != self.config.authorization.activation_identity)
+            return error.Unauthorized;
+
+        const source_batch = get(u64, frame, 56);
+        const batch = for (self.published[0..self.published_count]) |published| {
+            if (published.sequence == source_batch) break published;
+        } else return error.InvalidCursor;
+        const cursor = get(u64, frame, 80);
+        if (cursor != batch.last_shard_sequence or
+            cursor < self.config.authorization.activation_barrier or
+            cursor < self.activation_sequence or (!read_only and cursor == self.activation_sequence))
+            return error.InvalidCursor;
+        if (now_ns < batch.published_monotonic_ns or
+            now_ns - batch.published_monotonic_ns > stale_intent_ns)
+            return error.Stale;
+
+        return cursor;
     }
 };
 

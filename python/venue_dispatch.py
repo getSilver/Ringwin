@@ -32,17 +32,53 @@ def relay_committed_commands(engine, gateway, command_ids):
     for identity in ids:
         gateway.sendall(b"Y" + struct.pack("<QI", identity, len(snapshot)))
         gateway.sendall(snapshot)
-        if _receive(gateway, 4) != struct.pack("<I", 1):
-            raise ValueError("invalid Gateway receipt count frame")
-        count = _receive(gateway, 1)[0]
-        if not 0 < count <= 64:
-            raise ValueError("invalid Gateway receipt count")
-        for _ in range(count):
-            size, = struct.unpack("<I", _receive(gateway, 4))
-            if not 0 < size < MAX_CANONICAL_BYTES:
-                raise ValueError("invalid canonical receipt size")
-            receipts.append(_receive(gateway, size))
-    barrier = 0
+        receipts.extend(_gateway_receipts(gateway, allow_empty=False))
+    barrier = _commit_receipts(engine, receipts)
+    return relay_order_queries(engine, gateway, barrier=barrier)
+
+
+def relay_order_queries(engine, gateway, *, barrier=0):
+    """Relay Host queries with a fresh Writer cutoff over the trusted role links."""
+    for _ in range(64):
+        engine.sendall(b"J")
+        present = _receive(engine, 1)
+        if present == b"\0":
+            break
+        if present != b"\1":
+            raise ValueError("invalid Writer order query response")
+        query = _receive(engine, 40)
+        _send_query(engine, gateway, b"Z", query)
+        receipts = _gateway_receipts(gateway, allow_empty=True)
+        if receipts:
+            barrier = _commit_receipts(engine, receipts, barrier)
+            _send_query(engine, gateway, b"K", query)
+            if _receive(gateway, 1) != b"K":
+                raise ValueError("invalid Gateway order query settlement acknowledgment")
+    return barrier
+
+
+def _send_query(engine, gateway, command, query):
+    snapshot = read_committed_snapshot(engine)
+    gateway.sendall(command + query + struct.pack("<I", len(snapshot)))
+    gateway.sendall(snapshot)
+
+
+def _gateway_receipts(gateway, *, allow_empty):
+    if _receive(gateway, 4) != struct.pack("<I", 1):
+        raise ValueError("invalid Gateway receipt count frame")
+    count = _receive(gateway, 1)[0]
+    if not int(not allow_empty) <= count <= 64:
+        raise ValueError("invalid Gateway receipt count")
+    receipts = []
+    for _ in range(count):
+        size, = struct.unpack("<I", _receive(gateway, 4))
+        if not 0 < size < MAX_CANONICAL_BYTES:
+            raise ValueError("invalid canonical receipt size")
+        receipts.append(_receive(gateway, size))
+    return receipts
+
+
+def _commit_receipts(engine, receipts, barrier=0):
     for receipt in receipts:
         engine.sendall(b"I" + struct.pack("<I", len(receipt)) + receipt)
         committed, extra = struct.unpack("<QI", _receive(engine, 12))

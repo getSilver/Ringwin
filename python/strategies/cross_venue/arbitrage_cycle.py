@@ -256,6 +256,14 @@ class Action:
     cancels: tuple = ()
     profit: object = None
 
+    def package_outputs(self, *, fee_version=None):
+        """Turn a cycle decision into the formal Host callback outputs."""
+        if self.intents or self.cancels:
+            return (self.package_output(fee_version=fee_version),)
+        import strategy_api as api
+
+        return tuple(api.OrderQuery(self.plan.first_sequence, sequence) for sequence in self.queries)
+
     def package_output(self, *, fee_version=None):
         """Translate a strategy action for the fixed StrategyPackage callback."""
         import strategy_api as api

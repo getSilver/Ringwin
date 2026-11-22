@@ -48,7 +48,10 @@ pub const GatewayRole = struct {
         role.reducing_ioc_rebate_atoms = parsed.value.reducing_ioc_rebate_atoms;
         _ = try std.fmt.hexToBytes(&role.digest, parsed.value.deployment_digest);
         role.store = .{ .dir = undefined };
-        try role.store.initLinux(init.io, path);
+        if (@import("builtin").os.tag == .windows)
+            try role.store.initWindowsVerification(init.io, path)
+        else
+            try role.store.initLinux(init.io, path);
         errdefer role.store.close(init.io);
         role.gateway.init();
         try role.gateway.pinDeploymentDigest(role.digest);
@@ -77,35 +80,13 @@ pub const GatewayRole = struct {
     }
 
     pub fn dispatch(self: *GatewayRole, io: std.Io, snapshot: []const u8, id: u64) !canonical.AdapterOutputBatch {
-        const barrier = try trading.TradingShard.restoreSnapshotInto(&self.shard, snapshot);
-        const deployment = self.shard.deployment.header orelse return error.DeploymentConfigurationRequired;
-        if (barrier < self.barrier or !self.shard.deployment.sealed or self.shard.decision_domain_identity == 0 or
-            !std.mem.eql(u8, &deployment.expected_digest, &self.digest)) return error.InvalidDispatchSnapshot;
-        self.barrier = barrier;
+        const barrier = try self.restoreCommitted(snapshot);
         const command = self.shard.oms.findCommand(id) orelse return error.UnknownCommand;
         const account = command.authority.exchange_account;
-        const deployed = self.shard.deployment.account(account) orelse return error.InvalidDispatchSnapshot;
-        if (deployed.environment != .simulation) return error.UnsupportedExecutionEnvironment;
-        const instrument = self.shard.pairInstrument(account, command.instrument) orelse return error.InvalidDispatchSnapshot;
-        const capability = instrument.capability orelse return error.InvalidDispatchSnapshot;
-        try self.shard.copyAccountViewInto(&self.view, account);
+        const index = try self.prepareRoute(command);
         const pos = self.view.currentNetExchangePosition(command.instrument) orelse return error.InvalidDispatchSnapshot;
-        const index = for (self.accounts[0..self.count], 0..) |known, index| {
-            if (known == account) break index;
-        } else try self.addRoute(account, deployed.venue, instrument, capability);
-        for (self.shard.canonical_ingress_cursors[0..self.shard.canonical_ingress_cursor_count]) |cursor| {
-            if (cursor.scope.venue == deployed.venue and cursor.scope.account == account and cursor.identity.stream == 1)
-                self.adapters[index].next_event_identity = @max(self.adapters[index].next_event_identity, try std.math.add(u64, cursor.identity.sequence, 1));
-        }
-        const monotonic: u64 = @intCast(std.Io.Clock.awake.now(io).nanoseconds);
+        const monotonic = self.setReceiptTimes(io, index);
         if (monotonic > command.authority.dispatch_deadline_monotonic_ns) return error.CommittedDispatchExpired;
-        const utc: u64 = @intCast(std.Io.Clock.real.now(io).nanoseconds);
-        self.adapters[index].receipt_times = .{
-            .receive_utc_ns = utc,
-            .monotonic_ns = monotonic,
-            .audit_utc_ns = utc,
-            .source_utc_ns = utc,
-        };
         try self.gateway.observeAuthorityFromShard(&self.shard, .{
             .account = account,
             .effective_trading_authority = self.view.operational_state.effectiveTradingAuthority(),
@@ -119,9 +100,81 @@ pub const GatewayRole = struct {
         if (try self.gateway.sendFromShard(&self.shard, id, monotonic) != .accepted) return error.DispatchNotAccepted;
         var batch = (try self.adapters[index].adapter().tryDrain()) orelse return error.MissingVenueResult;
         for (batch.events[0..batch.len]) |*record| {
-            if (record.event == .fill) record.event.fill.venue_fill_time_utc_ns = utc;
+            if (record.event == .fill) record.event.fill.venue_fill_time_utc_ns = self.adapters[index].receipt_times.source_utc_ns;
         }
         return batch;
+    }
+
+    pub fn queryCycleOrder(self: *GatewayRole, io: std.Io, snapshot: []const u8, query: @import("../strategy/strategy_host_gateway.zig").OrderQuery) !canonical.AdapterOutputBatch {
+        const barrier = try self.restoreCommitted(snapshot);
+        if (query.cursor == 0 or query.cursor > barrier) return error.InvalidQueryCursor;
+        const authority = self.shard.strategyAuthority(query.strategy);
+        if (authority.host_activation_identity == 0 or query.cursor < authority.host_activation_fact_sequence)
+            return .{};
+        const command = execution.Gateway.cycleOrderCommand(&self.shard, query.strategy, query.first_sequence, query.intent_sequence) catch |err| switch (err) {
+            error.UnknownCycle, error.UnknownCycleOrder => return .{},
+        };
+        const order = self.shard.oms.orderById(command.order_id) orelse return error.UnknownOrder;
+        if (!(try @import("production_cycle_projection.zig").orderView(&self.shard, order)).queryable) return .{};
+        const index = try self.prepareRoute(command);
+        const capability = self.shard.pairInstrument(order.exchange_account, order.instrument).?.capability.?;
+        if (self.gateway.routes[index].capability.session != capability.adapter_session) return error.StaleQueryRoute;
+        _ = self.setReceiptTimes(io, index);
+        const identity = @max(query.cursor, try std.math.add(u64, order.last_reconciliation_id, 1));
+        if (try self.gateway.queryCycleOrder(&self.shard, query.strategy, query.first_sequence, query.intent_sequence, identity) != .accepted)
+            return error.QueryNotAccepted;
+        const batch = (try self.adapters[index].adapter().tryDrain()) orelse return error.MissingVenueResult;
+        self.gateway.observeAdapterOutput(batch);
+        return batch;
+    }
+
+    /// Close only a durable Unknown supported by the Writer's committed result.
+    pub fn settleCycleQuery(self: *GatewayRole, snapshot: []const u8, query: @import("../strategy/strategy_host_gateway.zig").OrderQuery) !void {
+        const barrier = try self.restoreCommitted(snapshot);
+        if (query.cursor == 0 or query.cursor > barrier) return error.InvalidQueryCursor;
+        const command = execution.Gateway.cycleOrderCommand(&self.shard, query.strategy, query.first_sequence, query.intent_sequence) catch return;
+        self.gateway.reconcileRecoveredDispatch(&self.shard, command.command_id) catch |err| switch (err) {
+            error.UnknownDispatch, error.UnreconciledDispatch => {},
+            else => return err,
+        };
+    }
+
+    fn restoreCommitted(self: *GatewayRole, snapshot: []const u8) !u64 {
+        const barrier = try trading.TradingShard.restoreSnapshotInto(&self.shard, snapshot);
+        const deployment = self.shard.deployment.header orelse return error.DeploymentConfigurationRequired;
+        if (barrier < self.barrier or !self.shard.deployment.sealed or self.shard.decision_domain_identity == 0 or
+            !std.mem.eql(u8, &deployment.expected_digest, &self.digest)) return error.InvalidDispatchSnapshot;
+        self.barrier = barrier;
+        return barrier;
+    }
+
+    fn prepareRoute(self: *GatewayRole, command: trading.oms.Command) !usize {
+        const account = command.authority.exchange_account;
+        const deployed = self.shard.deployment.account(account) orelse return error.InvalidDispatchSnapshot;
+        if (deployed.environment != .simulation) return error.UnsupportedExecutionEnvironment;
+        const instrument = self.shard.pairInstrument(account, command.instrument) orelse return error.InvalidDispatchSnapshot;
+        const capability = instrument.capability orelse return error.InvalidDispatchSnapshot;
+        try self.shard.copyAccountViewInto(&self.view, account);
+        const index = for (self.accounts[0..self.count], 0..) |known, index| {
+            if (known == account) break index;
+        } else try self.addRoute(account, deployed.venue, instrument, capability);
+        for (self.shard.canonical_ingress_cursors[0..self.shard.canonical_ingress_cursor_count]) |cursor| {
+            if (cursor.scope.venue == deployed.venue and cursor.scope.account == account and cursor.identity.stream == 1)
+                self.adapters[index].next_event_identity = @max(self.adapters[index].next_event_identity, try std.math.add(u64, cursor.identity.sequence, 1));
+        }
+        return index;
+    }
+
+    fn setReceiptTimes(self: *GatewayRole, io: std.Io, index: usize) u64 {
+        const monotonic: u64 = @intCast(std.Io.Clock.awake.now(io).nanoseconds);
+        const utc: u64 = @intCast(std.Io.Clock.real.now(io).nanoseconds);
+        self.adapters[index].receipt_times = .{
+            .receive_utc_ns = utc,
+            .monotonic_ns = monotonic,
+            .audit_utc_ns = utc,
+            .source_utc_ns = utc,
+        };
+        return monotonic;
     }
 
     fn addRoute(self: *GatewayRole, account: u128, venue: u64, instrument: trading.InstrumentEntry, capability: shard_event.CapabilityProfileActivation) !usize {

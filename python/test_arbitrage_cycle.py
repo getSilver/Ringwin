@@ -147,6 +147,8 @@ class CycleTests(unittest.TestCase):
             with_price_units(invalid).encode(bytes(batch), (1, 0, 1), activation=5)
 
     def test_unknown_preserves_original_identities_and_blocks_even_profitable_exit(self):
+        from strategy_api import OrderQuery
+
         cycle = c.Cycle(plan())
         cycle.start(cursor=1, at_ns=T)
         f = facts(orders=(done(1, 0, 10), done(2, 1, 0, status="unknown", possible_lots=10,
@@ -155,6 +157,7 @@ class CycleTests(unittest.TestCase):
                   risk_causes=(("margin", "margin-fact"),))
         action = cycle.apply(f)
         self.assertEqual(action.queries, (2,))
+        self.assertEqual(action.package_outputs(), (OrderQuery(1, 2),))
         self.assertTrue(action.reconcile)
         self.assertFalse(action.intents)
         self.assertEqual((cycle.cycle_ref, cycle.reservation_ref), ("core-cycle", "core-reservation"))

@@ -7,6 +7,8 @@ const journal = @import("../persistence/journal.zig");
 const trading = @import("../trading/trading_shard.zig");
 const market = @import("../market/market_projection.zig");
 const Owner = @import("demo/demo_authority.zig").Owner;
+const cycles = @import("production_cycle_projection.zig");
+const execution = @import("../execution/execution_gateway.zig");
 
 const checkpoint_limit = 8 * 1024 * 1024 + 192;
 const input_capacity = 16 * 1024;
@@ -34,6 +36,7 @@ const Request = struct {
         state_schema: struct { identity: []const u8, version: u32 },
         compatibility: struct { python_abi: u32 },
         subscriptions: []const struct { event_type: bridge.EventType, schema_version: u16 },
+        output_kinds: []const []const u8 = &.{},
         limits: struct { max_output_frames_per_event: u8 },
     },
     recover: bool,
@@ -50,6 +53,15 @@ pub const Host = struct {
     delivered_events: u64 = 0,
     activation_ack: ?u64 = null,
     opening_fees_configured: bool = false,
+    order_queries_declared: bool = false,
+    queries: [trading.oms.max_orders]PendingQuery = undefined,
+    query_count: usize = 0,
+
+    const PendingQuery = struct {
+        request: bridge.OrderQuery,
+        order: cycles.Order,
+        pending: bool = true,
+    };
 
     pub fn start(init: std.process.Init, owner: *Owner, generation: u64, config: Config) !*Host {
         for ([_][]const u8{ config.python, config.script, config.request, config.checkpoint }) |path|
@@ -76,9 +88,10 @@ pub const Host = struct {
             .state_schema = try parseIdentity(request.manifest.state_schema.identity),
             .state_schema_version = request.manifest.state_schema.version,
             .strategy_config_version = request.binding.config_version,
-            .strategy_cursor = request.checkpoint_cursor,
+            .strategy_cursor = std.mem.readInt(u64, checkpoint[96..104], .little),
             .next_intent_sequence = std.mem.readInt(u64, checkpoint[104..112], .little),
         };
+        if (metadata.strategy_cursor < request.checkpoint_cursor) return error.InvalidStrategyHostCheckpoint;
         _ = try checkpoints.decodePayloadCheckpoint(checkpoint, metadata);
         const shard = try owner.source();
         const authority = shard.strategyAuthority(metadata.strategy_instance);
@@ -91,7 +104,7 @@ pub const Host = struct {
             return error.InvalidStrategyHostBinding;
         var subscription: bridge.Subscription = .{ .strategy_identity = metadata.strategy_instance, .event_mask = 0 };
         for (request.manifest.subscriptions) |entry| {
-            if (entry.schema_version != 1 or (entry.event_type != .depth_snapshot and entry.event_type != .market_trade))
+            if (entry.schema_version != 1 or (entry.event_type != .depth_snapshot and entry.event_type != .market_trade and entry.event_type != .cycle_projection))
                 return error.UnsupportedFormalHostSubscription;
             subscription.event_mask |= bridge.Subscription.of(metadata.strategy_instance, &.{entry.event_type}).event_mask;
         }
@@ -133,11 +146,15 @@ pub const Host = struct {
         if (fee_scopes) |bytes| args[4..7].* = .{ "--opening-fees", config.manual_fees.?, bytes };
         const host = try init.gpa.create(Host);
         errdefer init.gpa.destroy(host);
+        const order_queries_declared = for (request.manifest.output_kinds) |kind| {
+            if (std.mem.eql(u8, kind, "order_query")) break true;
+        } else false;
         host.* = .{
             .process = try lifecycle.ManagedHost.start(init, config.python, config.script, plan, "candidate", args[0..if (fee_scopes == null) @as(usize, 4) else 7]),
             .gateway = gateway,
             .cursor = metadata.strategy_cursor,
             .opening_fees_configured = fee_scopes != null,
+            .order_queries_declared = order_queries_declared,
         };
         errdefer host.process.deinit(init.io);
         try host.process.sendPlan(init.io);
@@ -188,10 +205,9 @@ pub const Host = struct {
             .barrier = applied.fact_sequence,
             .state_digest = applied.state_digest,
         });
-        // Coverage includes the committed HostActivated fact. A zero-output ACK
-        // at this exact sequence is required before accepting any active batch.
+        // The activation cutoff may carry read-only queries for recovered
+        // orders. Trading output remains forbidden until after its ACK.
         try host.deliver(owner, recovery_barrier, applied.fact_sequence, true);
-        try host.gateway.activate(&owner.shard, &owner.decision_journal);
         host.activation_ack = applied.fact_sequence;
         std.debug.print("strategy_host_activation: generation={d} committed={d} ack={d} outputs_before_ack=0\n", .{
             generation, applied.fact_sequence, host.activation_ack.?,
@@ -229,9 +245,45 @@ pub const Host = struct {
         init.gpa.destroy(self);
     }
 
+    fn queueQuery(self: *Host, shard: *const trading.TradingShard, request: bridge.OrderQuery) !void {
+        if (request.cursor != shard.authoritativeBarrier()) return error.StaleCycleProjection;
+        const command = try execution.Gateway.cycleOrderCommand(shard, request.strategy, request.first_sequence, request.intent_sequence);
+        const order = try cycles.orderView(shard, shard.oms.orderById(command.order_id) orelse return error.UnknownOrder);
+        if (!order.queryable) return;
+        var index: usize = 0;
+        while (index < self.query_count) {
+            const previous = &self.queries[index];
+            if (previous.order.order_id == order.order_id) {
+                if (!std.meta.eql(previous.order, order)) previous.* = .{ .request = request, .order = order };
+                return;
+            }
+            if (shard.cycles.find(previous.request.strategy, previous.request.first_sequence) == null) {
+                self.query_count -= 1;
+                previous.* = self.queries[self.query_count];
+            } else index += 1;
+        }
+        if (self.query_count == self.queries.len) return error.HostQueryCapacity;
+        self.queries[self.query_count] = .{ .request = request, .order = order };
+        self.query_count += 1;
+    }
+
+    pub fn takeOrderQuery(self: *Host, owner: *const Owner) !?bridge.OrderQuery {
+        if (try self.readyStrategy(owner) == null) return null;
+        const shard = try owner.source();
+        for (self.queries[0..self.query_count]) |*entry| {
+            if (!entry.pending) continue;
+            entry.pending = false;
+            const request = entry.request;
+            const command = execution.Gateway.cycleOrderCommand(shard, request.strategy, request.first_sequence, request.intent_sequence) catch continue;
+            const order = try cycles.orderView(shard, shard.oms.orderById(command.order_id) orelse continue);
+            if (order.queryable and std.meta.eql(entry.order, order)) return request;
+        }
+        return null;
+    }
+
     fn deliver(self: *Host, owner: *Owner, after: u64, through: u64, suppress: bool) !void {
         if (after == through) return;
-        var delivery: Delivery = .{ .host = self, .io = owner.io, .seen = after, .through = through, .suppress = suppress };
+        var delivery: Delivery = .{ .host = self, .owner = owner, .io = owner.io, .seen = after, .through = through, .suppress = suppress };
         while (delivery.seen < through) {
             owner.store.replaySegmentsAfter(owner.io, owner.stream, delivery.seen, std.math.maxInt(usize), .{
                 .ptr = &delivery,
@@ -310,6 +362,7 @@ fn encodeFeeScopes(gpa: std.mem.Allocator, shard: *const trading.TradingShard, b
 
 const Delivery = struct {
     host: *Host,
+    owner: *Owner,
     io: std.Io,
     seen: u64,
     through: u64,
@@ -328,8 +381,29 @@ const Delivery = struct {
                 if (record.sequence != self.seen + 1) return error.StrategyHostSequenceGap;
                 self.seen = record.sequence;
                 var payload: [input_capacity]u8 = undefined;
-                const event = try self.project(record, &payload);
+                var event = try self.project(record, &payload);
                 if (record.sequence <= self.host.cursor) continue;
+                // The read view belongs only to the current committed cutoff.
+                // Historical replay must never receive the latest order state.
+                const activation_cutoff = self.suppress and
+                    record.sequence == self.host.gateway.config.authorization.activation_barrier;
+                if (event == null and (!self.suppress or activation_cutoff) and record.sequence == self.through and self.subscribed(.cycle_projection)) {
+                    const shard = try self.owner.source();
+                    if (record.sequence == shard.authoritativeBarrier()) {
+                        if (try cycles.encode(shard, self.host.gateway.config.authorization.strategy_identity, activation_cutoff, payload[0 .. payload.len - 192])) |projection_bytes| {
+                            event = .{
+                                .event_type = .cycle_projection,
+                                .shard_sequence = record.sequence,
+                                .time_presence = 0x10,
+                                .source_time_ns = 0,
+                                .receive_time_ns = 0,
+                                .monotonic_time_ns = 0,
+                                .wall_time_utc_ns = @intCast(std.Io.Clock.real.now(self.io).nanoseconds),
+                                .payload = projection_bytes,
+                            };
+                        }
+                    }
+                }
                 const events: []const bridge.EventEnvelope = if (event) |item| &.{item} else &.{};
                 try self.send(record.sequence, events);
                 if (self.output_count != 0) return error.HostOutputPending;
@@ -389,12 +463,23 @@ const Delivery = struct {
         const batch = try self.host.gateway.encodeBatch(&bytes, self.host.process.next_input_batch, sequence, sequence, timestamp, events);
         try self.host.process.sendInput(self.io, batch, timestamp);
         try self.host.gateway.recordPublished(self.host.process.next_input_batch - 1, sequence, timestamp);
-        const outputs = try self.host.process.receiveBatchAck(self.io, now(self.io), if (self.suppress) 0 else output_limit);
-        self.output_count = @intCast(outputs);
-        for (self.decisions[0..self.output_count]) |*decision| {
+        const cycle_event = events.len == 1 and events[0].event_type == .cycle_projection;
+        const outputs = try self.host.process.receiveBatchAck(self.io, now(self.io), if (self.suppress and !cycle_event) 0 else output_limit);
+        if (self.suppress and sequence == self.host.gateway.config.authorization.activation_barrier)
+            try self.host.gateway.activate(&self.owner.shard, &self.owner.decision_journal);
+        self.output_count = 0;
+        for (0..outputs) |_| {
             var storage: [1024]u8 = undefined;
             const frame = try self.host.process.receiveOutput(self.io, now(self.io), &storage);
-            decision.* = self.host.gateway.ingest(frame, now(self.io));
+            if (bridge.Gateway.isOrderQuery(frame)) {
+                if (!cycle_event or !self.host.order_queries_declared) return error.InvalidOrderQuerySource;
+                const request = try self.host.gateway.decodeOrderQuery(frame, now(self.io));
+                try self.host.queueQuery(try self.owner.source(), request);
+            } else {
+                if (self.suppress) return error.PrematureTradingOutput;
+                self.decisions[self.output_count] = self.host.gateway.ingest(frame, now(self.io));
+                self.output_count += 1;
+            }
         }
         self.host.gateway.retainLatestPublication();
         self.host.delivered_events += events.len;

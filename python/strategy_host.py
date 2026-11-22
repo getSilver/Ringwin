@@ -124,14 +124,10 @@ def hello_payload(plan_payload):
     return session, bytes(payload)
 
 
-def output_frame(batch, args, session, intent_sequence=None, limit_price=None):
+def output_header(batch, session, strategy_identity, config_version, activation_identity, schema, member_len):
     source_batch = struct.unpack_from("<Q", batch, 72)[0]
     strategy_cursor = struct.unpack_from("<Q", batch, 88)[0]
     schema_registry = int.from_bytes(batch[16:32], "little")
-    strategy_identity = int(args.strategy_identity, 0)
-    activation_identity = int(args.activation_identity, 0)
-    rules_version = getattr(args, "limit_price_rules_version", None)
-    member_len = 80 if rules_version is None else 104
     frame = bytearray(128 + member_len)
     frame[:4] = b"QSHO"
     struct.pack_into("<HHII", frame, 4, 1, 128, 0, len(frame))
@@ -139,8 +135,22 @@ def output_frame(batch, args, session, intent_sequence=None, limit_price=None):
     struct.pack_into("<QIIQ", frame, 32, session[0], session[1], 0, session[2])
     struct.pack_into("<Q", frame, 56, source_batch)
     frame[64:80] = strategy_identity.to_bytes(16, "little")
-    struct.pack_into("<QQHHII", frame, 80, strategy_cursor, args.config_version, 1, 1, 1, member_len)
+    struct.pack_into("<QQHHII", frame, 80, strategy_cursor, config_version, 1, schema, 1, member_len)
     frame[108:124] = activation_identity.to_bytes(16, "little")
+    return frame
+
+
+def output_query_frame(batch, session, strategy, config, activation, first_sequence, intent_sequence):
+    frame = output_header(batch, session, strategy, config, activation, 3, 16)
+    struct.pack_into("<QQ", frame, 128, first_sequence, intent_sequence)
+    struct.pack_into("<I", frame, 124, crc32c(frame[:124] + frame[128:]))
+    return bytes(frame)
+
+
+def output_frame(batch, args, session, intent_sequence=None, limit_price=None):
+    rules_version = getattr(args, "limit_price_rules_version", None)
+    frame = output_header(batch, session, int(args.strategy_identity, 0), args.config_version,
+                          int(args.activation_identity, 0), 1, 80 if rules_version is None else 104)
     side = 1 if args.side == "buy" else 2
     time_in_force = {"gtc": 1, "ioc": 2, "post-only": 3}[args.time_in_force]
     struct.pack_into(
@@ -670,7 +680,7 @@ def decode_component_batch(batch, session, number, cursor):
             raise ValueError("short component record")
         length, size, kind, version, flags, sequence = struct.unpack_from("<IIHHIQ", batch, offset)
         if (length < 64 or length % 8 or length > len(batch)-offset or size > length-64 or
-                kind not in range(1, 9) or version != 1 or flags & ~0x1f or
+                kind not in range(1, 10) or version != 1 or flags & ~0x1f or
                 any(batch[offset+56:offset+64]) or not previous < sequence <= last or
                 any(batch[offset+64+size:offset+length])):
             raise ValueError("invalid component record")
