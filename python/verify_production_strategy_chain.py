@@ -114,7 +114,7 @@ def approve_dual_ioc(state):
             worker.join(timeout=5)
 
 
-def verify_dual_ioc_fx(state):
+def verify_dual_ioc_fx(state, expected_deviation):
     from fractions import Fraction
     from strategies.cross_venue.arbitrage_economics import FxRate, actual_fx_report
     from strategies.cross_venue.arbitrage_fx_archive import CycleFxArchive
@@ -129,9 +129,9 @@ def verify_dual_ioc_fx(state):
     attached = archive.capture(frame, projection, rate)
     assert attached.fx_complete, attached
     report = actual_fx_report(attached.fx_exposures)
-    assert report["deviation_usdt"] == ["3", "250000000"], report
+    assert report["deviation_usdt"] == list(expected_deviation), report
     assert archive.restore(frame).fx_exposures == attached.fx_exposures
-    print("dual_ioc_fx: deviation_usdt=3/250000000", file=sys.stderr)
+    print(f"dual_ioc_fx: deviation_usdt={'/'.join(expected_deviation)}", file=sys.stderr)
 
 
 @contextmanager
@@ -516,6 +516,6 @@ if __name__ == "__main__":
         state = Path(sys.argv[2]).resolve()
         configure_host(state, state, int(sys.argv[3]), dual_ioc=True)
     elif sys.argv[1:2] == ["--verify-dual-ioc-fx"]:
-        verify_dual_ioc_fx(Path(sys.argv[2]))
+        verify_dual_ioc_fx(Path(sys.argv[2]), sys.argv[3:] or ("3", "250000000"))
     else:
         main(*map(os.path.abspath, sys.argv[1:]))

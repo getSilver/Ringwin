@@ -1162,6 +1162,40 @@ pub const Gateway = struct {
             return error.NotSent;
     }
 
+    /// Resolve a strategy query against the committed cycle and its original
+    /// place command. An intent sequence alone does not identify an account order.
+    pub fn queryCycleOrder(self: *Gateway, shard: *const trading.TradingShard, strategy: u128, first_sequence: u64, intent_sequence: u64, query_id: u64) !venue.SendResult {
+        const cycle = shard.cycles.find(strategy, first_sequence) orelse return error.UnknownCycle;
+        for (shard.oms.command_history[0..shard.oms.command_history_count]) |place| {
+            if (place.operation != .place or place.strategy_instance != strategy or
+                place.intent_sequence != intent_sequence or place.authority.cycle.identity != first_sequence or
+                place.authority.cycle.barrier != cycle.fact_sequence) continue;
+            const order = shard.oms.orderById(place.order_id) orelse return error.UnknownOrder;
+            if (query_id == 0 or query_id <= order.last_reconciliation_id) return error.StaleOrderQuery;
+            const account = shard.accountState(order.exchange_account) orelse return error.UnknownAccount;
+            const deployment = shard.deployment.account(order.exchange_account) orelse return error.UnknownAccount;
+            const route = self.routeFor(order.exchange_account) orelse return error.UnknownAccount;
+            if (route.venue_identity != deployment.venue or
+                @intFromEnum(route.environment) != @intFromEnum(deployment.environment)) return error.CycleOrderRouteMismatch;
+            var venue_order: ?canonical.VenueOrderRef = null;
+            const economics = &account.economic_projection;
+            for (economics.applied_fills[0..economics.applied_fill_count]) |applied| {
+                const fill = applied.source.canonical_fill orelse continue;
+                if (fill.order != order.id) continue;
+                if (fill.venue_order.venue != deployment.venue or
+                    (venue_order != null and !std.meta.eql(venue_order.?, fill.venue_order))) return error.CycleOrderVenueMismatch;
+                venue_order = fill.venue_order;
+            }
+            return self.sendRequestForRoute(route, .{ .order_reconciliation = .{
+                .identity = query_id,
+                .exchange_account = order.exchange_account,
+                .order = order.id,
+                .venue_order = venue_order,
+            } });
+        }
+        return error.UnknownCycleOrder;
+    }
+
     /// Sends a non-order request through the same account-owned route.  Only
     /// the canonical request crosses this seam; replay callers never own a
     /// Gateway and therefore cannot send anything.

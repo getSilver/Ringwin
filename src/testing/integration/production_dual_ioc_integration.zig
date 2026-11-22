@@ -91,7 +91,11 @@ fn exercise(init: std.process.Init, python: []const u8, executable_gateway: ?[]c
     const host = try formal.Host.start(init, owner, 1, config.value.strategy_host);
     defer host.close(init);
     try std.testing.expectEqual(@as(?u128, 9), try host.readyStrategy(owner));
-    var remote = if (executable_gateway) |executable| try RemoteGateway.start(init, executable, path, owner.shard.deployment.header.?.expected_digest) else null;
+    if (builtin.os.tag != .linux and executable_gateway != null) return error.UnsupportedGatewayPlatform;
+    var remote: ?RemoteGateway = if (builtin.os.tag == .linux)
+        if (executable_gateway) |executable| try RemoteGateway.start(init, executable, path, owner.shard.deployment.header.?.expected_digest) else null
+    else
+        null;
     defer if (remote) |*process| process.close(init.io);
 
     try store.dir.rename("fees-2.json", store.dir, "manual-fees.json", io);
@@ -121,7 +125,8 @@ fn exercise(init: std.process.Init, python: []const u8, executable_gateway: ?[]c
         .capability = .{ .version = 2, .rules_version = 2, .config_version = 1, .session = 1, .supports_native_amend = true },
         .supported_products = execution.productMask(.isolated_linear),
     });
-    if (remote) |*process| {
+    if (builtin.os.tag == .linux and remote != null) {
+        const process = &remote.?;
         try process.fillPair(gpa, owner, approved.request.legs, false);
         // The independent simulation emits the full lifecycle, including
         // dispatch outcomes and partial execution before terminal reports.
@@ -129,8 +134,8 @@ fn exercise(init: std.process.Init, python: []const u8, executable_gateway: ?[]c
     } else try fillPair(gpa, owner, gateway, &adapters, approved.request.legs, false);
     try publishTrade(owner, host, 4);
     try std.testing.expectEqual(@as(u16, 4), owner.shard.oms.order_count);
-    if (remote) |*process|
-        try process.fillPair(gpa, owner, approved.request.legs, true)
+    if (builtin.os.tag == .linux and remote != null)
+        try remote.?.fillPair(gpa, owner, approved.request.legs, true)
     else
         try fillPair(gpa, owner, gateway, &adapters, approved.request.legs, true);
 

@@ -16,6 +16,7 @@ pub const Adapter = struct {
     result: venue.SendResult = .accepted,
     fail: bool = false,
     command: ?canonical.OrderCommand = null,
+    query: ?canonical.OrderReconciliationRequest = null,
     pending: ?canonical.AdapterOutputBatch = null,
 
     pub fn interface(self: *@This()) venue.VenueAdapter {
@@ -31,6 +32,12 @@ pub const Adapter = struct {
     }
     fn send(ptr: *anyopaque, request: canonical.AdapterRequest) venue.SendError!venue.SendResult {
         const self: *@This() = @ptrCast(@alignCast(ptr));
+        if (request == .order_reconciliation) {
+            const query = request.order_reconciliation;
+            std.debug.assert(query.exchange_account == self.account);
+            self.query = query;
+            return .accepted;
+        }
         const command = request.order_command;
         std.debug.assert(command.exchange_account == self.account);
         std.debug.assert(command.time_in_force == .immediate_or_cancel);
@@ -276,6 +283,15 @@ fn exerciseLateFills(cancel_in_flight: bool) !void {
     const unknown_owner = try std.testing.allocator.create(demo.Owner);
     defer std.testing.allocator.destroy(unknown_owner);
     try demo.Owner.recoverInto(unknown_owner, h.memory.interface(), undefined, h.owner.stream);
+    try std.testing.expectError(error.UnknownCycle, h.gateway.queryCycleOrder(&unknown_owner.shard, 9, 2, 2, 5));
+    try std.testing.expectError(error.UnknownCycleOrder, h.gateway.queryCycleOrder(&unknown_owner.shard, 9, 1, 3, 5));
+    try std.testing.expectEqual(venue.SendResult.accepted, try h.gateway.queryCycleOrder(&unknown_owner.shard, 9, 1, 2, 5));
+    try std.testing.expectEqualDeep(canonical.OrderReconciliationRequest{
+        .identity = 5,
+        .exchange_account = 30,
+        .order = 2,
+    }, h.adapters[1].query.?);
+    try std.testing.expectEqual(@as(usize, 1), h.adapters[1].sends);
     var restored_consumer = consumers[1];
     try restored_consumer.observe(&unknown_owner.shard, 30, 2);
     try std.testing.expectEqual(@as(i64, 10000), restored_consumer.possible_quantity);
@@ -341,6 +357,8 @@ fn exerciseLateFills(cancel_in_flight: bool) !void {
     defer std.testing.allocator.destroy(recovered);
     try demo.Owner.recoverInto(recovered, h.memory.interface(), undefined, h.owner.stream);
     try std.testing.expectEqualSlices(u8, &h.owner.shard.canonicalStateDigest(), &recovered.shard.canonicalStateDigest());
+    try std.testing.expectEqual(.accepted, try h.gateway.queryCycleOrder(&recovered.shard, 9, 1, 2, 6));
+    try std.testing.expectEqualDeep(try canonical.VenueOrderRef.init(21, "dual-ioc"), h.adapters[1].query.?.venue_order.?);
     for (&consumers, 0..) |*consumer, index| {
         try consumer.observe(&recovered.shard, h.adapters[index].account, index + 1);
         try std.testing.expectEqual(@as(usize, 1), consumer.proposals);

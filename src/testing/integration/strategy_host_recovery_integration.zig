@@ -220,6 +220,8 @@ pub fn main(init: std.process.Init) !void {
             return @import("production_dual_ioc_integration.zig").run(init, python, null);
         if (std.mem.eql(u8, value, "--routed-dual-ioc-only"))
             return @import("production_dual_ioc_integration.zig").run(init, python, script);
+        if (std.mem.eql(u8, value, "--ioc-recovery-only"))
+            return runCycleRecovery(init, python, .reconciling, .keep, .ioc_failure);
         if (!std.mem.eql(u8, value, "--public-depth-only")) return error.UnknownArgument;
         return runCycleRecovery(init, python, .holding, .keep, .public_depth);
     }
@@ -450,7 +452,7 @@ const CyclePhase = enum { entering, repairing, holding, exiting, reconciling };
 
 const CycleTransition = enum { keep, migrate, rebuild };
 
-const CycleScenario = enum { normal, downtime, loss, maker, risk, public_depth };
+const CycleScenario = enum { normal, downtime, loss, maker, risk, public_depth, ioc_failure };
 
 // Offline canonical feed: protocol normalization is qualified separately by the OKX tests.
 const ContractFeed = struct {
@@ -614,6 +616,7 @@ fn runCycleRecovery(init: std.process.Init, python: []const u8, phase: CyclePhas
     const expired = scenario == .downtime;
     const loss = scenario == .loss;
     const maker_mode = scenario == .maker;
+    const ioc_failure = scenario == .ioc_failure;
     const durable = @import("../../persistence/durable_store.zig");
     const demo = @import("../../runtime/demo/demo_authority.zig");
     const multi = @import("../acceptance/core/multi_account_authority_acceptance.zig");
@@ -634,7 +637,7 @@ fn runCycleRecovery(init: std.process.Init, python: []const u8, phase: CyclePhas
     const owner = try init.gpa.create(demo.Owner);
     defer init.gpa.destroy(owner);
     try demo.Owner.bootstrapInto(owner, adapter.interface(), init.io, .{ .domain = .decision_log, .id = 91 });
-    try multi.initializePythonOwner(owner);
+    if (ioc_failure) try multi.initializePythonOwnerWithSettlement(owner, 3) else try multi.initializePythonOwner(owner);
     var input: CycleIngress = .{ .owner = owner, .sink = try @import("../../persistence/raw_ingress.zig").DurableSink.init(adapter.interface(), init.io, .{ .domain = .raw_ingress, .id = 93 }) };
     if (maker_mode) {
         const view = try init.gpa.create(engine.TradingShard);
@@ -715,9 +718,9 @@ fn runCycleRecovery(init: std.process.Init, python: []const u8, phase: CyclePhas
     };
     _ = try input.apply(fixture.atGroup(45, .{ .identity = 9002, .payload = if (public_start) |started| .{ .external_intent_group = started.candidate } else .{ .oms_intent_group = group } }));
     try std.testing.expectEqual(@as(u8, 1), owner.shard.cycles.count);
-    if (public_start != null) {
+    if (public_start != null or ioc_failure) {
         const dual = @import("../acceptance/core/dual_ioc_dispatch_acceptance.zig");
-        var adapters = [_]dual.Adapter{ .{ .account = 20 }, .{ .account = 30 } };
+        var adapters = [_]dual.Adapter{ .{ .account = 20 }, .{ .account = 30, .result = if (ioc_failure) .backpressure else .accepted } };
         const dispatcher = try init.gpa.create(execution.Gateway);
         defer init.gpa.destroy(dispatcher);
         dispatcher.init();
@@ -732,7 +735,9 @@ fn runCycleRecovery(init: std.process.Init, python: []const u8, phase: CyclePhas
         try dispatcher.pinDeploymentDigest(owner.shard.deployment.header.?.expected_digest);
         try dual.observe(dispatcher, &owner.shard);
         const dispatch_now = owner.shard.oms.findCommand(1).?.authority.dispatch_deadline_monotonic_ns - std.time.ns_per_s;
-        for ([_]u64{ 1, 2 }) |command| try std.testing.expectEqual(@import("../../execution/venue_adapter.zig").SendResult.accepted, try dispatcher.sendFromShard(&owner.shard, command, dispatch_now));
+        try std.testing.expectEqual(.accepted, try dispatcher.sendFromShard(&owner.shard, 1, dispatch_now));
+        const second_result: @import("../../execution/venue_adapter.zig").SendResult = if (ioc_failure) .backpressure else .accepted;
+        try std.testing.expectEqual(second_result, try dispatcher.sendFromShard(&owner.shard, 2, dispatch_now));
         for (adapters, [_]u128{ 101, 102 }, [_]i128{ 100, 110 }, 0..) |target, instrument, ticks, index| {
             try std.testing.expectEqual(@as(usize, 1), target.sends);
             const command = target.command.?;
@@ -783,13 +788,13 @@ fn runCycleRecovery(init: std.process.Init, python: []const u8, phase: CyclePhas
                     .side = if (index == 0) .buy else .sell,
                     .quantity = .{ .instrument = instrument, .rules_version = 1, .lots = filled },
                     .price = .{ .instrument = instrument, .rules_version = 1, .ticks = if (index == 0) 100 else 110 },
-                    .fee = .{ .asset = 1, .atoms = 0 },
+                    .fee = .{ .asset = if (ioc_failure) 3 else 1, .atoms = if (ioc_failure) 5 else 0 },
                     .liquidity = .taker,
                     .venue_fill_time_utc_ns = fixture.atGroup(46, .{ .identity = 0, .payload = .recovery_completed }).core.source_time,
                 } });
                 fill.venue.envelope.exchange_account = account;
                 fill.venue.envelope.venue = venue;
-                if (public_start != null) pending_fill = fill else _ = try input.apply(fill);
+                if (public_start != null or ioc_failure) pending_fill = fill else _ = try input.apply(fill);
             }
             var terminal = fixture.canonicalAt(46, 4, .{ .execution_report = .{
                 .identity = 2,
@@ -804,7 +809,7 @@ fn runCycleRecovery(init: std.process.Init, python: []const u8, phase: CyclePhas
             } });
             terminal.venue.envelope.exchange_account = account;
             terminal.venue.envelope.venue = venue;
-            if (public_start != null) {
+            if (public_start != null or ioc_failure) {
                 terminal.venue.envelope.identity.sequence = 3;
                 terminal.venue.envelope.source_sequence = 3;
             }
@@ -830,6 +835,7 @@ fn runCycleRecovery(init: std.process.Init, python: []const u8, phase: CyclePhas
             dispatch.items[0] = .{ .command_id = 2, .state = .unknown };
             _ = try input.apply(fixture.atGroup(46, .{ .identity = 9010, .account_scope = 30, .payload = .{ .oms_dispatch_batch = dispatch } }));
         }
+        if (ioc_failure) try observeIocPosition(&input, 46, 6, 5000);
         const old_cursor = metadata.strategy_cursor;
         metadata.strategy_cursor = owner.shard.authoritativeBarrier();
         var before_projection: [176]u8 = undefined;
@@ -1006,6 +1012,7 @@ fn runCycleRecovery(init: std.process.Init, python: []const u8, phase: CyclePhas
     } } }));
     try owner.checkpoint();
     const original_cycle = owner.shard.cycles.find(9, 1).?;
+    const deployment_digest = owner.shard.deployment.header.?.expected_digest;
     const persisted_core_digest = owner.shard.canonicalStateDigest();
     adapter.close(init.io);
     adapter.* = .{ .dir = undefined };
@@ -1019,8 +1026,7 @@ fn runCycleRecovery(init: std.process.Init, python: []const u8, phase: CyclePhas
             try std.testing.expectEqualSlices(u8, &wire, restored_depth.payload);
         }
     }
-    const configuration_rows = try multi.configurationRows();
-    try owner.pinDeploymentDigest(configuration_rows[0].begin.expected_digest);
+    try owner.pinDeploymentDigest(deployment_digest);
     try std.testing.expectError(error.CoreRecoveryIncomplete, recovery.Recovery.begin(init.gpa, owner, 9, .{ .fencing = owner.shard.fencing_token, .shard = 0, .generation = 71 }));
     const recovered_digest = owner.shard.canonicalStateDigest();
     try input.replay();
@@ -1033,8 +1039,9 @@ fn runCycleRecovery(init: std.process.Init, python: []const u8, phase: CyclePhas
     const execution_gateway = try init.gpa.create(execution.Gateway);
     defer init.gpa.destroy(execution_gateway);
     execution_gateway.init();
+    if (ioc_failure) try execution_gateway.pinDeploymentDigest(deployment_digest);
     var recovered_adapters = [_]@import("../acceptance/core/dual_ioc_dispatch_acceptance.zig").Adapter{ .{ .account = 20 }, .{ .account = 30 } };
-    if (public_start != null) {
+    if (public_start != null or ioc_failure) {
         for (&recovered_adapters, [_]u64{ 1, 21 }) |*target, venue| try execution_gateway.add(.{
             .account = target.account,
             .adapter = target.interface(),
@@ -1042,8 +1049,11 @@ fn runCycleRecovery(init: std.process.Init, python: []const u8, phase: CyclePhas
             .capability = .{ .version = 1, .rules_version = 1, .config_version = 1, .session = 1 },
             .supported_products = execution.productMask(.isolated_linear),
         });
+    }
+    if (public_start != null or ioc_failure) {
         try execution_gateway.attachRecoveredDurableDispatch(adapter.interface(), init.io, .{ .domain = .control, .id = 92 });
-        try std.testing.expectEqual(@as(usize, 2), execution_gateway.accepted_dispatch_count);
+        try std.testing.expectEqual(@as(usize, if (ioc_failure) 1 else 2), execution_gateway.accepted_dispatch_count);
+        try std.testing.expectEqual(@as(usize, if (ioc_failure) 1 else 0), execution_gateway.uncertain_dispatch_count);
         for (recovered_adapters) |target| try std.testing.expectEqual(@as(usize, 0), target.sends);
     } else try execution_gateway.bootstrapDurableDispatch(adapter.interface(), init.io, .{ .domain = .control, .id = 92 });
     for ([_]u128{ 20, 30 }) |account| try multi.reconcileDomainAccount(owner, account, execution_gateway);
@@ -1149,21 +1159,25 @@ fn runCycleRecovery(init: std.process.Init, python: []const u8, phase: CyclePhas
     if (phase == .reconciling) {
         try std.testing.expectError(error.UnresolvedRecoveryOrder, coordinator.qualify(init.gpa, owner, content, metadata, &.{binding}, .utc));
         try std.testing.expectError(error.RecoveryNotQualified, coordinator.activate(owner));
-        const order = owner.shard.oms.orderById(2).?;
-        var resolved = fixture.canonicalAt(61, 5, .{ .execution_report = .{
-            .identity = 3,
-            .order = order.id,
-            .client_order_id = order.client_order_id,
-            .instrument = 102,
-            .exchange_account = 30,
-            .revision = 1,
-            .status = .canceled,
-            .cumulative_quantity = .{ .instrument = 102, .rules_version = 1, .lots = 0 },
-            .remaining_quantity = .{ .instrument = 102, .rules_version = 1, .lots = 10000 },
-        } });
-        resolved.venue.envelope.exchange_account = 30;
-        resolved.venue.envelope.venue = 21;
-        _ = try input.apply(resolved);
+        if (ioc_failure) {
+            try resolveIocRejection(&input, execution_gateway, &recovered_adapters[1]);
+        } else {
+            const order = owner.shard.oms.orderById(2).?;
+            var resolved = fixture.canonicalAt(61, 5, .{ .execution_report = .{
+                .identity = 3,
+                .order = order.id,
+                .client_order_id = order.client_order_id,
+                .instrument = 102,
+                .exchange_account = 30,
+                .revision = 1,
+                .status = .canceled,
+                .cumulative_quantity = .{ .instrument = 102, .rules_version = 1, .lots = 0 },
+                .remaining_quantity = .{ .instrument = 102, .rules_version = 1, .lots = 10000 },
+            } });
+            resolved.venue.envelope.exchange_account = 30;
+            resolved.venue.envelope.venue = 21;
+            _ = try input.apply(resolved);
+        }
         const previous = metadata.strategy_cursor;
         metadata.strategy_cursor = owner.shard.authoritativeBarrier();
         const resolved_utc = try coordinator.currentUtc(owner);
@@ -1278,6 +1292,46 @@ fn runCycleRecovery(init: std.process.Init, python: []const u8, phase: CyclePhas
     try std.testing.expectEqualDeep(original_cycle, owner.shard.cycles.find(9, 1).?);
     try std.testing.expectEqual(@as(usize, if (loss) 3 else 2), owner.shard.oms.intent_history_count);
     try std.testing.expect(!owner.shard.operational_state.trading_authorized);
+    if (ioc_failure) {
+        _ = try input.apply(fixture.atGroup(62, .{ .identity = 9020, .account_scope = 20, .payload = .{ .mark_price = .{ .instrument = 101, .price_atoms = 100 } } }));
+        const repair_cursor = owner.shard.authoritativeBarrier();
+        const repair_utc = try coordinator.currentUtc(owner);
+        try cycleProjection(owner, repair_utc, &projection);
+        std.mem.writeInt(u64, projection[80..88], 2, .little);
+        var repair_event = projected;
+        repair_event.shard_sequence = repair_cursor;
+        repair_event.source_time_ns = @intCast(repair_utc);
+        repair_event.wall_time_utc_ns = @intCast(repair_utc);
+        now = @intCast(std.Io.Clock.awake.now(init.io).nanoseconds);
+        try host.sendInput(init.io, try gateway.encodeBatch(&batch_storage, 4, activation.barrier + 1, repair_cursor, now, &.{repair_event}), now);
+        try gateway.recordPublished(4, repair_cursor, now);
+        var repair_wire: [1024]u8 = undefined;
+        const decision = gateway.ingest(try host.receiveOutput(init.io, now, &repair_wire), now + 1);
+        try std.testing.expect(decision == .accepted_group);
+        const proposals = try gateway_module.decodeIntentGroup(decision.accepted_group.frame());
+        try std.testing.expectEqual(@as(u8, 1), proposals.count);
+        const repair = proposals.members[0];
+        try std.testing.expectEqual(@as(u64, 3), repair.intent_sequence);
+        try std.testing.expectEqual(@as(u128, 20), repair.exchange_account_identity);
+        try std.testing.expectEqual(@as(i64, 5000), repair.quantity);
+        try std.testing.expect(repair.portfolio_reduce_only);
+        const intent = fixture.atGroup(62, .{ .identity = 9030, .payload = decision.corePayload() });
+        _ = try input.apply(intent);
+        _ = try input.apply(intent);
+        try std.testing.expectEqual(@as(u16, 3), owner.shard.oms.order_count);
+        try std.testing.expectEqualDeep(original_cycle, owner.shard.cycles.find(9, 1).?);
+        metadata.strategy_cursor = owner.shard.authoritativeBarrier();
+        metadata.next_intent_sequence += 1;
+        try cycleProjection(owner, repair_utc, &projection);
+        std.mem.writeInt(u64, projection[80..88], 2, .little);
+        repair_event.shard_sequence = metadata.strategy_cursor;
+        now = @intCast(std.Io.Clock.awake.now(init.io).nanoseconds);
+        try host.sendInput(init.io, try gateway.encodeBatch(&batch_storage, 5, repair_cursor + 1, metadata.strategy_cursor, now, &.{repair_event}), now);
+        try gateway.recordPublished(5, metadata.strategy_cursor, now);
+        try host.requestCheckpoint(init.io, 4, metadata);
+        _ = try host.receiveCheckpoint(init.io, &frame);
+        try finishIocRepair(init, python, adapter.dir, path, &input, execution_gateway, &recovered_adapters[0]);
+    }
     if ((phase == .exiting and scenario != .risk) or loss) {
         const steps: usize = if (loss) 2 else 1;
         const original_order_count = owner.shard.oms.order_count;
@@ -1355,13 +1409,164 @@ fn runCycleRecovery(init: std.process.Init, python: []const u8, phase: CyclePhas
         try std.testing.expectError(error.CoreRecoveryIncomplete, recovery.Recovery.begin(init.gpa, owner, 99, plan.session));
         try owner.checkpoint();
         try demo.Owner.recoverInto(owner, adapter.interface(), init.io, owner.stream);
-        try owner.pinDeploymentDigest(configuration_rows[0].begin.expected_digest);
+        try owner.pinDeploymentDigest(deployment_digest);
         try std.testing.expectEqualDeep(original_cycle, owner.shard.cycles.find(9, 1).?);
         try std.testing.expectEqualSlices(u8, &a_economics, &owner.shard.accountState(20).?.economic_projection.semanticDigest());
         try std.testing.expectEqualSlices(u8, &b_economics, &owner.shard.accountState(30).?.economic_projection.semanticDigest());
         try std.testing.expect(owner.shard.strategyFenced(9));
     }
     std.debug.print("09b real core phase {s}/{s}/{s}: cycle=equivalent, committed activation, cut={d} activation_barrier={d} next_intent={d} orders={d} cycles={d} opening=false; projection_sha256={s} checkpoint_private_sha256={s} qualified_private_sha256={s} qualified_core_sha256={s}\n", .{ @tagName(phase), @tagName(transition), @tagName(scenario), old_decoded.metadata.strategy_cursor, activation.barrier, metadata.next_intent_sequence, owner.shard.oms.order_count, owner.shard.cycles.count, std.fmt.bytesToHex(binding.projection_digest, .lower), std.fmt.bytesToHex(old_decoded.state_digest, .lower), std.fmt.bytesToHex(qualification.private_digest, .lower), std.fmt.bytesToHex(qualification.core_digest, .lower) });
+}
+
+fn resolveIocRejection(input: *CycleIngress, gateway: *@import("../../execution/execution_gateway.zig").Gateway, adapter: *@import("../acceptance/core/dual_ioc_dispatch_acceptance.zig").Adapter) !void {
+    const canonical = @import("../../model/canonical_event.zig");
+    const shard = &input.owner.shard;
+    const order = shard.oms.orderById(2).?;
+    try std.testing.expectError(error.UnreconciledDispatch, gateway.reconcileRecoveredDispatch(shard, 2));
+    try std.testing.expectEqual(.accepted, try gateway.queryCycleOrder(shard, 9, 1, 2, 3));
+    try std.testing.expectEqualDeep(canonical.OrderReconciliationRequest{
+        .identity = 3,
+        .exchange_account = 30,
+        .order = order.id,
+    }, adapter.query.?);
+    try std.testing.expectEqual(@as(usize, 0), adapter.sends);
+    var evidence = fixture.reconciliationEvidence(61, 5, order.id, 102, order.revision);
+    evidence.scope.exchange_account = 30;
+    evidence.scope.from_utc_ns = order.created_at_utc_ns;
+    var resolved = fixture.canonicalAt(61, 5, .{ .order_reconciliation_result = .{
+        .identity = 3,
+        .order = order.id,
+        .revision = order.revision,
+        .complete = true,
+        .status = .found_terminal,
+        .terminal_status = .rejected,
+        .rules_version = 1,
+        .cumulative_quantity = .{ .instrument = 102, .rules_version = 1, .lots = 0 },
+        .remaining_quantity = .{ .instrument = 102, .rules_version = 1, .lots = 0 },
+        .evidence = evidence,
+    } });
+    resolved.venue.envelope.exchange_account = 30;
+    resolved.venue.envelope.venue = 21;
+    resolved.venue.envelope.raw_evidence = evidence.source;
+    var results: canonical.AdapterOutputBatch = .{};
+    try results.append(resolved.venue);
+    adapter.pending = results;
+    try drainCycleAdapter(input, gateway);
+    try std.testing.expectEqual(.rejected, shard.oms.orderById(2).?.state);
+    try std.testing.expectError(error.StaleOrderQuery, gateway.queryCycleOrder(shard, 9, 1, 2, 3));
+    try gateway.reconcileRecoveredDispatch(shard, 2);
+    try std.testing.expectEqual(@as(u64, 3), gateway.uncertain_dispatches[0].reconciliation_id);
+}
+
+fn drainCycleAdapter(input: *CycleIngress, gateway: *@import("../../execution/execution_gateway.zig").Gateway) !void {
+    const execution = @import("../../execution/execution_gateway.zig");
+    var batches: [execution.max_routes]@import("../../model/canonical_event.zig").AdapterOutputBatch = undefined;
+    try std.testing.expectEqual(@as(u8, 1), try gateway.drainFair(&batches));
+    for (batches[0].slice()) |record| _ = try input.apply(.{ .venue = record });
+}
+
+fn observeIocPosition(input: *CycleIngress, group: u64, sequence: u64, lots: i64) !void {
+    const account = input.owner.shard.canonical_account;
+    var observed = fixture.canonicalAt(group, sequence, .{ .account_observed = .{
+        .identity = sequence,
+        .exchange_account = 20,
+        .bootstrap = account.bootstrap.?,
+        .source_stream = account.source_stream.?,
+        .source_sequence = account.last_sequence + 1,
+        .value = .{ .position = .{
+            .instrument = 101,
+            .side = .net,
+            .value = .{ .instrument = 101, .side = .net, .quantity = .{ .instrument = 101, .rules_version = 1, .lots = lots } },
+        } },
+    } });
+    observed.venue.envelope.exchange_account = 20;
+    _ = try input.apply(observed);
+}
+
+fn finishIocRepair(init: std.process.Init, python: []const u8, dir: std.Io.Dir, path: []const u8, input: *CycleIngress, gateway: *@import("../../execution/execution_gateway.zig").Gateway, adapter: *@import("../acceptance/core/dual_ioc_dispatch_acceptance.zig").Adapter) !void {
+    const owner = input.owner;
+    const dual = @import("../acceptance/core/dual_ioc_dispatch_acceptance.zig");
+    const multi = @import("../acceptance/core/multi_account_authority_acceptance.zig");
+    const canonical = @import("../../model/canonical_event.zig");
+    const order = owner.shard.oms.orderById(3).?;
+    const command = for (owner.shard.oms.command_history[0..owner.shard.oms.command_history_count]) |entry| {
+        if (entry.order_id == order.id and entry.operation == .place) break entry;
+    } else return error.MissingRepairCommand;
+    try dual.observe(gateway, &owner.shard);
+    const now = fixture.atGroup(62, .{ .identity = 0, .payload = .recovery_completed }).core.monotonic_time;
+    try std.testing.expectEqual(.accepted, try gateway.sendFromShard(&owner.shard, command.command_id, now));
+    try std.testing.expectEqual(@as(usize, 1), adapter.sends);
+    try std.testing.expectEqualDeep(order.client_order_id, adapter.command.?.client_order_id);
+    var terminal = fixture.canonicalAt(63, 7, .{ .execution_report = .{
+        .identity = 3,
+        .order = order.id,
+        .client_order_id = order.client_order_id,
+        .exchange_account = 20,
+        .instrument = 101,
+        .revision = 1,
+        .status = .filled,
+        .cumulative_quantity = .{ .instrument = 101, .rules_version = 1, .lots = 5000 },
+        .remaining_quantity = .{ .instrument = 101, .rules_version = 1, .lots = 0 },
+    } });
+    terminal.venue.envelope.exchange_account = 20;
+    var fill = fixture.canonicalAt(63, 8, .{ .fill = .{
+        .identity = 2,
+        .order = order.id,
+        .client_order_id = order.client_order_id,
+        .venue_order = try canonical.VenueOrderRef.init(1, "ioc-repair"),
+        .venue_trade = try canonical.VenueTradeRef.init(1, "ioc-repair-fill"),
+        .exchange_account = 20,
+        .instrument = 101,
+        .side = .sell,
+        .quantity = .{ .instrument = 101, .rules_version = 1, .lots = 5000 },
+        .price = .{ .instrument = 101, .rules_version = 1, .ticks = 100 },
+        .fee = .{ .asset = 3, .atoms = 2 },
+        .liquidity = .taker,
+        .venue_fill_time_utc_ns = terminal.venue.envelope.times.source_utc_ns.?,
+    } });
+    fill.venue.envelope.exchange_account = 20;
+    var results: canonical.AdapterOutputBatch = .{};
+    try results.append(terminal.venue);
+    try results.append(fill.venue);
+    adapter.pending = results;
+    try drainCycleAdapter(input, gateway);
+    fill.venue.envelope.identity.sequence = 9;
+    fill.venue.envelope.source_sequence = 9;
+    _ = try input.apply(fill);
+    try observeIocPosition(input, 63, 10, 0);
+    const economics = &owner.shard.accountState(20).?.economic_projection;
+    try std.testing.expectEqual(@as(u64, 3), economics.settlement_asset);
+    try std.testing.expectEqual(@as(i64, 5000), try economics.appliedCanonicalFillQuantity(order.id));
+    try std.testing.expectEqual(@as(i128, 393), economics.portfolioLayer(10).?.settlement_balance_atoms);
+    try std.testing.expectEqual(@as(i128, 600), owner.shard.accountState(30).?.economic_projection.portfolioLayer(10).?.settlement_balance_atoms);
+    for ([_]u128{ 20, 30 }, [_]u128{ 101, 102 }) |account, instrument| {
+        const projection = &owner.shard.accountState(account).?.economic_projection;
+        try std.testing.expectEqual(@as(i64, 0), projection.portfolioLayer(10).?.positionForInstrument(instrument).quantity);
+        try multi.reconcileDomainAccount(owner, account, gateway);
+    }
+    const closure = try owner.shard.qualifyCycleClosure(9, 1);
+    _ = try input.apply(fixture.atGroup(65, .{ .identity = 9031, .payload = .{ .cycle_closed = closure } }));
+    var fx = try @import("../../runtime/strategy_fx_projection.zig").project(init.gpa, &owner.shard, &owner.decision_journal, 9, 1);
+    defer fx.deinit(init.gpa);
+    try std.testing.expect(fx.closed and fx.complete);
+    try std.testing.expectEqual(@as(usize, 2), fx.flows.items.len);
+    for (fx.flows.items, [_]i128{ -5, -2 }) |flow, amount| {
+        try std.testing.expectEqual(@as(u64, 3), flow.asset);
+        try std.testing.expectEqual(@as(u128, 20), flow.account);
+        try std.testing.expectEqual(amount, flow.atoms);
+    }
+    const projection = try fx.json(init.gpa);
+    defer init.gpa.free(projection);
+    try dir.writeFile(init.io, .{ .sub_path = "cycle-fx.json", .data = projection });
+    const result = try std.process.run(init.gpa, init.io, .{ .argv = &.{
+        python, "python/verify_production_strategy_chain.py", "--verify-dual-ioc-fx", path, "7", "500000000",
+    } });
+    defer init.gpa.free(result.stderr);
+    defer init.gpa.free(result.stdout);
+    if (result.term != .exited or result.term.exited != 0) {
+        std.debug.print("{s}", .{result.stderr});
+        return error.IocRepairFxMismatch;
+    }
 }
 
 fn cycleProjection(owner: *const @import("../../runtime/demo/demo_authority.zig").Owner, utc: u64, projection: *[176]u8) !void {
