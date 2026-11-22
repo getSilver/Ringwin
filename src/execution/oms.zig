@@ -594,6 +594,15 @@ pub const Oms = struct {
         }
     }
 
+    pub fn cancelLiveOrder(self: *Oms, order_id: u64) !bool {
+        const order = try self.mutableOrder(order_id);
+        if (order.state != .live and order.state != .partially_filled) return false;
+        const origin = self.originForOrder(order.id);
+        order.state = .pending_cancel;
+        try self.emit(order.*, .cancel, origin.intent_sequence, origin.refs);
+        return true;
+    }
+
     pub fn activeReservations(self: *const Oms, asset: canonical.AssetIdentity) !Reservation {
         return self.reservationsForAccount(asset, null);
     }
@@ -629,9 +638,15 @@ pub const Oms = struct {
 
     /// Unknown and PendingCancel must not overlap a later place or amend send.
     pub fn blocksNewSend(self: *const Oms) bool {
+        return self.blocksNewSendExcept(0);
+    }
+
+    /// Joint admission may qualify an incremental IOC against one pending Maker cancel.
+    pub fn blocksNewSendExcept(self: *const Oms, pending_maker_cancel: u64) bool {
         if (self.capacity_pressure) return true;
         for (self.orders[0..self.order_count]) |order| switch (order.state) {
-            .unknown, .pending_cancel => return true,
+            .unknown => return true,
+            .pending_cancel => if (order.id != pending_maker_cancel) return true,
             else => {},
         };
         return false;
@@ -696,10 +711,21 @@ pub const Oms = struct {
     }
 
     pub fn applyGroup(self: *Oms, group: IntentGroup) !void {
-        return self.applyGroupWithRefs(group, group, &.{});
+        return self.applyGroupWithRefs(group, group, &.{}, .{});
     }
 
     pub fn applyQualifiedGroup(self: *Oms, group: IntentGroup, original: IntentGroup, refs: []const RiskFactRefs) !void {
+        return self.applyQualifiedCycleGroup(group, original, refs, .{});
+    }
+
+    pub const CycleAdmission = struct {
+        predecessor: u64 = 0,
+        pending_maker_cancel: u64 = 0,
+    };
+
+    pub fn applyQualifiedCycleGroup(self: *Oms, group: IntentGroup, original: IntentGroup, refs: []const RiskFactRefs, admission: CycleAdmission) !void {
+        if ((admission.predecessor != 0 or admission.pending_maker_cancel != 0) and
+            (group.count != 1 or group.members[0].operation != .place)) return error.InvalidOrderSpec;
         switch (try self.groupIdentityStatus(original)) {
             .duplicate => return,
             .conflict => return error.ConflictingIntentIdentity,
@@ -708,22 +734,22 @@ pub const Oms = struct {
         if (refs.len != group.count) return error.InvalidRiskFactRefs;
         for (refs) |ref| if (ref.decision == 0 or ref.reservation == 0 or ref.decision == ref.reservation)
             return error.InvalidRiskFactRefs;
-        return self.applyGroupWithRefs(group, original, refs);
+        return self.applyGroupWithRefs(group, original, refs, admission);
     }
 
-    fn applyGroupWithRefs(self: *Oms, group: IntentGroup, original: IntentGroup, refs: []const RiskFactRefs) !void {
+    fn applyGroupWithRefs(self: *Oms, group: IntentGroup, original: IntentGroup, refs: []const RiskFactRefs, admission: CycleAdmission) !void {
         var undo: MutationUndo = undefined;
         undo.init(self);
         if (group.count == 0 or group.count > max_group_members)
-            return @call(.never_inline, applyGroupWithRefsCopy, .{ self, group, original, refs });
+            return @call(.never_inline, applyGroupWithRefsCopy, .{ self, group, original, refs, admission });
         for (group.members[0..group.count]) |intent| {
             if (!undo.captureOrder(self, intent.target_order_id))
-                return @call(.never_inline, applyGroupWithRefsCopy, .{ self, group, original, refs });
+                return @call(.never_inline, applyGroupWithRefsCopy, .{ self, group, original, refs, admission });
         }
         // Numeric group identities may span more rows than one bounded intent group.
         if (group.policy == .cancel_remaining and !undo.captureGroup(self, group.first_intent_sequence))
-            return @call(.never_inline, applyGroupWithRefsCopy, .{ self, group, original, refs });
-        self.applyGroupInPlace(group, original, refs) catch |err| {
+            return @call(.never_inline, applyGroupWithRefsCopy, .{ self, group, original, refs, admission });
+        self.applyGroupInPlace(group, original, refs, admission) catch |err| {
             const recovery_only = self.recovery_only;
             const capacity_pressure = self.capacity_pressure;
             undo.rollback(self);
@@ -733,10 +759,10 @@ pub const Oms = struct {
         };
     }
 
-    fn applyGroupWithRefsCopy(self: *Oms, group: IntentGroup, original: IntentGroup, refs: []const RiskFactRefs) !void {
+    fn applyGroupWithRefsCopy(self: *Oms, group: IntentGroup, original: IntentGroup, refs: []const RiskFactRefs, admission: CycleAdmission) !void {
         var candidate: Oms = undefined;
         @memcpy(std.mem.asBytes(&candidate), std.mem.asBytes(self));
-        candidate.applyGroupInPlace(group, original, refs) catch |err| {
+        candidate.applyGroupInPlace(group, original, refs, admission) catch |err| {
             // Capacity exhaustion is an authoritative safety transition even
             // though the rejected intent group itself is not committed.
             if (candidate.recovery_only) self.recovery_only = true;
@@ -746,7 +772,7 @@ pub const Oms = struct {
         @memcpy(std.mem.asBytes(self), std.mem.asBytes(&candidate));
     }
 
-    fn applyGroupInPlace(self: *Oms, group: IntentGroup, original: IntentGroup, refs: []const RiskFactRefs) !void {
+    fn applyGroupInPlace(self: *Oms, group: IntentGroup, original: IntentGroup, refs: []const RiskFactRefs, admission: CycleAdmission) !void {
         if (group.count == 0 or group.count > max_group_members) return error.InvalidIntentGroup;
         if (group.count != original.count or group.first_intent_sequence != original.first_intent_sequence or group.policy != original.policy)
             return error.InvalidIntentGroup;
@@ -759,14 +785,14 @@ pub const Oms = struct {
             self.recovery_only = true;
             return error.IdentitySetFull;
         }
-        if (self.blocksNewSend()) {
+        if (self.blocksNewSendExcept(admission.pending_maker_cancel)) {
             for (group.members[0..group.count]) |intent| switch (intent.operation) {
                 .place, .amend => return error.UncertainOrderBlocksSend,
                 .cancel => {},
             };
         }
         for (group.members[0..group.count], 0..) |intent, index| {
-            self.applyIntent(intent, group.first_intent_sequence, group.policy, if (refs.len == 0) .{} else refs[index]) catch |err| {
+            self.applyIntent(intent, group.first_intent_sequence, group.policy, if (refs.len == 0) .{} else refs[index], admission.predecessor) catch |err| {
                 if (group.policy == .cancel_remaining) try self.cancelGroup(group.first_intent_sequence);
                 return err;
             };
@@ -775,12 +801,12 @@ pub const Oms = struct {
         }
     }
 
-    fn applyIntent(self: *Oms, intent: Intent, group: u64, policy: PartialExecutionPolicy, refs: RiskFactRefs) !void {
+    fn applyIntent(self: *Oms, intent: Intent, group: u64, policy: PartialExecutionPolicy, refs: RiskFactRefs, predecessor: u64) !void {
         switch (intent.operation) {
             .place => {
                 if (!exactOrderSpec(intent.order_type, intent.time_in_force, intent.market_protection_price != null)) return error.InvalidOrderSpec;
                 if (intent.quantity <= 0 or intent.limit_price.ticks <= 0 or intent.reservation.atoms <= 0 or intent.limit_price.instrument != intent.instrument) return error.InvalidOrderSpec;
-                const order = try self.createOrder(intent.strategy_instance, intent.instrument, intent.side, intent.portfolio_reduce_only, intent.venue_reduce_only, intent.quantity, intent.limit_price, intent.reservation, intent.client_order_id, 0, intent.intent_sequence, group, policy);
+                const order = try self.createOrder(intent.strategy_instance, intent.instrument, intent.side, intent.portfolio_reduce_only, intent.venue_reduce_only, intent.quantity, intent.limit_price, intent.reservation, intent.client_order_id, predecessor, intent.intent_sequence, group, policy);
                 order.exchange_account = intent.exchange_account;
                 order.portfolio = intent.portfolio;
                 order.order_type = intent.order_type;

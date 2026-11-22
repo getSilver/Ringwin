@@ -2,8 +2,7 @@
 
 Quote scenarios are joint full-cycle outcomes, including failure losses and
 conditional hedge costs, not a profit multiplied by an independent fill rate.
-Cancel suggestions reference original intents; the caller must map them to the
-core's existing cancellation authority. The Host order codec has no cancel API.
+Cancel suggestions reference the original intent in the committed cycle.
 """
 from dataclasses import dataclass, replace
 

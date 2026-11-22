@@ -36,7 +36,6 @@ Status: open
 
 ## Frontier
 
-- [13 Maker 撤换单、增量对冲与恢复](issues/13-maker.md)
 - [15 滚动归档并测出持续扫描容量](issues/15-capacity.md)
 
 ## Decisions so far
@@ -66,6 +65,8 @@ Status: open
 [11](issues/11-dual-ioc.md) 已在远端 Linux 完成批准评估交付、独立 Gateway 进程分派、两腿开平仓和原币与汇差对账的模拟场所验收。
 
 [12](issues/12-ioc-recovery.md) 已验证模拟场所的持久恢复、单笔减仓和费用归档。正式 Host 可从当前 Writer 截面提出原订单查询，本地 WSL1 独立 Gateway 回执写回后保留 Unknown 和原订单身份。
+
+[13](issues/13-maker.md) 已通过两种 Maker 腿的 Windows 离线联合验收，覆盖原单撤换、撤中增量对冲、Unknown 重启查询、迟到成交、退出对账和 Writer 恢复。
 
 [14](issues/14-coverage.md) 已用 20 个盘口、10 条路线完成离线双腿轮转验收。持续归档和容量测量由 [15](issues/15-capacity.md) 接续。
 

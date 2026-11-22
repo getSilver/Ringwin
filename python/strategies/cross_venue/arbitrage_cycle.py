@@ -258,18 +258,19 @@ class Action:
 
     def package_outputs(self, *, fee_version=None):
         """Turn a cycle decision into the formal Host callback outputs."""
-        if self.intents or self.cancels:
-            return (self.package_output(fee_version=fee_version),)
         import strategy_api as api
 
-        return tuple(api.OrderQuery(self.plan.first_sequence, sequence) for sequence in self.queries)
+        outputs = tuple(api.OrderCancel(self.plan.first_sequence, sequence) for sequence in self.cancels)
+        if self.intents:
+            if self.plan.policy.mode == "maker_taker" and any(not intent.reducing for intent in self.intents) and fee_version is None:
+                raise b.Rejected("fees_version_missing")
+            outputs += (self.package_output(fee_version=fee_version),)
+        return outputs + tuple(api.OrderQuery(self.plan.first_sequence, sequence) for sequence in self.queries)
 
     def package_output(self, *, fee_version=None):
         """Translate a strategy action for the fixed StrategyPackage callback."""
         import strategy_api as api
 
-        if self.cancels:
-            raise b.Rejected("cancel_projection_requires_core_mapping")
         if not self.intents:
             raise b.Rejected("no_output")
         members = []
@@ -292,6 +293,12 @@ class Action:
                 "buy" if direction == 1 else "sell", intent.time_in_force, intent.reducing, intent.lots,
                 api.ExactLimitPrice(intent.limit_ticks, leg.rules.version, tick.numerator)))
         members = tuple(members)
+        if self.plan.policy.mode == "maker_taker" and len(members) == 1 and not members[0].portfolio_reduce_only:
+            if fee_version is None:
+                # The portable research encoder uses the underlying order ABI.
+                return members[0]
+            peer = self.plan.legs[1 - self.intents[0].leg]
+            return api.MakerIntent(members[0], self.plan.first_sequence, peer.account, peer.rules.instrument, fee_version)
         if fee_version is not None:
             if len(members) != 2 or any(member.portfolio_reduce_only for member in members):
                 raise b.Rejected("fee_checked_opening_group")

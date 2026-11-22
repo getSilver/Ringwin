@@ -99,7 +99,7 @@ pub const State = struct {
         return true;
     }
 
-    pub fn allowedRequest(self: *const State, group: oms.IntentGroup, config_version: u64, revocations: ?*const Revocations) ?Request {
+    pub fn allowedRequest(self: *const State, group: oms.IntentGroup, config_version: u64, revocations: ?*const Revocations, maker_members: ?[2]@import("cycle_occupancy.zig").Member) ?Request {
         if (group.count == 0 or group.count > 2) return null;
         var i: usize = self.count;
         while (i > 0) {
@@ -108,6 +108,13 @@ pub const State = struct {
             if (request.strategy != group.members[0].strategy_instance or request.portfolio != group.members[0].portfolio or
                 request.config_version != config_version) continue;
             if (!self.isCurrent(i, revocations)) continue;
+            if (maker_members) |members| {
+                if (request.mode == .taker_taker) continue;
+                const first: usize = if (request.legs[0].account == members[0].account) 0 else 1;
+                const second = 1 - first;
+                if (request.legs[first].account != members[0].account or request.legs[first].instrument != members[0].instrument or
+                    request.legs[second].account != members[1].account or request.legs[second].instrument != members[1].instrument) continue;
+            }
             var matched = true;
             for (group.members[0..group.count]) |member| {
                 const leg: usize = if (member.exchange_account == request.legs[0].account and member.instrument == request.legs[0].instrument) 0 else if (member.exchange_account == request.legs[1].account and member.instrument == request.legs[1].instrument) 1 else {

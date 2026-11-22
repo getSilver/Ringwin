@@ -65,6 +65,11 @@ pub const OrderQuery = struct {
     cursor: u64,
 };
 
+pub const MakerRoute = struct {
+    first_sequence: u64,
+    peer: @import("../trading/cycle_occupancy.zig").Member,
+};
+
 pub const EventEnvelope = struct {
     event_type: EventType,
     time_presence: u32 = 0x1f,
@@ -195,6 +200,10 @@ pub const GroupCandidate = struct {
     bytes: [max_group_frame_len]u8 = @splat(0),
     rejection: ?RejectReason = null,
 
+    pub fn isCycleCancel(self: *const GroupCandidate) bool {
+        return self.len <= self.bytes.len and Gateway.isOrderCancel(self.frame());
+    }
+
     pub fn frame(self: *const GroupCandidate) []const u8 {
         return self.bytes[0..self.len];
     }
@@ -204,6 +213,7 @@ pub const IntentGroup = struct {
     session: ipc.Session,
     business_digest: [32]u8,
     count: u8,
+    maker_route: ?MakerRoute = null,
     members: [max_group_members]OrderIntent = undefined,
 };
 
@@ -215,15 +225,18 @@ pub fn decodeIntentGroup(frame: []const u8) !IntentGroup {
         get(u32, frame, 44) != 0 or get(u16, frame, 96) != 1 or
         wireCrc(frame) != get(u32, frame, 124)) return error.Malformed;
     const count = get(u32, frame, 100);
-    switch (get(u16, frame, 98)) {
+    const schema = get(u16, frame, 98);
+    const route_len: usize = if (schema == 5) 40 else 0;
+    switch (schema) {
         1 => if (count != 1 or frame.len != output_header_len + versioned_order_intent_len) return error.Malformed,
         2 => if (count < 2 or count > max_group_members) return error.Malformed,
+        5 => if (count != 1 or frame.len != output_header_len + versioned_order_intent_len + route_len) return error.Malformed,
         else => return error.Malformed,
     }
-    const member_len = (frame.len - output_header_len) / count;
+    const member_len = (frame.len - output_header_len - route_len) / count;
     if (!validMemberLength(member_len) or
-        get(u32, frame, 104) != count * member_len or
-        frame.len != output_header_len + count * member_len or
+        get(u32, frame, 104) != count * member_len + route_len or
+        frame.len != output_header_len + count * member_len + route_len or
         get(u64, frame, 56) == 0 or get(u128, frame, 64) == 0) return error.Malformed;
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     hasher.update("HostIntentGroupBusinessV1\x00");
@@ -261,6 +274,16 @@ pub fn decodeIntentGroup(frame: []const u8) !IntentGroup {
             .limit_price_micros = if (payload.len == order_intent_len) get(i64, payload, 72) else 0,
             .exact_limit_price = try memberExactPrice(payload),
         };
+    }
+    if (schema == 5) {
+        const offset = output_header_len + member_len;
+        const first_sequence = get(u64, frame, offset);
+        const peer: @FieldType(MakerRoute, "peer") = .{ .account = get(u128, frame, offset + 8), .instrument = get(u128, frame, offset + 24) };
+        const member = group.members[0];
+        if (first_sequence == 0 or first_sequence > first or member.portfolio_reduce_only or
+            peer.account == 0 or peer.instrument == 0 or peer.account == member.exchange_account_identity or
+            peer.instrument == member.instrument_identity) return error.Malformed;
+        group.maker_route = .{ .first_sequence = first_sequence, .peer = peer };
     }
     return group;
 }
@@ -479,7 +502,7 @@ pub const Gateway = struct {
             const schema = get(u16, frame, 98);
             const domain_single = schema == 1 and frame.len == output_header_len + versioned_order_intent_len and
                 (if (self.authority_shard) |shard| shard.decision_domain_identity != 0 else false);
-            if (schema == 2 or domain_single) return self.ingestGroup(frame, now_ns);
+            if (schema == 2 or schema == 5 or domain_single) return self.ingestGroup(frame, now_ns);
         }
         const identity = if (frame.len >= output_header_len)
             get(u128, frame, 64)
@@ -524,7 +547,7 @@ pub const Gateway = struct {
         // Reuse the established single-intent envelope validation, including
         // activation, published cursor and freshness, without touching its cache.
         var buffer: [output_header_len + versioned_order_intent_len]u8 = undefined;
-        const member_len = (frame.len - output_header_len) / group.count;
+        const member_len = if (group.maker_route != null) versioned_order_intent_len else (frame.len - output_header_len) / group.count;
         const single = buffer[0 .. output_header_len + member_len];
         @memcpy(single, frame[0..single.len]);
         put(u32, single, 12, @intCast(single.len));
@@ -584,19 +607,14 @@ pub const Gateway = struct {
         return frame.len >= output_header_len and get(u16, frame, 98) == 3;
     }
 
-    pub fn decodeOrderQuery(self: *const Gateway, frame: []const u8, now_ns: i64) !OrderQuery {
-        if (frame.len != output_header_len + 16 or !isOrderQuery(frame) or
-            !std.mem.eql(u8, frame[0..4], &output_magic) or
-            get(u16, frame, 4) != 1 or get(u16, frame, 6) != output_header_len or
-            get(u32, frame, 8) != 0 or get(u32, frame, 12) != frame.len or
-            get(u32, frame, 44) != 0 or get(u32, frame, 100) != 1 or
-            get(u32, frame, 104) != 16 or wireCrc(frame) != get(u32, frame, 124))
-            return error.Malformed;
-        const cursor = try self.outputCursor(frame, now_ns, true);
-        const first = get(u64, frame, 128);
-        const intent = get(u64, frame, 136);
-        if (first == 0 or intent < first) return error.Malformed;
-        return .{ .strategy = self.config.authorization.strategy_identity, .first_sequence = first, .intent_sequence = intent, .cursor = cursor };
+    pub fn isOrderCancel(frame: []const u8) bool {
+        return frame.len >= output_header_len and get(u16, frame, 98) == 4;
+    }
+
+    pub fn authorizeCycleOrderReference(self: *const Gateway, frame: []const u8, now_ns: i64) !CycleOrderReference {
+        const reference = try decodeCycleOrderReference(frame);
+        _ = try self.outputCursor(frame, now_ns, isOrderQuery(frame));
+        return reference;
     }
 
     fn outputCursor(self: *const Gateway, frame: []const u8, now_ns: i64, read_only: bool) !u64 {
@@ -633,6 +651,32 @@ pub const Gateway = struct {
         return cursor;
     }
 };
+
+pub const CycleOrderReference = struct {
+    request: OrderQuery,
+    session: ipc.Session,
+    config_version: u64,
+    activation: u128,
+};
+
+pub fn decodeCycleOrderReference(frame: []const u8) !CycleOrderReference {
+    if (frame.len != output_header_len + 16 or (!Gateway.isOrderQuery(frame) and !Gateway.isOrderCancel(frame)) or
+        !std.mem.eql(u8, frame[0..4], &output_magic) or
+        get(u16, frame, 4) != 1 or get(u16, frame, 6) != output_header_len or
+        get(u32, frame, 8) != 0 or get(u32, frame, 12) != frame.len or
+        get(u32, frame, 44) != 0 or get(u16, frame, 96) != 1 or get(u32, frame, 100) != 1 or
+        get(u32, frame, 104) != 16 or wireCrc(frame) != get(u32, frame, 124))
+        return error.Malformed;
+    const first = get(u64, frame, 128);
+    const intent = get(u64, frame, 136);
+    if (first == 0 or intent < first) return error.Malformed;
+    return .{
+        .request = .{ .strategy = get(u128, frame, 64), .first_sequence = first, .intent_sequence = intent, .cursor = get(u64, frame, 80) },
+        .session = .{ .fencing = get(u64, frame, 32), .shard = get(u32, frame, 40), .generation = get(u64, frame, 48) },
+        .config_version = get(u64, frame, 88),
+        .activation = get(u128, frame, 108),
+    };
+}
 
 pub fn encodeOutputFrame(
     destination: []u8,

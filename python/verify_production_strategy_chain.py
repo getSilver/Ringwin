@@ -282,12 +282,85 @@ class Strategy:
 '''
 
 
-def configure_host(core, root, cursor, *, bad_ack=False, dual_ioc=False, order_queries=False):
+MAKER = '''
+import json
+from dataclasses import replace
+from strategy_api import OrderQuery
+from strategy_host import decode_market_trade
+from strategies.cross_venue.arbitrage_cycle import Action, Intent
+from test_arbitrage_cycle import with_price_units
+from test_strategy_cycle_recovery import core_plan
+
+
+def validate_config(config):
+    assert json.loads(config)["maker"] in (0, 1)
+
+
+def create(context, config):
+    return Strategy(json.loads(config)["maker"])
+
+
+class Strategy:
+    def __init__(self, maker):
+        self.maker = maker
+
+    def validate(self):
+        assert self.next_intent_sequence >= 7
+
+    def restore(self, state):
+        self.next_intent_sequence, self.exiting = json.loads(state)
+
+    def snapshot(self):
+        return json.dumps([self.next_intent_sequence, self.exiting], separators=(",", ":")).encode()
+
+    def on_event(self, event):
+        maker, hedge = self.maker, 1 - self.maker
+        plan = core_plan(maker_mode=True)
+        plan = replace(plan, maker_leg=maker, first_sequence=7,
+                       legs=tuple(replace(leg, rules=replace(leg.rules, version=2)) for leg in plan.legs))
+        intents, cancels = (), ()
+        if event.event_type == 8:
+            if decode_market_trade(event.payload_bytes)["trade_identity"] == 3:
+                intents = ((maker, 10000, 100, False, "post-only"),)
+            else:
+                self.exiting = True
+                intents = ((0, 10000, 100, True, "ioc"), (1, 10000, 100, True, "ioc"))
+        else:
+            projection = json.loads(event.payload_bytes)
+            cycle, = projection["cycles"]
+            orders = cycle["orders"]
+            original = orders[0]
+            uncertain = tuple(OrderQuery(7, order["intent_sequence"]) for order in orders
+                              if order["state"] == "unknown" or
+                              order["state"] == "canceled" and order["reported_lots"] != order["applied_lots"])
+            if projection["recovery"] or uncertain:
+                return uncertain
+            if self.exiting:
+                return ()
+            assert self.next_intent_sequence == 7 + len(orders), "Maker admission failed"
+            quotes = [o for o in orders if o["account"] == original["account"]]
+            hedges = [o for o in orders if o["account"] != original["account"]]
+            applied = sum(o["applied_lots"] for o in quotes)
+            outstanding = sum(o["applied_lots"] + o["possible_lots"] for o in hedges)
+            if original["state"] == "partially_filled":
+                cancels = (7,)
+            if applied > outstanding:
+                intents = ((hedge, applied - outstanding, 100, False, "ioc"),)
+            elif len(quotes) == 1 and original["state"] == "canceled" and all(o["state"] == "filled" for o in hedges):
+                intents = ((maker, 10000 - applied, 95 if maker == 0 else 105, False, "post-only"),)
+        action = Action(plan, event.sequence, "fixture", tuple(Intent(self.next_intent_sequence + i, *intent)
+                        for i, intent in enumerate(intents)), cancels=cancels)
+        self.next_intent_sequence += len(intents)
+        return with_price_units(action, base_scale=4).package_outputs(fee_version=None if self.exiting else "1")
+'''
+
+
+def configure_host(core, root, cursor, *, bad_ack=False, dual_ioc=False, order_queries=False, maker=None):
     runtime = Path(strategy_host.__file__).resolve().parent
     package_root = root / "package"
     code = package_root / "code"
     code.mkdir(parents=True, exist_ok=True)
-    (code / "acceptance_strategy.py").write_text(DUAL_IOC if dual_ioc else FIXTURE)
+    (code / "acceptance_strategy.py").write_text(MAKER if maker is not None else DUAL_IOC if dual_ioc else FIXTURE)
     state_schema = f"{61:032x}"
     request_file = root / "host-request.json"
     checkpoint_path = root / "checkpoint.bin"
@@ -324,6 +397,17 @@ def configure_host(core, root, cursor, *, bad_ack=False, dual_ioc=False, order_q
             schema_registry=strategy_host.SCHEMA_REGISTRY, strategy=9, definition=42, state_schema=61,
             state_schema_version=1, config_version=1, cursor=cursor, next_intent=7), b'{"next":7,"step":0}')
         checkpoint_path.write_bytes(checkpoint)
+    if maker is not None:
+        binding["scopes"].append(dict(exchange_account=f"{30:032x}", instrument=f"{102:032x}"))
+        config = strategy_package.canonical(dict(maker=maker))
+        binding.update(config_json=config.decode("ascii"), config_sha256=hashlib.sha256(config).hexdigest())
+        manifest.update(subscriptions=[dict(event_type=i, schema_version=1) for i in (8, 9)],
+                        output_kinds=["maker_intent", "intent_group", "order_cancel", "order_query"])
+        manifest["limits"]["max_output_frames_per_event"] = 3
+        checkpoint = strategy_host.encode_payload_checkpoint(dict(
+            schema_registry=strategy_host.SCHEMA_REGISTRY, strategy=9, definition=42, state_schema=61,
+            state_schema_version=1, config_version=1, cursor=cursor, next_intent=7), b'[7,false]')
+        checkpoint_path.write_bytes(checkpoint)
     spec = dict(binding=binding, manifest=manifest, package_root=str(package_root), recover=True,
                 checkpoint_cursor=cursor, checkpoint=dict(cursor=cursor, sha256=hashlib.sha256(checkpoint).hexdigest()))
     spec["strategy_manifest"], spec["checkpoint_manifest"] = strategy_package.host_manifests([spec])
@@ -358,6 +442,14 @@ host.run(sys.argv[3], tuple(map(int, sys.argv[5:])))
     config = json.loads(config_path.read_text())
     config["strategy_host"] = dict(python=sys.executable, script=str(script), request=str(request_file),
                                    checkpoint=str(checkpoint_path), checkpoint_sha256=hashlib.sha256(checkpoint).hexdigest())
+    if maker is not None:
+        from opportunity_scanner.fee_schedules import FeeSchedules
+        path = root / "manual-fees.json"
+        config["strategy_host"]["manual_fees"] = str(path)
+        FeeSchedules(path).save(dict(expected_version="0", rows=[
+            dict(account=str(account), venue=str(venue), product="linear", fee_asset=str(asset),
+                 maker_percent="0", taker_percent="0")
+            for account, venue, asset in ((20, 1, 1), (30, 21, 3))]))
     if dual_ioc:
         from opportunity_scanner.fee_schedules import FeeSchedules
         path = root / "manual-fees.json"
@@ -527,6 +619,9 @@ if __name__ == "__main__":
         state = Path(sys.argv[2]).resolve()
         configure_host(state, state, int(sys.argv[3]), dual_ioc=True,
                        order_queries=sys.argv[1].endswith("-query"))
+    elif sys.argv[1:2] == ["--prepare-maker"]:
+        state = Path(sys.argv[2]).resolve()
+        configure_host(state, state, int(sys.argv[3]), maker=int(sys.argv[4]))
     elif sys.argv[1:2] == ["--verify-dual-ioc-fx"]:
         verify_dual_ioc_fx(Path(sys.argv[2]), sys.argv[3:] or ("3", "250000000"))
     else:

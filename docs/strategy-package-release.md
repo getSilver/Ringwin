@@ -387,6 +387,20 @@ settle a durable Unknown supported by the Writer's evidence. The Gateway
 resolves scope from the Writer snapshot. An unresolved response preserves
 the original order and offers no dispatch permission.
 
+A Maker package declares `maker_intent` for a single PostOnly quote or
+IOC hedge, and `order_cancel` for an `OrderCancel` naming the original
+intent in its cycle. The first PostOnly intent occupies both approved
+legs. Each subsequent Maker intent names the same cycle and both legs,
+and the Host checks the current manual fee revision for both scopes.
+The Writer caps an IOC hedge at applied exposure less the maximum
+outstanding hedge quantity. A replacement links to the earlier quote
+after it reaches a terminal state and reported lots match committed
+fills. A cancellation from a live
+cycle projection is committed through the Writer and dispatched to the
+original order's Gateway route. It leaves the next intent sequence
+unchanged. A callback may emit a cancellation alongside an incremental
+hedge, including when a fee check holds the hedge.
+
 The configured `market_feed` role reads its own capture. For OKX public data,
 its `market-recovery.json` contains the same `source`, the original
 `environment`, `config_version`, and `okx_binding`. This replay uses protocol

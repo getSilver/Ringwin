@@ -530,7 +530,8 @@ pub const TradingShard = struct {
         return switch (input) {
             .venue => true,
             .core => |event| switch (event.payload) {
-                .external_intent_group, .timer, .order_archive_committed, .fill_archive_committed, .funding_archive_committed, .reconciliation_archive_committed, .control_archive_committed, .forced_archive_committed => false,
+                .external_intent_group => |candidate| candidate.isCycleCancel(),
+                .timer, .order_archive_committed, .fill_archive_committed, .funding_archive_committed, .reconciliation_archive_committed, .control_archive_committed, .forced_archive_committed => false,
                 .external_order_intent => |intent| intent.portfolio_reduce_only,
                 .oms_intent_group => |group| blk: {
                     if (group.count == 0 or group.count > group.members.len) break :blk false;
@@ -568,7 +569,8 @@ pub const TradingShard = struct {
             .core => |event| switch (event.payload) {
                 .oms_intent_group => |group| if (try self.oms.groupIdentityStatus(group) != .fresh) return null,
                 .external_order_intent => |intent| if (try self.oms.groupIdentityStatus(originalHostIntentGroup(intent)) != .fresh) return null,
-                .external_intent_group => |candidate| if (try self.oms.groupIdentityStatus(try originalHostGroup(candidate)) != .fresh) return null,
+                .external_intent_group => |candidate| if (candidate.isCycleCancel() or
+                    try self.oms.groupIdentityStatus(try originalHostGroup(candidate)) != .fresh) return null,
                 .funding_settlement => |funding| for (self.economic_projection.applied_fundings[0..self.economic_projection.applied_funding_count]) |known| {
                     if (known.funding.identity == funding.settlement_id) return null;
                 },
@@ -1223,7 +1225,8 @@ pub const TradingShard = struct {
         // Process admission cannot emit durable rejection facts: restart
         // replay reconstructs committed facts independently of this fence.
         if (self.recovery_admission_pending and input == .core) switch (input.core.payload) {
-            .timer, .external_order_intent, .external_intent_group => return error.RecoveryAdmissionPending,
+            .timer, .external_order_intent => return error.RecoveryAdmissionPending,
+            .external_intent_group => |candidate| if (!candidate.isCycleCancel()) return error.RecoveryAdmissionPending,
             .oms_intent_group => |group| {
                 if (group.count == 0 or group.count > group.members.len) return error.InvalidIntentGroup;
                 for (group.members[0..group.count]) |intent|
@@ -3281,6 +3284,10 @@ pub const TradingShard = struct {
 
     fn submitHostGroup(self: *TradingShard, input: CoreEvent, candidate: host_gateway.GroupCandidate) !?OrderCommand {
         if (candidate.len > candidate.bytes.len) return error.InvalidIntentGroup;
+        if (candidate.isCycleCancel()) {
+            try self.submitCycleCancel(input, candidate);
+            return null;
+        }
         const parsed = try host_gateway.decodeIntentGroup(candidate.frame());
         const first = parsed.members[0];
         const authority = self.strategyAuthority(first.strategy_identity);
@@ -3339,6 +3346,20 @@ pub const TradingShard = struct {
             }
         }
         return self.handleDomainGroup(input, group);
+    }
+
+    fn submitCycleCancel(self: *TradingShard, input: CoreEvent, candidate: host_gateway.GroupCandidate) !void {
+        const reference = try host_gateway.decodeCycleOrderReference(candidate.frame());
+        const request = reference.request;
+        const authority = self.strategyAuthority(request.strategy);
+        if (candidate.rejection != null or !authority.strategy_active or authority.host_activation_identity == 0 or
+            authority.host_activation_identity != reference.activation or authority.strategy_config_version != reference.config_version or
+            !std.meta.eql(authority.host_activation_session, reference.session) or
+            request.cursor <= authority.host_activation_fact_sequence or request.cursor > self.authoritativeBarrier() or
+            !input.time_presence.monotonic or input.monotonic_time == 0) return error.InvalidDomainScope;
+        const place = try self.cycleOrderCommand(request.strategy, request.first_sequence, request.intent_sequence);
+        if (place.order_type != .post_only) return error.InvalidDomainScope;
+        if (try self.oms.cancelLiveOrder(place.order_id)) try self.trace.append(.order_command, request.intent_sequence);
     }
 
     fn hostExactPriceRejection(self: *const TradingShard, entry: InstrumentEntry, price: host_gateway.ExactLimitPrice) ?RejectReason {
@@ -4800,7 +4821,7 @@ pub const TradingShard = struct {
         const safety = historySafetyInput(.{ .core = input });
         const reserve: usize = if (safety) 0 else 64;
         const opening = original.members[0].operation == .place and !original.members[0].portfolio_reduce_only and !original.members[0].venue_reduce_only;
-        const facts: usize = if (original.count > 2 or (opening and original.count != 2)) 1 else 1 + 2 * @as(usize, original.count) + @intFromBool(opening);
+        const facts: usize = if (original.count > 2) 1 else 1 + 2 * @as(usize, original.count) + @intFromBool(opening);
         if (@as(usize, self.trace.len) + facts > self.trace.events.len - reserve or
             @as(usize, self.oms.intent_history_count) + original.count > oms.max_intent_history - reserve or
             @as(usize, self.oms.command_history_count) + original.count > oms.max_command_history - reserve)
@@ -4857,23 +4878,140 @@ pub const TradingShard = struct {
             return error.AdmissionCapacity;
     }
 
+    pub fn cycleOrderCommand(self: *const TradingShard, strategy: u128, first_sequence: u64, intent_sequence: u64) !oms.Command {
+        const cycle = self.cycles.find(strategy, first_sequence) orelse return error.UnknownCycle;
+        for (self.oms.command_history[0..self.oms.command_history_count]) |place| {
+            if (place.operation == .place and place.strategy_instance == strategy and
+                place.intent_sequence == intent_sequence and place.authority.cycle.identity == first_sequence and
+                place.authority.cycle.barrier == cycle.fact_sequence) return place;
+        }
+        return error.UnknownCycleOrder;
+    }
+
+    fn admitMakerRoute(self: *const TradingShard, original: oms.IntentGroup, route: host_gateway.MakerRoute, config_version: u64, admission: *oms.Oms.CycleAdmission) ![2]@import("cycle_occupancy.zig").Member {
+        const member = original.members[0];
+        const members = [_]@import("cycle_occupancy.zig").Member{ .{ .account = member.exchange_account, .instrument = member.instrument }, route.peer };
+        var approval_group = original;
+        if (route.first_sequence == original.first_intent_sequence) {
+            if (member.order_type != .post_only) return error.InvalidCycleMembers;
+        } else {
+            const origin = self.cycleOrderCommand(member.strategy_instance, route.first_sequence, route.first_sequence) catch return error.InvalidDomainScope;
+            const cycle = self.cycles.owningForPortfolio(members[0], member.portfolio) orelse return error.InvalidDomainScope;
+            if (cycle.first_sequence != route.first_sequence or origin.order_type != .post_only or
+                origin.portfolio_reduce_only or origin.venue_reduce_only) return error.InvalidDomainScope;
+            approval_group.count = 2;
+            approval_group.members[1] = .{
+                .intent_sequence = origin.intent_sequence,
+                .strategy_instance = origin.strategy_instance,
+                .portfolio = origin.portfolio,
+                .exchange_account = origin.authority.exchange_account,
+                .instrument = origin.instrument,
+                .operation = .place,
+                .side = origin.side,
+                .order_type = origin.order_type,
+                .time_in_force = origin.time_in_force,
+            };
+            if (member.order_type == .post_only) {
+                const account = self.accountState(member.exchange_account) orelse return error.InvalidDomainScope;
+                var applied: i128 = 0;
+                for (self.oms.command_history[0..self.oms.command_history_count]) |command| {
+                    if (command.operation != .place or command.order_type != .post_only or command.strategy_instance != cycle.strategy or
+                        command.authority.cycle.identity != cycle.first_sequence or command.authority.cycle.barrier != cycle.fact_sequence) continue;
+                    const order = self.oms.orderById(command.order_id) orelse return error.UnknownOrder;
+                    switch (order.state) {
+                        .filled, .canceled, .rejected => {},
+                        else => return error.OrderNotMutable,
+                    }
+                    if ((try account.economic_projection.appliedCanonicalFillQuantity(order.id)) != order.cumulative_quantity)
+                        return error.OrderNotMutable;
+                    applied += order.cumulative_quantity;
+                    admission.predecessor = @max(admission.predecessor, order.id);
+                }
+                if (admission.predecessor == 0 or applied + member.quantity > origin.quantity)
+                    return error.InvalidCycleMembers;
+            } else {
+                admission.pending_maker_cancel = try self.qualifyMakerHedge(cycle, origin, member);
+            }
+            const peer_cycle = self.cycles.owningForPortfolio(route.peer, member.portfolio) orelse return error.InvalidDomainScope;
+            if (peer_cycle.first_sequence != route.first_sequence or peer_cycle.strategy != member.strategy_instance) return error.InvalidDomainScope;
+        }
+        var approval = self.pair_authorizations.allowedRequest(approval_group, config_version, self.pairRevocations(), members) orelse return error.PairNotAuthorized;
+        // An active cycle survives Host renewal. Admission still rechecks the
+        // current approval, configuration, and both deployed legs.
+        if (route.first_sequence != original.first_intent_sequence)
+            approval.activation = self.strategyAuthority(member.strategy_instance).strategy_activation_identity;
+        try self.validatePairAuthorization(approval);
+        return members;
+    }
+
+    fn qualifyMakerHedge(self: *const TradingShard, cycle: @import("cycle_occupancy.zig").Record, origin: oms.Command, hedge: oms.Intent) !u64 {
+        const maker_account = self.accountState(origin.authority.exchange_account) orelse return error.InvalidDomainScope;
+        const hedge_account = self.accountState(hedge.exchange_account) orelse return error.InvalidDomainScope;
+        const maker_portfolio = maker_account.economic_projection.portfolioLayer(hedge.portfolio) orelse return error.InvalidDomainScope;
+        const hedge_portfolio = hedge_account.economic_projection.portfolioLayer(hedge.portfolio) orelse return error.InvalidDomainScope;
+        const maker_rules = self.pairInstrument(origin.authority.exchange_account, origin.instrument) orelse return error.InvalidDomainScope;
+        const hedge_rules = self.pairInstrument(hedge.exchange_account, hedge.instrument) orelse return error.InvalidDomainScope;
+        const maker_unit = try self.baseAtomsPerLot(maker_rules);
+        const hedge_unit = try self.baseAtomsPerLot(hedge_rules);
+        if (maker_unit.asset != hedge_unit.asset) return error.InvalidDomainScope;
+        var pending_cancel: u64 = 0;
+        var applied_maker: i128 = 0;
+        var applied_hedge: i128 = 0;
+        var possible_hedge: i128 = 0;
+        for (self.oms.command_history[0..self.oms.command_history_count]) |command| {
+            if (command.operation != .place or command.strategy_instance != cycle.strategy or
+                command.authority.cycle.identity != cycle.first_sequence or command.authority.cycle.barrier != cycle.fact_sequence) continue;
+            const order = self.oms.orderById(command.order_id) orelse return error.UnknownOrder;
+            if (order.exchange_account == origin.authority.exchange_account and order.order_type == .post_only) {
+                applied_maker += try maker_account.economic_projection.appliedCanonicalFillQuantity(order.id);
+                if (order.state == .pending_cancel) pending_cancel = order.id;
+            }
+            if (order.exchange_account != hedge.exchange_account or order.portfolio_reduce_only or order.venue_reduce_only) continue;
+            const applied = try hedge_account.economic_projection.appliedCanonicalFillQuantity(order.id);
+            applied_hedge += applied;
+            const max_lots = switch (order.state) {
+                .filled, .canceled, .rejected => order.cumulative_quantity,
+                else => @max(order.quantity, order.confirmed_quantity),
+            };
+            possible_hedge += @max(0, max_lots - applied);
+        }
+        const maker_lots = maker_portfolio.positionForInstrument(origin.instrument).quantity;
+        const hedge_lots = hedge_portfolio.positionForInstrument(hedge.instrument).quantity;
+        const committed_maker_lots = if (origin.side == .buy) @as(i128, maker_lots) else -@as(i128, maker_lots);
+        const committed_hedge_lots = if (hedge.side == .buy) @as(i128, hedge_lots) else -@as(i128, hedge_lots);
+        const maker_base = try std.math.mul(i128, @min(committed_maker_lots, applied_maker), maker_unit.atoms);
+        const hedge_base = try std.math.mul(i128, try std.math.add(i128, @max(committed_hedge_lots, applied_hedge), possible_hedge + hedge.quantity), hedge_unit.atoms);
+        if (maker_base < hedge_base) return error.InvalidCycleMembers;
+        return pending_cancel;
+    }
+
     fn admitDomainGroup(self: *TradingShard, input: CoreEvent, original: oms.IntentGroup) !void {
         const occupancy = @import("cycle_occupancy.zig");
         if (original.count == 0 or original.count > occupancy.max_members) return error.InvalidCycleMembers;
         const authority = self.strategyAuthority(original.members[0].strategy_instance);
         const opening = original.members[0].operation == .place and !original.members[0].portfolio_reduce_only and !original.members[0].venue_reduce_only;
-        if (opening and original.count != occupancy.max_members) return error.InvalidCycleMembers;
-        if (opening and self.requiresPairApproval(authority.strategy_identity)) {
-            const approval = self.pair_authorizations.allowedRequest(original, authority.strategy_config_version, self.pairRevocations()) orelse return error.PairNotAuthorized;
+        const maker_route = if (input.payload == .external_intent_group)
+            (try host_gateway.decodeIntentGroup(input.payload.external_intent_group.frame())).maker_route
+        else
+            null;
+        if (opening and original.count != occupancy.max_members and maker_route == null) return error.InvalidCycleMembers;
+        const new_cycle = opening and (maker_route == null or maker_route.?.first_sequence == original.first_intent_sequence);
+        if (opening and maker_route == null and self.requiresPairApproval(authority.strategy_identity)) {
+            const approval = self.pair_authorizations.allowedRequest(original, authority.strategy_config_version, self.pairRevocations(), null) orelse return error.PairNotAuthorized;
             try self.validatePairAuthorization(approval);
         }
         if (!input.time_presence.monotonic or input.monotonic_time == 0 or (opening and !authority.strategy_active)) return error.TradingNotAuthorized;
-        if (opening and self.oms.blocksNewSend()) return error.OmsRecoveryOnly;
         if (opening) try self.cycles.residual_lifecycle.checkNewRiskCapacity();
         if (opening and self.cycles.hasResidual()) {
             if (!input.time_presence.source or input.source_time == 0) return error.ResidualClockUnavailable;
         }
-        var members: [occupancy.max_members]occupancy.Member = @splat(.{});
+        var admission: oms.Oms.CycleAdmission = .{};
+        var members: [occupancy.max_members]occupancy.Member = if (maker_route) |route|
+            try self.admitMakerRoute(original, route, authority.strategy_config_version, &admission)
+        else
+            @splat(.{});
+        if (opening and self.oms.blocksNewSendExcept(admission.pending_maker_cancel)) return error.OmsRecoveryOnly;
+        const cycle_member_count: u8 = if (maker_route != null) occupancy.max_members else original.count;
         var qualified = original;
         for (original.members[0..original.count], 0..) |intent, index| {
             const member_opening = intent.operation == .place and !intent.portfolio_reduce_only and !intent.venue_reduce_only;
@@ -4890,7 +5028,7 @@ pub const TradingShard = struct {
             }
             qualified.members[index].client_order_id = .{};
         }
-        if (opening) try self.cycles.checkAvailableForPortfolio(members[0..original.count], authority.portfolio_identity);
+        if (new_cycle) try self.cycles.checkAvailableForPortfolio(members[0..cycle_member_count], authority.portfolio_identity);
         for (original.members[0..original.count], 0..) |member, member_index| {
             var seen = false;
             for (original.members[0..member_index]) |prior| if (prior.exchange_account == member.exchange_account) {
@@ -4929,9 +5067,9 @@ pub const TradingShard = struct {
         for (original.members[0..original.count]) |intent| content.update(&oms.intentFingerprint(intent, original.count));
         var content_digest: [32]u8 = undefined;
         content.final(&content_digest);
-        if (opening) {
+        if (new_cycle) {
             try self.trace.append(.cycle_occupied, original.first_intent_sequence);
-            try self.cycles.establish(.{ .strategy = authority.strategy_identity, .first_sequence = original.first_intent_sequence, .portfolio = authority.portfolio_identity, .configuration_digest = self.deployment.header.?.expected_digest, .content_digest = content_digest, .fact_sequence = self.authoritativeBarrier(), .members = members, .count = original.count });
+            try self.cycles.establish(.{ .strategy = authority.strategy_identity, .first_sequence = original.first_intent_sequence, .portfolio = authority.portfolio_identity, .configuration_digest = self.deployment.header.?.expected_digest, .content_digest = content_digest, .fact_sequence = self.authoritativeBarrier(), .members = members, .count = cycle_member_count });
         }
         var refs: [oms.max_group_members]oms.RiskFactRefs = @splat(.{});
         for (qualified.members[0..qualified.count], 0..) |intent, index| {
@@ -4946,7 +5084,7 @@ pub const TradingShard = struct {
             const cycle = self.cycles.owningForPortfolio(members[index], authority.portfolio_identity).?;
             refs[index].authority.cycle = .{ .identity = cycle.first_sequence, .version = 1, .barrier = cycle.fact_sequence };
         }
-        try self.oms.applyQualifiedGroup(qualified, original, refs[0..qualified.count]);
+        try self.oms.applyQualifiedCycleGroup(qualified, original, refs[0..qualified.count], admission);
         try self.trace.append(.oms_intent_group, original.first_intent_sequence);
         self.last_reject_reason = .none;
     }

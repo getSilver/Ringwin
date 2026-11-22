@@ -140,8 +140,8 @@ def output_header(batch, session, strategy_identity, config_version, activation_
     return frame
 
 
-def output_query_frame(batch, session, strategy, config, activation, first_sequence, intent_sequence):
-    frame = output_header(batch, session, strategy, config, activation, 3, 16)
+def output_query_frame(batch, session, strategy, config, activation, first_sequence, intent_sequence, *, cancel=False):
+    frame = output_header(batch, session, strategy, config, activation, 4 if cancel else 3, 16)
     struct.pack_into("<QQ", frame, 128, first_sequence, intent_sequence)
     struct.pack_into("<I", frame, 124, crc32c(frame[:124] + frame[128:]))
     return bytes(frame)

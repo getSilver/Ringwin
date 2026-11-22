@@ -35,7 +35,7 @@ pub fn orderView(shard: *const trading.TradingShard, order: trading.oms.Order) !
         .reported_lots = order.cumulative_quantity,
         .applied_lots = applied,
         .possible_lots = possible,
-        .queryable = if (terminal) possible != 0 else order.state != .pending_submit,
+        .queryable = if (terminal) applied != order.cumulative_quantity else order.state != .pending_submit,
     };
 }
 

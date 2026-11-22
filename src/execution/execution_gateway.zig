@@ -1163,13 +1163,7 @@ pub const Gateway = struct {
     }
 
     pub fn cycleOrderCommand(shard: *const trading.TradingShard, strategy: u128, first_sequence: u64, intent_sequence: u64) !oms.Command {
-        const cycle = shard.cycles.find(strategy, first_sequence) orelse return error.UnknownCycle;
-        for (shard.oms.command_history[0..shard.oms.command_history_count]) |place| {
-            if (place.operation == .place and place.strategy_instance == strategy and
-                place.intent_sequence == intent_sequence and place.authority.cycle.identity == first_sequence and
-                place.authority.cycle.barrier == cycle.fact_sequence) return place;
-        }
-        return error.UnknownCycleOrder;
+        return shard.cycleOrderCommand(strategy, first_sequence, intent_sequence);
     }
 
     /// Resolve a strategy query against the committed cycle and its original

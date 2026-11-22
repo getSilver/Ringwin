@@ -54,6 +54,8 @@ pub const Host = struct {
     activation_ack: ?u64 = null,
     opening_fees_configured: bool = false,
     order_queries_declared: bool = false,
+    order_cancels_declared: bool = false,
+    maker_intents_declared: bool = false,
     queries: [trading.oms.max_orders]PendingQuery = undefined,
     query_count: usize = 0,
 
@@ -72,7 +74,8 @@ pub const Host = struct {
         defer parsed.deinit();
         const request = parsed.value;
         if (request.manifest.limits.max_output_frames_per_event > output_limit or
-            (config.manual_fees != null and request.manifest.limits.max_output_frames_per_event != 1))
+            (config.manual_fees != null and request.manifest.limits.max_output_frames_per_event != 1 and
+                !declares(request.manifest.output_kinds, "maker_intent")))
             return error.InvalidFormalHostOutputCapacity;
         const checkpoint = try readBounded(init, config.checkpoint, checkpoint_limit);
         defer init.gpa.free(checkpoint);
@@ -146,15 +149,14 @@ pub const Host = struct {
         if (fee_scopes) |bytes| args[4..7].* = .{ "--opening-fees", config.manual_fees.?, bytes };
         const host = try init.gpa.create(Host);
         errdefer init.gpa.destroy(host);
-        const order_queries_declared = for (request.manifest.output_kinds) |kind| {
-            if (std.mem.eql(u8, kind, "order_query")) break true;
-        } else false;
         host.* = .{
             .process = try lifecycle.ManagedHost.start(init, config.python, config.script, plan, "candidate", args[0..if (fee_scopes == null) @as(usize, 4) else 7]),
             .gateway = gateway,
             .cursor = metadata.strategy_cursor,
             .opening_fees_configured = fee_scopes != null,
-            .order_queries_declared = order_queries_declared,
+            .order_queries_declared = declares(request.manifest.output_kinds, "order_query"),
+            .order_cancels_declared = declares(request.manifest.output_kinds, "order_cancel"),
+            .maker_intents_declared = declares(request.manifest.output_kinds, "maker_intent"),
         };
         errdefer host.process.deinit(init.io);
         try host.process.sendPlan(init.io);
@@ -247,7 +249,9 @@ pub const Host = struct {
 
     fn queueQuery(self: *Host, shard: *const trading.TradingShard, request: bridge.OrderQuery) !void {
         if (request.cursor != shard.authoritativeBarrier()) return error.StaleCycleProjection;
-        const command = try execution.Gateway.cycleOrderCommand(shard, request.strategy, request.first_sequence, request.intent_sequence);
+        const command = shard.cycleOrderCommand(request.strategy, request.first_sequence, request.intent_sequence) catch |err| switch (err) {
+            error.UnknownCycleOrder, error.UnknownCycle => return,
+        };
         const order = try cycles.orderView(shard, shard.oms.orderById(command.order_id) orelse return error.UnknownOrder);
         if (!order.queryable) return;
         var index: usize = 0;
@@ -265,6 +269,19 @@ pub const Host = struct {
         if (self.query_count == self.queries.len) return error.HostQueryCapacity;
         self.queries[self.query_count] = .{ .request = request, .order = order };
         self.query_count += 1;
+    }
+
+    fn cancelPayload(shard: *const trading.TradingShard, request: bridge.OrderQuery, frame: []const u8) !?trading.CorePayload {
+        if (request.cursor != shard.authoritativeBarrier()) return error.StaleCycleProjection;
+        const place = shard.cycleOrderCommand(request.strategy, request.first_sequence, request.intent_sequence) catch |err| switch (err) {
+            error.UnknownCycleOrder, error.UnknownCycle => return null,
+        };
+        if (place.order_type != .post_only) return error.InvalidCycleCancelTarget;
+        const order = shard.oms.orderById(place.order_id) orelse return error.UnknownOrder;
+        if (order.state != .live and order.state != .partially_filled) return null;
+        var candidate: bridge.GroupCandidate = .{ .len = @intCast(frame.len) };
+        @memcpy(candidate.bytes[0..frame.len], frame);
+        return .{ .external_intent_group = candidate };
     }
 
     pub fn takeOrderQuery(self: *Host, owner: *const Owner) !?bridge.OrderQuery {
@@ -292,7 +309,7 @@ pub const Host = struct {
                 error.HostOutputPending => {
                     // Writing the decision may perform store reads of its own.
                     // Leave the replay consumer before mutating Writer state.
-                    for (delivery.decisions[0..delivery.output_count]) |decision| {
+                    for (delivery.outputs[0..delivery.output_count]) |payload| {
                         const shard = try owner.source();
                         const seq = try std.math.add(u64, shard.authoritativeBarrier(), 1);
                         const utc: u64 = @intCast(std.Io.Clock.real.now(owner.io).nanoseconds);
@@ -303,7 +320,7 @@ pub const Host = struct {
                             .monotonic_time = @intCast(now(owner.io)),
                             .wall_time = utc,
                             .time_presence = .{ .source = true, .receive = true, .monotonic = true, .wall = true },
-                            .payload = try self.writerPayload(shard, decision),
+                            .payload = payload,
                         } });
                     }
                     delivery.output_count = 0;
@@ -327,10 +344,12 @@ pub const Host = struct {
                 .intent_sequence = intent.intent_sequence,
             } };
         }
-        if (!self.opening_fees_configured and decision == .accepted_group) {
+        if (decision == .accepted_group) {
             const identity = self.gateway.config.authorization.strategy_identity;
-            if (shard.pairTradingScopeBound(identity) or shard.pair_authorizations.hasHistory(identity)) {
-                const group = try bridge.decodeIntentGroup(decision.accepted_group.frame());
+            const group = try bridge.decodeIntentGroup(decision.accepted_group.frame());
+            if (group.maker_route != null and (!self.maker_intents_declared or !self.opening_fees_configured))
+                return error.UndeclaredMakerIntent;
+            if (!self.opening_fees_configured and (shard.pairTradingScopeBound(identity) or shard.pair_authorizations.hasHistory(identity))) {
                 if (!group.members[0].portfolio_reduce_only) return .{ .strategy_intent_rejected = .{
                     .reason = .unauthorized,
                     .strategy_identity = identity,
@@ -341,6 +360,11 @@ pub const Host = struct {
         return decision.corePayload();
     }
 };
+
+fn declares(kinds: []const []const u8, name: []const u8) bool {
+    for (kinds) |kind| if (std.mem.eql(u8, kind, name)) return true;
+    return false;
+}
 
 fn encodeFeeScopes(gpa: std.mem.Allocator, shard: *const trading.TradingShard, binding: @FieldType(Request, "binding")) ![]const u8 {
     const Scope = struct { venue: u64, account: u128, instrument: u128, product: []const u8 };
@@ -367,7 +391,7 @@ const Delivery = struct {
     seen: u64,
     through: u64,
     suppress: bool,
-    decisions: [output_limit]bridge.Decision = undefined,
+    outputs: [output_limit]trading.CorePayload = undefined,
     output_count: usize = 0,
 
     fn segment(context: *anyopaque, bytes: []const u8) !void {
@@ -473,11 +497,17 @@ const Delivery = struct {
             const frame = try self.host.process.receiveOutput(self.io, now(self.io), &storage);
             if (bridge.Gateway.isOrderQuery(frame)) {
                 if (!cycle_event or !self.host.order_queries_declared) return error.InvalidOrderQuerySource;
-                const request = try self.host.gateway.decodeOrderQuery(frame, now(self.io));
+                const request = (try self.host.gateway.authorizeCycleOrderReference(frame, now(self.io))).request;
                 try self.host.queueQuery(try self.owner.source(), request);
+            } else if (bridge.Gateway.isOrderCancel(frame)) {
+                if (self.suppress or !cycle_event or !self.host.order_cancels_declared) return error.InvalidOrderCancelSource;
+                const request = (try self.host.gateway.authorizeCycleOrderReference(frame, now(self.io))).request;
+                self.outputs[self.output_count] = (try Host.cancelPayload(try self.owner.source(), request, frame)) orelse continue;
+                self.output_count += 1;
             } else {
                 if (self.suppress) return error.PrematureTradingOutput;
-                self.decisions[self.output_count] = self.host.gateway.ingest(frame, now(self.io));
+                const decision = self.host.gateway.ingest(frame, now(self.io));
+                self.outputs[self.output_count] = try self.host.writerPayload(try self.owner.source(), decision);
                 self.output_count += 1;
             }
         }

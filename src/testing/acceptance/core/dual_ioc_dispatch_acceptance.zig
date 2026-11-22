@@ -14,6 +14,7 @@ pub const Adapter = struct {
     account: u128,
     sends: usize = 0,
     result: venue.SendResult = .accepted,
+    allows_maker: bool = false,
     fail: bool = false,
     command: ?canonical.OrderCommand = null,
     query: ?canonical.OrderReconciliationRequest = null,
@@ -40,7 +41,8 @@ pub const Adapter = struct {
         }
         const command = request.order_command;
         std.debug.assert(command.exchange_account == self.account);
-        std.debug.assert(command.time_in_force == .immediate_or_cancel);
+        std.debug.assert(command.time_in_force == .immediate_or_cancel or
+            (self.allows_maker and command.time_in_force == .post_only));
         self.sends += 1;
         self.command = command;
         if (self.fail) return error.InvalidRequest;

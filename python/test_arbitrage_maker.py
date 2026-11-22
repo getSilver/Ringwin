@@ -56,6 +56,56 @@ def quote(p=None, *, ticks=1000, at=0, bid=1000, economic_ref=None, applied=((),
 
 
 class MakerTests(unittest.TestCase):
+    def test_callback_publishes_cancel_with_incremental_hedge_and_original_query(self):
+        from strategy_api import MakerIntent, OrderCancel, OrderQuery
+
+        for maker, ticks in ((0, 1000), (1, 1100)):
+            with self.subTest(maker=maker):
+                p = maker_plan(maker_leg=maker)
+                cycle = m.Cycle(p)
+                cycle.start(cursor=1, at_ns=T, market=market(0, 1100), quotes=(quote(p, ticks=ticks),))
+                position = (2, 0) if maker == 0 else (0, 2)
+                frame = facts(orders=(done(1, maker, 2, status="sent", possible_lots=8),),
+                              positions=tuple(map(F, position)), safe_reduce_lots=position, model_warning=True)
+                action = with_price_units(cycle.apply(frame))
+                cancel, hedge = action.package_outputs(fee_version="7")
+                self.assertEqual(cancel, OrderCancel(1, 1))
+                self.assertIsInstance(hedge, MakerIntent)
+                self.assertEqual((hedge.cycle_first_sequence, hedge.member.quantity), (1, 2))
+                self.assertEqual(hedge.member.exchange_account_identity, p.legs[1-maker].account)
+                pending = replace(action, intents=(), queries=(1,))
+                self.assertEqual(pending.package_outputs(), (OrderCancel(1, 1), OrderQuery(1, 1)))
+
+    def test_recovered_unknown_cancel_hedges_only_the_late_fill_on_either_leg(self):
+        for maker, ticks in ((0, 1000), (1, 1100)):
+            with self.subTest(maker=maker):
+                p = maker_plan(maker_leg=maker)
+                cycle = m.Cycle(p)
+                cycle.start(cursor=1, at_ns=T, market=market(0, 1100), quotes=(quote(p, ticks=ticks),))
+                hedge = 1 - maker
+                original = done(1, maker, 2, status="sent", possible_lots=8)
+                position = (2, 0) if maker == 0 else (0, 2)
+                partial = facts(orders=(original,), positions=tuple(map(F, position)),
+                                safe_reduce_lots=position, model_warning=True)
+                cycle.apply(partial)
+                inflight = done(2, hedge, 0, status="sent", possible_lots=2)
+                unknown = replace(original, status="unknown", economic_complete=False)
+                bounds = ((F(2), F(10)), (F(0), F(2)))
+                action = cycle.apply(replace(partial, cursor=3, orders=(unknown, inflight),
+                                             possible_base=bounds if maker == 0 else bounds[::-1]))
+                self.assertEqual((action.cancels, action.queries, action.intents), ((1,), (1,), ()))
+                saved = recovery.checkpoint(meta(3, 3), {"maker": cycle})
+                clone = recovery.restore(saved, {"maker": m.Cycle(p)})[1]["maker"]
+                terminal = replace(original, status="terminal", possible_lots=0, economic_complete=False)
+                action = clone.apply(replace(partial, cursor=4, orders=(terminal, inflight)))
+                self.assertEqual((action.queries, action.intents), ((1,), ()))
+                position = (3, 0) if maker == 0 else (0, 3)
+                late = replace(partial, cursor=5, orders=(done(1, maker, 3), inflight),
+                               positions=tuple(map(F, position)), safe_reduce_lots=position)
+                action = clone.apply(late)
+                self.assertEqual([(i.sequence, i.leg, i.lots) for i in action.intents], [(3, hedge, 1)])
+                self.assertFalse(clone.apply(replace(late, cursor=6)).intents)
+
     def running(self, p=None):
         p = maker_plan() if p is None else p
         cycle = m.Cycle(p)

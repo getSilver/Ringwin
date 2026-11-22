@@ -216,6 +216,8 @@ pub fn main(init: std.process.Init) !void {
     const selection = args.next();
     if (args.next() != null) return error.UnknownArgument;
     if (selection) |value| {
+        if (std.mem.eql(u8, value, "--formal-maker-only"))
+            return @import("production_dual_ioc_integration.zig").runMaker(init, python);
         if (std.mem.eql(u8, value, "--formal-dual-ioc-only"))
             return @import("production_dual_ioc_integration.zig").run(init, python, null);
         if (std.mem.eql(u8, value, "--routed-dual-ioc-only"))

@@ -11,32 +11,37 @@ const canonical = trading.canonical;
 const fixture = @import("../support/trading_shard_fixture.zig");
 const accounts = @import("../acceptance/core/multi_account_authority_acceptance.zig");
 const dual = @import("../acceptance/core/dual_ioc_dispatch_acceptance.zig");
+const pair = @import("../../trading/pair_trading_authorization.zig");
 
 pub fn run(init: std.process.Init, python: []const u8, executable_gateway: ?[]const u8) !void {
-    return runScenario(init, python, executable_gateway, false);
+    return runScenario(init, python, executable_gateway, false, null);
 }
 
 pub fn runQuery(init: std.process.Init, python: []const u8, executable_gateway: ?[]const u8) !void {
-    return runScenario(init, python, executable_gateway, true);
+    return runScenario(init, python, executable_gateway, true, null);
 }
 
-fn runScenario(init: std.process.Init, python: []const u8, executable_gateway: ?[]const u8, query: bool) !void {
+pub fn runMaker(init: std.process.Init, python: []const u8) !void {
+    for (0..2) |maker| try runScenario(init, python, null, false, maker);
+}
+
+fn runScenario(init: std.process.Init, python: []const u8, executable_gateway: ?[]const u8, query: bool, maker: ?usize) !void {
     const Runner = struct {
         failure: ?anyerror = null,
 
-        fn runFixture(self: *@This(), process: std.process.Init, executable: []const u8, gateway: ?[]const u8, queries: bool) void {
-            exercise(process, executable, gateway, queries) catch |err| {
+        fn runFixture(self: *@This(), process: std.process.Init, executable: []const u8, gateway: ?[]const u8, queries: bool, maker_leg: ?usize) void {
+            exercise(process, executable, gateway, queries, maker_leg) catch |err| {
                 self.failure = err;
             };
         }
     };
     var runner: Runner = .{};
-    const thread = try std.Thread.spawn(.{ .stack_size = 256 * 1024 * 1024 }, Runner.runFixture, .{ &runner, init, python, executable_gateway, query });
+    const thread = try std.Thread.spawn(.{ .stack_size = 256 * 1024 * 1024 }, Runner.runFixture, .{ &runner, init, python, executable_gateway, query, maker });
     thread.join();
     if (runner.failure) |err| return err;
 }
 
-fn exercise(init: std.process.Init, python: []const u8, executable_gateway: ?[]const u8, query: bool) !void {
+fn exercise(init: std.process.Init, python: []const u8, executable_gateway: ?[]const u8, query: bool, maker: ?usize) !void {
     const gpa = init.gpa;
     const io = init.io;
     const cwd = try std.Io.Dir.cwd().realPathFileAlloc(io, ".", gpa);
@@ -58,7 +63,7 @@ fn exercise(init: std.process.Init, python: []const u8, executable_gateway: ?[]c
             .instrument = instrument,
             .sequence = 2,
             .best_bid = .{ .instrument = instrument, .rules_version = 2, .ticks = 99 },
-            .best_ask = .{ .instrument = instrument, .rules_version = 2, .ticks = 100 },
+            .best_ask = .{ .instrument = instrument, .rules_version = 2, .ticks = if (maker == null) 100 else 101 },
             .best_bid_quantity = .{ .instrument = instrument, .rules_version = 2, .lots = 100000 },
             .best_ask_quantity = .{ .instrument = instrument, .rules_version = 2, .lots = 100000 },
         } });
@@ -69,11 +74,12 @@ fn exercise(init: std.process.Init, python: []const u8, executable_gateway: ?[]c
             .account_scope = if (instrument == 101) 20 else 30,
             .payload = .{ .mark_price = .{ .instrument = instrument, .price_atoms = 100 } },
         }));
-        if (executable_gateway != null) {
+        if (executable_gateway != null or maker != null) {
             const account: u128 = if (instrument == 101) 20 else 30;
             var capability = owner.shard.pairInstrument(account, instrument).?.capability.?;
             capability.version += 1;
             capability.max_dispatch_age_ns = 15 * std.time.ns_per_s;
+            if (maker != null) capability.supports_post_only = true;
             _ = try owner.apply(fixture.atGroup(45, .{
                 .identity = @intCast(16000 + instrument),
                 .account_scope = account,
@@ -82,7 +88,13 @@ fn exercise(init: std.process.Init, python: []const u8, executable_gateway: ?[]c
         }
     }
     try std.testing.expect(owner.shard.pairTradingListEmpty(9));
-    try approveFromWeb(init, owner, python, path);
+    if (maker) |index| {
+        const request: pair.Request = .{ .identity = 98765, .strategy = 9, .portfolio = 10, .activation = 1, .config_version = 1, .expected_version = 0, .legs = .{
+            .{ .venue = 1, .environment = .simulation, .account = 20, .instrument = 101, .rules_version = 2 },
+            .{ .venue = 21, .environment = .simulation, .account = 30, .instrument = 102, .rules_version = 2 },
+        }, .direction = 1, .mode = if (index == 0) .maker_first else .maker_second, .enabled = true };
+        _ = try owner.apply(fixture.atGroup(45, .{ .identity = 98765, .payload = .{ .pair_trading_authorization = request } }));
+    } else try approveFromWeb(init, owner, python, path);
     const approved = owner.shard.effectivePairAuthorization(9, 0) orelse return error.PairNotApproved;
     try std.testing.expectEqual(@as(u128, 98765), approved.request.identity);
     try std.testing.expectEqual(@as(u128, 20), approved.request.legs[0].account);
@@ -91,7 +103,9 @@ fn exercise(init: std.process.Init, python: []const u8, executable_gateway: ?[]c
     var cursor_buffer: [20]u8 = undefined;
     const cursor = try std.fmt.bufPrint(&cursor_buffer, "{d}", .{owner.shard.authoritativeBarrier()});
     try store.dir.writeFile(io, .{ .sub_path = "engine.json", .data = "{}" });
-    try runPython(init, &.{ python, "python/verify_production_strategy_chain.py", if (query) "--prepare-dual-ioc-query" else "--prepare-dual-ioc", path, cursor });
+    if (maker) |index| {
+        try runPython(init, &.{ python, "python/verify_production_strategy_chain.py", "--prepare-maker", path, cursor, if (index == 0) "0" else "1" });
+    } else try runPython(init, &.{ python, "python/verify_production_strategy_chain.py", if (query) "--prepare-dual-ioc-query" else "--prepare-dual-ioc", path, cursor });
     const config_bytes = try store.dir.readFileAlloc(io, "engine.json", gpa, .limited(16384));
     defer gpa.free(config_bytes);
     const config = try std.json.parseFromSlice(struct { strategy_host: formal.Config }, gpa, config_bytes, .{});
@@ -99,6 +113,7 @@ fn exercise(init: std.process.Init, python: []const u8, executable_gateway: ?[]c
     const host = try formal.Host.start(init, owner, 1, config.value.strategy_host);
     defer host.close(init);
     try std.testing.expectEqual(@as(?u128, 9), try host.readyStrategy(owner));
+    if (maker) |index| return exerciseMaker(init, path, owner, host, config.value.strategy_host, approved.request.legs, index);
     if (builtin.os.tag != .linux and executable_gateway != null) return error.UnsupportedGatewayPlatform;
     var remote: ?RemoteGateway = if (builtin.os.tag == .linux)
         if (executable_gateway) |executable| try RemoteGateway.start(init, executable, path, owner.shard.deployment.header.?.expected_digest) else null
@@ -183,6 +198,201 @@ fn exercise(init: std.process.Init, python: []const u8, executable_gateway: ?[]c
     std.debug.print("formal_dual_ioc: approval={d} first_intent={d} orders=4 fee=-10 rebate=4 asset=3 closed=true\n", .{ approved.request.identity, first_sequence });
 }
 
+fn exerciseMaker(init: std.process.Init, path: []const u8, owner: *Owner, host: *formal.Host, host_config: formal.Config, legs: [2]pair.Leg, maker: usize) !void {
+    const gateway = try init.gpa.create(execution.Gateway);
+    defer init.gpa.destroy(gateway);
+    gateway.init();
+    try gateway.bootstrapDurableDispatch(owner.store, init.io, .{ .domain = .control, .id = 92 });
+    try gateway.pinDeploymentDigest(owner.shard.deployment.header.?.expected_digest);
+    var adapters = [_]dual.Adapter{ .{ .account = 20, .allows_maker = true }, .{ .account = 30, .allows_maker = true } };
+    for (&adapters, legs) |*adapter, leg| try gateway.add(.{
+        .account = leg.account,
+        .adapter = adapter.interface(),
+        .venue_identity = leg.venue,
+        .environment = .simulation,
+        .capability = .{ .version = 3, .rules_version = 2, .config_version = 1, .session = 1, .supports_native_amend = true, .supports_post_only = true },
+        .supported_products = execution.productMask(.isolated_linear),
+    });
+    const hedge = 1 - maker;
+    try publishTrade(owner, host, 3);
+    const original = try makerPlace(owner, gateway, &adapters[maker], 7, 10000, 100, .post_only);
+    try makerReport(owner, legs[maker], original, 2, .accepted, 0, 10000);
+    try makerFill(owner, legs[maker], original, 3, 2000);
+    try makerReport(owner, legs[maker], original, 4, .partially_filled, 2000, 8000);
+    try host.pump(owner);
+    const cancel = owner.shard.oms.findCommand(2) orelse return error.MissingMakerCancel;
+    try std.testing.expectEqual(.cancel, cancel.operation);
+    try sendMakerCommand(owner, gateway, cancel);
+    const request = adapters[maker].command.?;
+    try std.testing.expectEqual(.cancel, request.operation);
+    try std.testing.expectEqual(original.id, request.orderIdentity());
+    try std.testing.expectEqualDeep(original.client_order_id, request.client_order_id);
+    try std.testing.expectEqual(@as(usize, 0), adapters[hedge].sends);
+    const first_hedge = try makerPlace(owner, gateway, &adapters[hedge], 8, 2000, 100, .immediate_or_cancel);
+    try makerFill(owner, legs[maker], original, 5, 1000);
+    try makerReport(owner, legs[maker], original, 6, .partially_filled, 3000, 7000);
+    try host.pump(owner);
+    try std.testing.expectEqual(@as(u16, 3), owner.shard.oms.order_count);
+    try std.testing.expectEqual(.pending_cancel, owner.shard.oms.orderById(original.id).?.state);
+    const second_hedge = try makerPlace(owner, gateway, &adapters[hedge], 9, 1000, 100, .immediate_or_cancel);
+
+    var dispatch: trading.oms.DispatchBatch = .{ .count = 1 };
+    dispatch.items[0] = .{ .command_id = cancel.command_id, .state = .unknown };
+    _ = try owner.apply(fixture.atGroup(50, .{ .identity = 98001, .account_scope = legs[maker].account, .payload = .{ .oms_dispatch_batch = dispatch } }));
+    try host.pump(owner);
+    const query = (try host.takeOrderQuery(owner)) orelse return error.MissingFormalOrderQuery;
+    try owner.checkpoint();
+    const restarted = try restartHost(init, path, owner, host, host_config, 10);
+    defer restarted.close(init);
+    const recovered_query = (try restarted.takeOrderQuery(owner)) orelse return error.MissingRecoveredFormalQuery;
+    try std.testing.expectEqual(@as(u64, 7), recovered_query.first_sequence);
+    try std.testing.expectEqual(@as(u64, 7), recovered_query.intent_sequence);
+    try std.testing.expect(recovered_query.cursor > query.cursor);
+    try std.testing.expectEqual(.accepted, try gateway.queryCycleOrder(try owner.source(), 9, 7, 7, recovered_query.cursor));
+    try std.testing.expectEqual(original.id, adapters[maker].query.?.order);
+    try std.testing.expectEqualDeep(try canonical.VenueOrderRef.init(legs[maker].venue, "maker-order-1"), adapters[maker].query.?.venue_order.?);
+    try std.testing.expect(adapters[hedge].query == null);
+
+    try makerReport(owner, legs[maker], original, 7, .canceled, 4000, 0);
+    try restarted.pump(owner);
+    try std.testing.expectEqual(@as(u16, 3), owner.shard.oms.order_count);
+    try makerFill(owner, legs[maker], original, 8, 1000);
+    try restarted.pump(owner);
+    try std.testing.expectEqual(@as(u16, 4), owner.shard.oms.order_count);
+    const late_hedge = try makerPlace(owner, gateway, &adapters[hedge], 10, 1000, 100, .immediate_or_cancel);
+    for ([_]trading.oms.Order{ first_hedge, second_hedge, late_hedge }, 0..) |order, index| {
+        const lots = order.quantity;
+        try makerFill(owner, legs[hedge], order, 2 + 2 * index, lots);
+        try makerReport(owner, legs[hedge], order, 3 + 2 * index, .filled, lots, 0);
+        try restarted.pump(owner);
+    }
+    const replacement = try makerPlace(owner, gateway, &adapters[maker], 11, 6000, if (maker == 0) 95 else 105, .post_only);
+    try std.testing.expectEqual(original.id, replacement.predecessor_order_id);
+    try std.testing.expect(!std.meta.eql(replacement.client_order_id, original.client_order_id));
+    try makerFill(owner, legs[maker], replacement, 9, 6000);
+    try makerReport(owner, legs[maker], replacement, 10, .filled, 6000, 0);
+    try restarted.pump(owner);
+    const final_hedge = try makerPlace(owner, gateway, &adapters[hedge], 12, 6000, 100, .immediate_or_cancel);
+    try makerFill(owner, legs[hedge], final_hedge, 8, 6000);
+    try makerReport(owner, legs[hedge], final_hedge, 9, .filled, 6000, 0);
+    try restarted.pump(owner);
+
+    for (legs, 0..) |leg, index| try makerPosition(owner, leg, 11, if (index == 0) 10000 else -10000);
+    try owner.checkpoint();
+    try publishTrade(owner, restarted, 4);
+    for (legs, 0..) |leg, index| {
+        const exit = try makerPlace(owner, gateway, &adapters[index], 13 + index, 10000, 100, .immediate_or_cancel);
+        try std.testing.expect(exit.portfolio_reduce_only);
+        try makerFill(owner, leg, exit, 12, 10000);
+        try makerReport(owner, leg, exit, 13, .filled, 10000, 0);
+        try makerPosition(owner, leg, 14, 0);
+        const account = owner.shard.accountState(leg.account).?;
+        const layer = account.economic_projection.portfolioLayer(10).?;
+        try std.testing.expectEqual(@as(i128, 0), layer.positionForInstrument(leg.instrument).quantity);
+        const initial: i128 = if (index == 0) 400 else 600;
+        const realized: i128 = if (index == maker) 3 else 0;
+        try std.testing.expectEqual(initial - 5 + realized, layer.settlement_balance_atoms);
+        try accounts.reconcileDomainAccount(owner, leg.account, gateway);
+    }
+    const closure = try owner.shard.qualifyCycleClosure(9, 7);
+    _ = try owner.apply(.{ .core = .{ .identity = 98002, .payload = .{ .cycle_closed = closure } } });
+    const recovered = try init.gpa.create(Owner);
+    defer init.gpa.destroy(recovered);
+    try Owner.recoverInto(recovered, owner.store, init.io, owner.stream);
+    try std.testing.expectEqualDeep(owner.shard.canonicalStateDigest(), recovered.shard.canonicalStateDigest());
+    std.debug.print("formal_maker: account={d} order={d} late_fill=1000 replacement=6000 hedge=10000 closed=true\n", .{ legs[maker].account, original.id });
+}
+
+fn sendMakerCommand(owner: *Owner, gateway: *execution.Gateway, command: trading.oms.Command) !void {
+    const view = try std.heap.page_allocator.create(trading.TradingShard);
+    defer std.heap.page_allocator.destroy(view);
+    try owner.shard.copyAccountViewInto(view, command.authority.exchange_account);
+    try gateway.observeAuthorityFromShard(try owner.source(), .{
+        .account = command.authority.exchange_account,
+        .effective_trading_authority = view.operational_state.effectiveTradingAuthority(),
+        .reservation_identity = command.reservation_identity,
+        .reservation = command.reservation,
+        .primary_lease_expires_at_monotonic_ns = command.authority.dispatch_deadline_monotonic_ns,
+        .fencing_token = owner.shard.fencing_token,
+        .exchange_position = view.currentNetExchangePosition(command.instrument).?,
+        .authority_barrier = owner.shard.authoritativeBarrier(),
+    });
+    try std.testing.expectEqual(.accepted, try gateway.sendFromShard(try owner.source(), command.command_id, command.authority.dispatch_deadline_monotonic_ns - std.time.ns_per_ms));
+}
+
+fn makerPosition(owner: *Owner, leg: pair.Leg, sequence: u64, lots: i64) !void {
+    const account = owner.shard.accountState(leg.account).?;
+    try applyMakerFact(owner, leg, sequence, .{ .account_observed = .{
+        .identity = sequence,
+        .exchange_account = leg.account,
+        .bootstrap = account.canonical_account.bootstrap.?,
+        .source_stream = account.canonical_account.source_stream.?,
+        .source_sequence = account.canonical_account.last_sequence + 1,
+        .value = .{ .position = .{ .instrument = leg.instrument, .side = .net, .value = .{
+            .instrument = leg.instrument,
+            .side = .net,
+            .quantity = .{ .instrument = leg.instrument, .rules_version = 2, .lots = lots },
+        } } },
+    } });
+}
+
+fn makerPlace(owner: *Owner, gateway: *execution.Gateway, adapter: *dual.Adapter, intent: u64, lots: i64, ticks: i128, tif: canonical.TimeInForce) !trading.oms.Order {
+    const place = try owner.shard.cycleOrderCommand(9, 7, intent);
+    try sendMakerCommand(owner, gateway, place);
+    const wire = adapter.command.?;
+    try std.testing.expectEqual(place.order_id, wire.orderIdentity());
+    try std.testing.expectEqual(tif, wire.time_in_force);
+    try std.testing.expectEqual(lots, wire.quantity.?.lots);
+    try std.testing.expectEqual(ticks, wire.limit_price.?.ticks);
+    return owner.shard.oms.orderById(place.order_id).?;
+}
+
+fn makerReport(owner: *Owner, leg: pair.Leg, order: trading.oms.Order, sequence: u64, status: canonical.ExecutionReportStatus, cumulative: i64, remaining: i64) !void {
+    try applyMakerFact(owner, leg, sequence, .{ .execution_report = .{
+        .identity = sequence,
+        .order = order.id,
+        .client_order_id = order.client_order_id,
+        .instrument = leg.instrument,
+        .exchange_account = leg.account,
+        .revision = order.revision,
+        .status = status,
+        .cumulative_quantity = .{ .instrument = leg.instrument, .rules_version = 2, .lots = cumulative },
+        .remaining_quantity = .{ .instrument = leg.instrument, .rules_version = 2, .lots = remaining },
+    } });
+}
+
+fn makerFill(owner: *Owner, leg: pair.Leg, order: trading.oms.Order, sequence: u64, lots: i64) !void {
+    var storage: [64]u8 = undefined;
+    var trade_storage: [64]u8 = undefined;
+    const at: u64 = @intCast(std.Io.Clock.real.now(owner.io).nanoseconds);
+    try applyMakerFact(owner, leg, sequence, .{ .fill = .{
+        .identity = sequence,
+        .order = order.id,
+        .client_order_id = order.client_order_id,
+        .venue_order = try canonical.VenueOrderRef.init(leg.venue, try std.fmt.bufPrint(&storage, "maker-order-{d}", .{order.id})),
+        .venue_trade = try canonical.VenueTradeRef.init(leg.venue, try std.fmt.bufPrint(&trade_storage, "maker-trade-{d}", .{sequence})),
+        .instrument = leg.instrument,
+        .exchange_account = leg.account,
+        .side = if (order.side == .buy) .buy else .sell,
+        .quantity = .{ .instrument = leg.instrument, .rules_version = 2, .lots = lots },
+        .price = order.limit_price,
+        .fee = .{ .asset = if (leg.account == 20) 1 else 3, .atoms = 1 },
+        .liquidity = if (order.time_in_force == .post_only) .maker else .taker,
+        .venue_fill_time_utc_ns = at,
+    } });
+}
+
+fn applyMakerFact(owner: *Owner, leg: pair.Leg, sequence: u64, data: canonical.Payload) !void {
+    var fact = fixture.canonicalAt(50, sequence, data);
+    fact.venue.envelope.exchange_account = leg.account;
+    fact.venue.envelope.venue = leg.venue;
+    const at: u64 = @intCast(std.Io.Clock.real.now(owner.io).nanoseconds);
+    fact.venue.envelope.times.source_utc_ns = at;
+    fact.venue.envelope.times.receive_utc_ns = at;
+    fact.venue.envelope.times.audit_utc_ns = at;
+    _ = try owner.apply(fact);
+}
+
 fn exerciseQuery(init: std.process.Init, path: []const u8, owner: *Owner, host: *formal.Host, host_config: formal.Config, remote: ?*RemoteGateway) !void {
     const gateway_role = @import("../../runtime/production_gateway.zig").GatewayRole;
     var dispatch: trading.oms.DispatchBatch = .{ .count = 1 };
@@ -192,35 +402,15 @@ fn exerciseQuery(init: std.process.Init, path: []const u8, owner: *Owner, host: 
     const query = (try host.takeOrderQuery(owner)) orelse return error.MissingFormalOrderQuery;
     try std.testing.expectEqual(@as(u64, 7), query.first_sequence);
     try std.testing.expectEqual(@as(u64, 8), query.intent_sequence);
-    var root = try std.Io.Dir.openDirAbsolute(init.io, path, .{});
-    defer root.close(init.io);
-    var checkpoint_storage: [8192]u8 = undefined;
-    const metadata: @import("../../strategy/strategy_host_recovery.zig").Metadata = .{
-        .schema_registry = host.gateway.config.schema_registry,
-        .strategy_instance = 9,
-        .strategy_definition = 42,
-        .state_schema = 61,
-        .state_schema_version = 1,
-        .strategy_config_version = 1,
-        .strategy_cursor = host.cursor,
-        .next_intent_sequence = 9,
-    };
-    try host.process.requestCheckpoint(init.io, 2, metadata);
-    const checkpoint = try host.process.receiveCheckpoint(init.io, &checkpoint_storage);
-    try root.writeFile(init.io, .{ .sub_path = "checkpoint.bin", .data = checkpoint });
-    var digest: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(checkpoint, &digest, .{});
-    const digest_hex = std.fmt.bytesToHex(digest, .lower);
-    var restart_config = host_config;
-    restart_config.checkpoint_sha256 = &digest_hex;
-    try engine.revokeHosts(owner);
-    const restarted = try formal.Host.start(init, owner, 2, restart_config);
+    const restarted = try restartHost(init, path, owner, host, host_config, 9);
     defer restarted.close(init);
     const recovered_query = (try restarted.takeOrderQuery(owner)) orelse return error.MissingRecoveredFormalQuery;
     try std.testing.expectEqual(query.first_sequence, recovered_query.first_sequence);
     try std.testing.expectEqual(query.intent_sequence, recovered_query.intent_sequence);
     try std.testing.expect(recovered_query.cursor > query.cursor);
     try std.testing.expectEqual(null, try host.takeOrderQuery(owner));
+    var root = try std.Io.Dir.openDirAbsolute(init.io, path, .{});
+    defer root.close(init.io);
     const storage = try init.gpa.alloc(u8, durable.max_snapshot_bytes);
     defer init.gpa.free(storage);
     const snapshot = try owner.committedSnapshot(storage);
@@ -241,6 +431,32 @@ fn exerciseQuery(init: std.process.Init, path: []const u8, owner: *Owner, host: 
     try std.testing.expectEqual(.unknown, owner.shard.oms.orderById(2).?.state);
     try std.testing.expectEqual(@as(u16, 2), owner.shard.oms.order_count);
     std.debug.print("formal_ioc_query: cycle=7 intent=8 order=2 status=unresolved orders=2\n", .{});
+}
+
+fn restartHost(init: std.process.Init, path: []const u8, owner: *Owner, host: *formal.Host, host_config: formal.Config, next_intent_sequence: u64) !*formal.Host {
+    var root = try std.Io.Dir.openDirAbsolute(init.io, path, .{});
+    defer root.close(init.io);
+    var checkpoint_storage: [8192]u8 = undefined;
+    const metadata: @import("../../strategy/strategy_host_recovery.zig").Metadata = .{
+        .schema_registry = host.gateway.config.schema_registry,
+        .strategy_instance = 9,
+        .strategy_definition = 42,
+        .state_schema = 61,
+        .state_schema_version = 1,
+        .strategy_config_version = 1,
+        .strategy_cursor = host.cursor,
+        .next_intent_sequence = next_intent_sequence,
+    };
+    try host.process.requestCheckpoint(init.io, 2, metadata);
+    const checkpoint = try host.process.receiveCheckpoint(init.io, &checkpoint_storage);
+    try root.writeFile(init.io, .{ .sub_path = "checkpoint.bin", .data = checkpoint });
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(checkpoint, &digest, .{});
+    const digest_hex = std.fmt.bytesToHex(digest, .lower);
+    var restart_config = host_config;
+    restart_config.checkpoint_sha256 = &digest_hex;
+    try engine.revokeHosts(owner);
+    return formal.Host.start(init, owner, 2, restart_config);
 }
 
 fn commitUnresolvedQuery(owner: *Owner, query_cursor: u64, batch: canonical.AdapterOutputBatch) !void {

@@ -72,18 +72,21 @@ def config_transition(root, manifest, old_binding, binding, method):
 
 
 def check_opening_fees(outputs, source):
+    if source is not None and sum(type(output) not in (api.OrderQuery, api.OrderCancel) for output in outputs) > 1:
+        raise ValueError("multiple_order_groups")
     current = None
     for output in outputs:
-        if type(output) is api.OrderQuery:
+        if type(output) in (api.OrderQuery, api.OrderCancel):
             continue
-        members = (output,) if type(output) is api.OrderIntent else output.members
+        maker = type(output) is api.MakerIntent
+        members = (output.member,) if maker else (output,) if type(output) is api.OrderIntent else output.members
         if all(member.portfolio_reduce_only for member in members):
             continue
         if source is None:
-            if type(output) is api.FeeCheckedIntentGroup:
+            if type(output) in (api.MakerIntent, api.FeeCheckedIntentGroup):
                 raise ValueError("fees_source_unavailable")
             continue
-        if type(output) is not api.FeeCheckedIntentGroup or len(members) != 2:
+        if not maker and (type(output) is not api.FeeCheckedIntentGroup or len(members) != 2):
             raise ValueError("fees_version_missing")
         path, deployed_scopes = source
         if current is None:
@@ -92,6 +95,8 @@ def check_opening_fees(outputs, source):
             current = FeeSchedules(path)
         scopes = tuple(deployed_scopes[(member.exchange_account_identity, member.instrument_identity)]
                        for member in members)
+        if maker:
+            scopes += (deployed_scopes[(output.peer_account, output.peer_instrument)],)
         current.require_opening(output.fee_version, scopes)
 
 
@@ -284,14 +289,15 @@ def instance_frames(request, *, engine_session=False, opening_fees=None):
                                 and instance.next_intent_sequence == before
                                 and validated_snapshot(instance, manifest) == previous, "fee rejection rollback")
                 print("strategy_opening_fees: " + str(error)[:256], file=sys.stderr, flush=True)
-                continue
+                outputs = tuple(output for output in outputs if type(output) in (api.OrderCancel, api.OrderQuery))
             for output in outputs:
-                if type(output) is api.OrderQuery:
-                    package.require(engine_session and record.event_type == 9, "query requires committed cycle input")
+                if type(output) in (api.OrderQuery, api.OrderCancel):
+                    package.require(engine_session and record.event_type == 9, "order reference requires committed cycle input")
                     frames.append(bridge.output_query_frame(payload, session, int(context.strategy_identity, 16),
-                        context.config_version, activation, *output))
+                        context.config_version, activation, *output, cancel=type(output) is api.OrderCancel))
                     continue
-                members = (output,) if type(output) is api.OrderIntent else output.members
+                maker = type(output) is api.MakerIntent
+                members = (output.member,) if maker else (output,) if type(output) is api.OrderIntent else output.members
                 encoded = []
                 for member in members:
                     price = member.limit_price
@@ -307,8 +313,11 @@ def instance_frames(request, *, engine_session=False, opening_fees=None):
                         limit_price_tick_coefficient=price.tick_coefficient if exact else None)
                     encoded.append(bridge.output_frame(payload, args, session))
                 frame = bytearray(encoded[0][:128] + b"".join(e[128:] for e in encoded))
+                if maker:
+                    frame += struct.pack("<Q", output.cycle_first_sequence)
+                    frame += output.peer_account.to_bytes(16, "little") + output.peer_instrument.to_bytes(16, "little")
                 struct.pack_into("<I", frame, 12, len(frame))
-                struct.pack_into("<HII", frame, 98, 1 if len(members) == 1 else 2, len(members), len(frame) - 128)
+                struct.pack_into("<HII", frame, 98, 5 if maker else 1 if len(members) == 1 else 2, len(members), len(frame) - 128)
                 struct.pack_into("<I", frame, 124, bridge.crc32c(frame[:124] + frame[128:]))
                 frames.append(bytes(frame))
         cursor, batch = last, batch + 1

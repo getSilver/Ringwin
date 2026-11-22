@@ -56,6 +56,19 @@ class OrderQuery(NamedTuple):
     intent_sequence: int
 
 
+class OrderCancel(NamedTuple):
+    cycle_first_sequence: int
+    intent_sequence: int
+
+
+class MakerIntent(NamedTuple):
+    member: OrderIntent
+    cycle_first_sequence: int
+    peer_account: int
+    peer_instrument: int
+    fee_version: str
+
+
 def validate_outputs(outputs, before, after, manifest, binding):
     """Check the existing 128-byte envelope / 80-byte intent codec capacities."""
     uint(before)
@@ -66,23 +79,36 @@ def validate_outputs(outputs, before, after, manifest, binding):
     count = 0
     scopes = {(int(s["exchange_account"], 16), int(s["instrument"], 16)) for s in binding["scopes"]}
     for output in outputs:
-        if type(output) is OrderQuery:
-            require("order_query" in manifest["output_kinds"] and limits["max_output_frame_bytes"] >= 144,
-                    "undeclared order query or frame capacity")
+        if type(output) in (OrderQuery, OrderCancel):
+            kind = "order_query" if type(output) is OrderQuery else "order_cancel"
+            require(kind in manifest["output_kinds"] and limits["max_output_frame_bytes"] >= 144,
+                    "undeclared cycle order reference or frame capacity")
             uint(output.cycle_first_sequence)
             uint(output.intent_sequence)
             require(output.intent_sequence >= output.cycle_first_sequence, "query precedes cycle")
             continue
-        if type(output) is OrderIntent:
+        if type(output) is MakerIntent:
+            kind, members = "maker_intent", (output.member,)
+            uint(output.cycle_first_sequence)
+            require(type(output.member) is OrderIntent and type(output.member.limit_price) is ExactLimitPrice
+                    and output.member.intent_sequence >= output.cycle_first_sequence
+                    and not output.member.portfolio_reduce_only and output.member.time_in_force in ("post-only", "ioc")
+                    and (output.peer_account, output.peer_instrument) in scopes
+                    and output.peer_account != output.member.exchange_account_identity
+                    and output.peer_instrument != output.member.instrument_identity
+                    and limits["max_output_frame_bytes"] >= 272, "invalid Maker route")
+            uint(output.peer_account, 128)
+            uint(output.peer_instrument, 128)
+        elif type(output) is OrderIntent:
             kind, members = "order_intent", (output,)
         else:
             require(type(output) in (IntentGroup, FeeCheckedIntentGroup) and type(output.members) is tuple
                     and 2 <= len(output.members) <= 4, "expected complete group")
             kind, members = "intent_group", output.members
-            if type(output) is FeeCheckedIntentGroup:
-                version = output.fee_version
-                require(type(version) is str and len(version) <= 20 and version.isascii()
-                        and version.isdecimal() and not version.startswith("0"), "invalid fee version")
+        if type(output) in (MakerIntent, FeeCheckedIntentGroup):
+            version = output.fee_version
+            require(type(version) is str and 0 < len(version) <= 20 and version.isascii()
+                    and version.isdecimal() and not version.startswith("0"), "invalid fee version")
         require(kind in manifest["output_kinds"], "undeclared output kind")
         member_sizes = set()
         for member in members:
