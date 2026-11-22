@@ -265,6 +265,16 @@ pub const Host = struct {
     }
 
     fn writerPayload(self: *const Host, shard: *const trading.TradingShard, decision: bridge.Decision) !trading.CorePayload {
+        // The joint Writer consumes single-member reductions via the
+        // versioned group envelope. Legacy singles cannot enter admission.
+        if (shard.decision_domain_identity != 0 and decision == .accepted) {
+            const intent = decision.accepted;
+            return .{ .strategy_intent_rejected = .{
+                .reason = .unknown_schema,
+                .strategy_identity = intent.strategy_identity,
+                .intent_sequence = intent.intent_sequence,
+            } };
+        }
         if (!self.opening_fees_configured and decision == .accepted_group) {
             const identity = self.gateway.config.authorization.strategy_identity;
             if (shard.pairTradingScopeBound(identity) or shard.pair_authorizations.hasHistory(identity)) {

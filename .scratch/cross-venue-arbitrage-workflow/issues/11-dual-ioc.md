@@ -29,3 +29,9 @@ Parent: [模块地图](../map.md)
 - 正式 Host 现将激活后的输出交给 Writer。配置 `strategy_host.manual_fees` 后，子进程用 Writer 提供的部署场所、账户和产品逐腿复核费率。拒绝时恢复回调前的私有状态和意图序号，Writer 屏障仅增加该条公共输入。
 - Windows 离线联合验收从空扫描范围出发，经 OwnerSession 和认证 Web API 保存费率、配置扫描、展示合成盘口评估并批准身份 98765。正式 Host 拒绝费率版本 1 和缺腿版本 2，版本 3 经 Writer 和独立的 Gateway 实例生成双腿 IOC。场所 1 × 21 均为 simulation，使用合成生产合同回执与原订单 ID，账户 20 × 30、isolated_linear 品种 101 × 102，各 10,000 lots。开仓后分别持有 +10,000 和 −10,000 lots，退出后归零。两账户原币分别扣 10、返 4 个原子单位，最终为 394 USDT 原子单位和 594 USDC 原子单位。闭合证明和 FX 归档绑定周期首意图 7，以 0.998 回放得独立汇差 3/250000000 USDT。
 - 上述运行由测试入口组装正式 Host、Writer 和 Gateway，策略用合成信号触发，场所回执与对账由夹具提供。正式 Linux 独立 execution_gateway 角色仍缺与已提交 Writer 命令的路由，部署策略消费前端评估的路径也仍需验收。本票保留为 Frontier，[12](12-ioc-recovery.md) 和 [13](13-maker.md) 继续依赖本票。
+
+## 远端 Linux 复验
+
+- 在指定 SSH 主机的隔离目录 `/root/rw11-acceptance-TQ5UyL` 运行。环境为 x86_64 Linux 5.10.0-15-amd64 和 Python 3.9.2。源基线为 `9700e294`。远端 `fee.log` 记录 4 项费用测试通过；`dual-ioc.log` 记录批准 98765、旧版本及缺腿拒绝、周期 7 的四笔 IOC、原币费与返佣、归零闭合、独立汇差 3/250000000 USDT。Gateway 在该离线验收中由测试入口组装，场所均为 simulation。
+- 正式角色旧格式单腿输出回归首次失败于 `JointAdmissionRequired`。联合域的 Writer 入口现将该格式提交为明确拒绝。带精确价格的单腿减仓仍可经版本化组信封进入既有准入。
+- 同机 `strategy-chain-corrected.log` 记录正式 engine、market_feed 和 Web 的定向联合回归通过。Host 首次确认 69，重建后确认 73，接入新盘口后 Writer 到达 76，旧回执被拒绝，已提交前缀一致。更新后的 Linux 二进制和 Host 源文件散列记录在 `corrected-sha256.log`。
