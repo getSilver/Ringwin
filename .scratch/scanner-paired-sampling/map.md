@@ -1,6 +1,6 @@
 # 机会扫描器双腿采样对齐
 
-Status: open
+Status: closed
 
 ## Destination
 
@@ -27,7 +27,7 @@ Status: open
 
 ## Frontier
 
-- [04 复测三档容量与机会有效性](issues/04-verify-capacity-and-eligibility.md)
+四张工单均已完成。
 
 ## Decisions so far
 
@@ -38,9 +38,11 @@ Status: open
 - 02 已验收。正式自动循环在请求完成或额度开放时推进扫描，目录与盘口共用 Venue 并发额度，维护周期继续处理过期和刷新。调度时刻和慢响应、429 下的观测见 [02](issues/02-wake-on-completion-and-budget.md#离线验收)。
 - 03 已验收。两条共享路线首次同时新鲜前的实际盘口请求从 10 次降至 7 次。原文回放确认复用保留采样时刻和 RawIngress 引用，持续高边际报价下的低优先级路线首次及 429 恢复后的可服务等待分别为 469 ms 和 1000 ms，均在 14 秒夹具上界内。见 [03](issues/03-reuse-shared-books-and-rotate-fairly.md#离线验收)。
 
+- 04 已验收。三档均完成首轮，对照版 170 组样本均满足 1 秒时差限制，时差重试由 27 次降为 0。16 盘口首轮缩短，64 和 256 盘口首轮延长，256 盘口从 119.329 秒增至 184.875 秒。覆盖率缺测、故障注入和批准入口的验收记录见 [04](issues/04-verify-capacity-and-eligibility.md)。
+
 ## Not yet specified
 
-- 04 按容量档记录合并实现的实际就绪等待、完整覆盖和批准复核证据。
+无。
 
 ## Out of scope
 
