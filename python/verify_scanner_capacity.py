@@ -107,10 +107,10 @@ class MeasuredScannerRuntime(ScannerRuntime):
         self.fixture = fixture
         super().__init__(root, transport=transport, asset_provider=fixture.registry, automatic=False)
 
-    def _sample(self, identity, row, worker):
+    def _warm(self, identity, row, worker):
         self.fixture.worker.stage = "refresh"
         try:
-            return super()._sample(identity, row, worker)
+            return super()._warm(identity, row, worker)
         finally:
             del self.fixture.worker.stage
 

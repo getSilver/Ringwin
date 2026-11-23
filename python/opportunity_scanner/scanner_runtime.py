@@ -215,6 +215,10 @@ class HyperliquidScannerAdapter(NativeScannerAdapter):
 DEFAULT_SCANNER_ADAPTERS = (OkxScannerAdapter(), HyperliquidScannerAdapter())
 
 
+class BookRequestDeferred(Exception):
+    """A competing public request took the paired book window."""
+
+
 class PublicTransport:
     def __init__(self, adapters=DEFAULT_SCANNER_ADAPTERS):
         self.adapters = {adapter.venue: adapter for adapter in adapters}
@@ -222,25 +226,95 @@ class PublicTransport:
         self._request_after = {}
         self._retry_after = {}
         self._backoff = {}
+        self._paired_request = threading.local()
+
+    @staticmethod
+    def _budget(endpoint):
+        if endpoint in ("api.hyperliquid.xyz", "api.hyperliquid-testnet.xyz"):
+            return "hyperliquid"
+        return "okx" if endpoint.endswith(".okx.com") else endpoint
+
+    def _retry_deadline(self, endpoint, budget):
+        return max(self._retry_after.get(endpoint, 0), self._retry_after.get(budget, 0))
+
+    def _request_deadline(self, sources):
+        return max(max(self._request_after.get(budget, 0), self._retry_deadline(endpoint, budget))
+                   for endpoint, budget in sources)
+
+    def request_delay(self, urls):
+        """Seconds until all sources can make a request, using the transport clock."""
+        with self._request_lock:
+            return max(0, self._request_deadline(self._sources(urls)) - time.monotonic())
+
+    def _sources(self, urls):
+        endpoints = (urlsplit(url).netloc for url in urls)
+        return tuple((endpoint, self._budget(endpoint)) for endpoint in endpoints)
+
+    @staticmethod
+    def _spacing(budget, *, light):
+        if budget != "hyperliquid":
+            return .10
+        return .12 if light else 1.20
+
+    def paired_book_admission(self, urls):
+        sources = self._sources(urls)
+        start_at = None
+
+        def admit():
+            nonlocal start_at
+            with self._request_lock:
+                if start_at is None:
+                    now = time.monotonic()
+                    earliest = max(now, self._request_deadline(sources))
+                    # A second book batch can use the next book interval. Yield
+                    # to metadata spacing and Retry-After in the next scan step.
+                    backing_off = any(now < self._retry_deadline(endpoint, budget)
+                                      for endpoint, budget in sources)
+                    if backing_off or earliest > now + .12:
+                        start_at = -1
+                    else:
+                        start_at = earliest
+                        for _, budget in sources:
+                            spacing = self._spacing(budget, light=True)
+                            self._request_after[budget] = start_at + spacing
+            if start_at < 0:
+                raise BookRequestDeferred
+            delay = start_at - time.monotonic()
+            if delay > 0:
+                time.sleep(delay)
+            with self._request_lock:
+                now = time.monotonic()
+                if any(now < self._retry_deadline(endpoint, budget) for endpoint, budget in sources):
+                    raise BookRequestDeferred
+
+        return admit
+
+    def paired_book(self, binding, admit):
+        self._paired_request.admit = admit
+        try:
+            return self.book(binding)
+        finally:
+            del self._paired_request.admit
 
     def request(self, url, body=None, *, max_bytes=MAX_FRAME):
         # Conservative per-IP spacing, including catalogue/metadata requests.
-        # Hyperliquid charges 20 weight for metadata and 2 for book and mids.
         endpoint = urlsplit(url).netloc
-        hl = endpoint in ("api.hyperliquid.xyz", "api.hyperliquid-testnet.xyz")
-        budget = "hyperliquid" if hl else "okx" if endpoint.endswith(".okx.com") else endpoint
-        weight = 2 if hl and body and body.get("type") in ("l2Book", "allMids") else 20 if hl else 1
-        spacing = .06 * weight if hl else .10
-        while True:
-            with self._request_lock:
-                now = time.monotonic()
-                if now < max(self._retry_after.get(budget, 0), self._retry_after.get(endpoint, 0)):
-                    raise OSError("public source temporarily backing off")
-                delay = self._request_after.get(budget, 0) - now
-                if delay <= 0:
-                    self._request_after[budget] = now + spacing
-                    break
-            time.sleep(delay)
+        budget = self._budget(endpoint)
+        admit = getattr(self._paired_request, "admit", None)
+        if admit is not None:
+            admit()
+        else:
+            while True:
+                with self._request_lock:
+                    now = time.monotonic()
+                    if now < self._retry_deadline(endpoint, budget):
+                        raise OSError("public source temporarily backing off")
+                    delay = self._request_after.get(budget, 0) - now
+                    if delay <= 0:
+                        light = body and body.get("type") in ("l2Book", "allMids")
+                        self._request_after[budget] = now + self._spacing(budget, light=light)
+                        break
+                time.sleep(delay)
         data = None if body is None else json.dumps(body, separators=(",", ":")).encode()
         request = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
         # urllib's default client signature is rejected by the OKX public gateway.
@@ -847,6 +921,11 @@ class ScannerRuntime:
             futures = self._schedule_samples()
         if blocking and futures:
             wait(futures)
+            with self.poll_lock:
+                warmed = self._collect_samples()
+                futures = self._schedule_samples(warmed=warmed) if warmed else ()
+            if futures:
+                wait(futures)
         with self.poll_lock:
             self._collect_samples()
             self._publish()
@@ -867,9 +946,10 @@ class ScannerRuntime:
                 request.set_exception(error)
         return request.result()
 
-    def _book(self, row):
+    def _book(self, row, admit):
         key = (*self._quote_source(row), row["symbol"])
-        return self._shared_request(self.book_requests, key, lambda: self.transport.book(row))
+        fetch = (lambda: self.transport.paired_book(row, admit)) if admit else (lambda: self.transport.book(row))
+        return self._shared_request(self.book_requests, key, fetch)
 
     def _metadata_source(self, venue, environment):
         endpoint, actual = self.adapters[venue].routes[environment]
@@ -923,28 +1003,39 @@ class ScannerRuntime:
         worker[2]["next_metadata_ns"] = fetched_at + METADATA_REFRESH_NS
         return request
 
-    def _sample(self, identity, row, worker):
+    @staticmethod
+    def _needs_rotation(worker):
+        state = worker[2]
+        reserve = min(MAX_FRAME + 8192, state["budget"] // 4)
+        return state["sampled"] and state["budget"] - state["capture_bytes"] < reserve
+
+    def _warm(self, identity, row, worker):
         try:
-            metadata_key = self._metadata_key(row)
-            with self.lock:
-                metadata_request = self.metadata_requests.get(metadata_key)
-            if worker is not None:
-                state = worker[2]
-                reserve = min(MAX_FRAME + 8192, state["budget"] // 4)
-                if state["sampled"] and state["budget"] - state["capture_bytes"] < reserve:
-                    retired, worker = worker, None
-                    self._close_worker(retired)
-            if worker is None:
+            if worker is not None and self._needs_rotation(worker):
+                retired, worker = worker, None
+                self._close_worker(retired)
+            opening = worker is None
+            if opening:
                 worker = self._open(identity, row=row)
-                metadata_request = self._validate_worker_metadata(worker, row, metadata_key)
+            self._validate_worker_metadata(worker, row, self._metadata_key(row))
+            if opening:
                 worker[2]["epoch"] += 1
                 result = self._input(worker, "subscribe", json.dumps({"event":"polling_started"}))
                 if result["failure"]:
                     raise ValueError(result["failure"])
-            if self.clock() >= worker[2]["next_metadata_ns"]:
-                metadata_request = self._validate_worker_metadata(worker, row, metadata_key)
+            return worker, None, None
+        except Exception as error:
+            return worker, None, (str(error) or type(error).__name__)[:2048]
+
+    def _sample(self, identity, row, worker, admit):
+        try:
+            metadata_key = self._metadata_key(row)
+            with self.lock:
+                metadata_request = self.metadata_requests.get(metadata_key)
             try:
-                payload = self._book(row)
+                payload = self._book(row, admit)
+            except BookRequestDeferred:
+                return worker, None, None
             except OSError:
                 self._invalidate_metadata(metadata_key, metadata_request)
                 raise
@@ -959,6 +1050,7 @@ class ScannerRuntime:
             return worker, None, (str(error) or type(error).__name__)[:2048]
 
     def _collect_samples(self):
+        warmed = set()
         with self.lock:
             for source, future in tuple(self.quote_pending.items()):
                 if not future.done():
@@ -968,7 +1060,7 @@ class ScannerRuntime:
                     self.quotes[source] = self.clock(), future.result()
                 except (OSError, ValueError, KeyError, TypeError):
                     self.quotes[source] = self.clock(), {}
-            for identity, (generation, future) in tuple(self.pending.items()):
+            for identity, (generation, future, stage) in tuple(self.pending.items()):
                 if not future.done():
                     continue
                 self.pending.pop(identity)
@@ -988,6 +1080,10 @@ class ScannerRuntime:
                     self.workers[identity] = None
                     continue
                 self.workers[identity] = worker
+                if result is None:
+                    if stage == "warm":
+                        warmed.add(identity)
+                    continue
                 row = self.bindings[identity]
                 if result["depth"] is not None:
                     depth = bytes.fromhex(result["depth"])
@@ -1007,6 +1103,8 @@ class ScannerRuntime:
                     actual_environment=self.adapters[row["venue"]].routes[row["environment"]][1],
                     input_kind=getattr(self.transport, "input_kind", "venue_public"), asset_basis=self._asset_basis(row))
                 self.failures.pop(identity, None)
+
+        return warmed
 
     def _observation(self, identity):
         entry = self.source.registered[identity]
@@ -1063,7 +1161,7 @@ class ScannerRuntime:
         self.round_duration_ns = None
         self.completed_rounds = 0
 
-    def _schedule_samples(self):
+    def _schedule_samples(self, *, warmed=None):
         with self.console.lock, self.source.lock, self.lock:
             console = self.console
             selected = console._selected(include_unavailable=True) if console.desired == "running" else set()
@@ -1083,22 +1181,26 @@ class ScannerRuntime:
                     self._close_worker(worker)
                     self.workers[identity] = None
             inflight = {}
-            for identity in self.pending:
-                inflight[identity[0]] = inflight.get(identity[0], 0) + 1
+            for venue, *_ in (*self.pending, *self.quote_pending):
+                inflight[venue] = inflight.get(venue, 0) + 1
             futures = []
+            request_delay = getattr(self.transport, "request_delay", None)
+            paired_book_admission = getattr(self.transport, "paired_book_admission", None)
             wide = len(self.paired_markets) > ACTIVE_BOOKS
-            if wide and getattr(self.transport, "supports_batch_quotes",
+            if warmed is None and wide and getattr(self.transport, "supports_batch_quotes",
                     getattr(self.transport, "input_kind", "") != "synthetic_protocol_fixture"):
                 for source in sorted({self._quote_source(self.bindings[i]) for i in self.paired_markets
                                       if self.adapters[i[0]].batch_quotes}):
-                    if (source not in self.quote_pending and source[0] not in
-                            {item[0] for item in self.quote_pending}
+                    if (sum(inflight.values()) < ACTIVE_BOOKS
+                            and inflight.get(source[0], 0) == 0
+                            and (request_delay is None or not request_delay((source[1],)))
                             and now - self.quotes.get(source, (-2_000_000_000, {}))[0] >= 2_000_000_000):
                         future = self.executor.submit(self.transport.quote_batch, source)
                         self.quote_pending[source] = future
+                        inflight[source[0]] = inflight.get(source[0], 0) + 1
                         futures.append(future)
             edges = {pair: self._quote_edge(pair, now) for pair in self.coverage_routes} if wide else {}
-            # A single paired retry can repair skew introduced by worker startup.
+            # A single paired retry can repair skew introduced by a slow book response.
             # Subsequent attempts resume their normal position in the rotation.
             retries = {pair for pair in self.round_remaining - self.skew_retried
                        if pair in self.attempted
@@ -1112,41 +1214,58 @@ class ScannerRuntime:
                       or edges.get(pair) is None or edges[pair] > 0]
             routes.sort(key=lambda pair: (pair not in retries, self.attempted.get(pair, -1),
                                           -(edges.get(pair) or 0), pair))
-            outstanding = set(self.pending)
-            active = outstanding | {i for i, worker in self.workers.items() if worker is not None}
-            scheduled = set()
+            active = set(self.pending) | {i for i, worker in self.workers.items() if worker is not None}
+            protected = set()
             singles = sorted((self.diagnostic_markets | external) - self.paired_markets,
                              key=lambda i: (self.touched.get(i, -1), i))
             for pair in (*routes, *((i,) for i in singles)):
-                if len(pair) == 2 and any(i in outstanding or i in self.source.unavailable for i in pair):
+                if warmed is not None and warmed.isdisjoint(pair):
                     continue
-                wanted = [i for i in pair if i in self.workers and i not in self.pending
-                          and i not in scheduled and i not in self.source.unavailable]
-                if not wanted or any(inflight.get(i[0], 0) >= VENUE_CONCURRENCY for i in wanted):
+                if any(i not in self.workers or i in self.source.unavailable for i in pair):
                     continue
-                if len(pair) == 2 and any(self._quote_source(self.bindings[i]) in self.quote_pending
-                        and self._quote_source(self.bindings[i]) not in self.quotes for i in wanted):
+                if any(i in self.pending for i in pair):
+                    protected.update(pair)
                     continue
-                idle = active - set(self.pending) - set(pair)
-                needed = max(0, len(active.union(wanted)) - ACTIVE_BOOKS)
+                endpoints = tuple(self._quote_source(self.bindings[i])[1] for i in pair)
+                if request_delay is not None and request_delay(endpoints):
+                    continue
+                warming = [i for i in pair if self.workers[i] is None
+                           or self._needs_rotation(self.workers[i])
+                           or now >= self.workers[i][2]["next_metadata_ns"]]
+                if warming and warmed is not None:
+                    continue
+                wanted = warming or pair
+                if sum(inflight.values()) + len(wanted) > ACTIVE_BOOKS or any(
+                        inflight.get(i[0], 0) >= VENUE_CONCURRENCY for i in wanted):
+                    continue
+                if any(self._quote_source(self.bindings[i]) in self.quote_pending
+                       and self._quote_source(self.bindings[i]) not in self.quotes for i in pair):
+                    continue
+                idle = active - self.pending.keys() - protected - set(pair)
+                # Leave room for both legs while either leg is warming.
+                needed = max(0, len(active.union(pair)) - ACTIVE_BOOKS)
                 if needed > len(idle):
                     continue
                 for victim in sorted(idle, key=lambda i: (self.touched.get(i, 0), i))[:needed]:
                     self._close_worker(self.workers[victim])
                     self.workers[victim] = None
                     active.remove(victim)
-                if wanted and len(pair) == 2:
+                protected.update(pair)
+                admit = (paired_book_admission(endpoints)
+                         if not warming and len(pair) == 2 and paired_book_admission else None)
+                if len(pair) == 2 and (not warming or any(i in self.failures for i in warming)):
                     self.dispatch += 1
                     self.attempted[pair] = self.dispatch
-                if pair in retries and len(wanted) == 2:
-                    self.skew_retried.add(pair)
+                    if not warming and pair in retries:
+                        self.skew_retried.add(pair)
                 for identity in wanted:
                     active.add(identity)
-                    scheduled.add(identity)
                     self.touched[identity] = now
                     inflight[identity[0]] = inflight.get(identity[0], 0) + 1
-                    future = self.executor.submit(self._sample, identity, self.bindings[identity], self.workers[identity])
-                    self.pending[identity] = self.generations[identity], future
+                    args = identity, self.bindings[identity], self.workers[identity]
+                    future = (self.executor.submit(self._warm, *args) if warming
+                              else self.executor.submit(self._sample, *args, admit))
+                    self.pending[identity] = self.generations[identity], future, "warm" if warming else "book"
                     futures.append(future)
             return futures
 

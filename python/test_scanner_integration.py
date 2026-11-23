@@ -19,7 +19,8 @@ from unittest.mock import patch
 import control_plane
 import control_plane_web
 import owner_session
-from opportunity_scanner.scanner_runtime import ScannerRuntime as PublicScannerRuntime, PublicTransport
+from opportunity_scanner.scanner_runtime import BookRequestDeferred, PublicTransport
+from opportunity_scanner.scanner_runtime import ScannerRuntime as PublicScannerRuntime
 
 
 def registered_assets():
@@ -69,17 +70,39 @@ class PublicTransportTests(unittest.TestCase):
                 patch("opportunity_scanner.scanner_runtime.time.sleep", side_effect=advance), \
                 patch("opportunity_scanner.scanner_runtime.urllib.request.build_opener", return_value=Opener()):
             hyperliquid = "https://api.hyperliquid.xyz/info"
+            okx = "https://www.okx.com/api/v5/market/books"
             transport.request(hyperliquid, {"type": "meta"})
+            self.assertAlmostEqual(transport.request_delay((okx, hyperliquid)), 1.2)
             with self.assertRaises(HTTPError):
                 transport.request(hyperliquid, {"type": "l2Book"})
             self.assertAlmostEqual(sent[1][1] - sent[0][1], 1.2)
             with self.assertRaisesRegex(OSError, "backing off"):
                 transport.request("https://api.hyperliquid-testnet.xyz/info", {"type": "l2Book"})
-            transport.request("https://www.okx.com/api/v5/market/books")
+            self.assertAlmostEqual(transport.request_delay((okx, "https://api.hyperliquid-testnet.xyz")), 5)
+            self.assertEqual(transport.request_delay((okx,)), 0)
+            transport.request(okx)
             self.assertEqual(sent[-1][1], sent[1][1])
             now[0] += 5
+            self.assertEqual(transport.request_delay((okx, hyperliquid)), 0)
             transport.request(hyperliquid, {"type": "l2Book"})
             self.assertEqual(len(sent), 4)
+
+            okx_binding = dict(venue=1, environment="production", product="spot", symbol="ETH-USDT")
+            hl_binding = dict(venue=21, environment="production", product="linear", symbol="ETH")
+            now[0] += .12
+            self.assertEqual(transport.request_delay((okx, hyperliquid)), 0)
+            admit = transport.paired_book_admission((okx, hyperliquid))
+            transport.request(hyperliquid, {"type": "meta"})
+            for binding in (okx_binding, hl_binding):
+                with self.assertRaises(BookRequestDeferred):
+                    transport.paired_book(binding, admit)
+            self.assertEqual(len(sent), 5)
+
+            now[0] += 1.2
+            admit = transport.paired_book_admission((okx, hyperliquid))
+            transport.paired_book(okx_binding, admit)
+            transport.paired_book(hl_binding, admit)
+            self.assertEqual(sent[5][1], sent[6][1])
 
     def test_public_requests_omit_user_agent_on_the_wire(self):
         from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -2094,7 +2117,10 @@ class IntegrationTests(unittest.TestCase):
                 return io.BytesIO(fixture.request(request.full_url, json.loads(request.data)).encode())
 
         books = native_book_requests()
+        okx_books = lambda: sum("/market/books" in url for url, _ in fixture.requests)
+        fast_books = okx_books()
         original_metadata = fixture.metadata
+        fixture.request_delay = paced.request_delay
         fixture.metadata = lambda row: paced.metadata(row) if row["venue"] == 21 else original_metadata(row)
         # Expire the worker's own 30-second metadata deadline without expiring
         # its catalogue. The catalogue refresh remains a separate request.
@@ -2103,22 +2129,26 @@ class IntegrationTests(unittest.TestCase):
         with patch("urllib.request.build_opener", return_value=Opener()), \
                 patch("opportunity_scanner.scanner_runtime.time", SimpleNamespace(
                     monotonic=lambda: transport_now[0], sleep=advance_transport)):
-            for expected_requests, expected_error in ((1, "503"), (1, "backing off"),
-                                                       (2, "429"), (2, "backing off")):
-                if expected_error == "429":
-                    advance_transport(1)
+            for elapsed, expected_requests, expected_error in ((0, 1, "503"), (0, 1, "503"),
+                                                               (1.2, 2, "429"), (0, 2, "429")):
+                advance_transport(elapsed)
                 self.tick()
                 view = self.call("start")
                 self.assertEqual(view["phase"], "Degraded")
                 self.assertTrue(all(c["reason"] == "data_gap" for c in view["snapshot"]["candidates"]))
-                self.assertTrue(next(o for o in view["market"]["observations"] if o["venue"] == "1")["continuous"])
+                self.assertEqual(okx_books(), fast_books)
                 self.assertIn(expected_error, str(view["market"]["failures"]))
                 self.assertEqual(len(sent), expected_requests)
                 self.assertEqual(native_book_requests(), books)
-            advance_transport(1)
+            advance_transport(1.2)
+            self.tick()
+            self.assertEqual(native_book_requests(), books)
+            self.assertEqual(okx_books(), fast_books)
+            advance_transport(1.2)
             self.tick()
         self.assertEqual(len(sent), 3)
         self.assertGreater(native_book_requests(), books)
+        self.assertGreater(okx_books(), fast_books)
         self.assertEqual(self.call("start")["phase"], "Running")
 
     def test_rules_mismatch_does_not_publish_healthy_book(self):
