@@ -3,7 +3,7 @@
 Public protocol transport is replaceable; asset bindings come from node-owned
 activated-registry projection. No credentials or execution capability.
 """
-from concurrent.futures import Future, ThreadPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import replace
 from fractions import Fraction
 from functools import cache
@@ -39,6 +39,7 @@ MAX_DISCOVERY_BYTES = 4 * 1024 * 1024
 MAX_HL_METADATA_BYTES = 1024 * 1024
 ACTIVE_BOOKS = 16
 VENUE_CONCURRENCY = 2
+SCAN_MAINTENANCE_SECONDS = .5
 DISPLAY_PAIRS = 42  # Six candidate variants per pair, below the snapshot limit.
 CATALOGUE_REFRESH_NS = 30_000_000_000
 CATALOGUE_TTL_NS = 90_000_000_000
@@ -410,6 +411,7 @@ class ScannerRuntime:
         self.discovery_lock = threading.Lock()
         self.discovery_settings, self.next_discovery, self.discovery_success = {}, {}, {}
         self.discovery_inflight, self.source_generations = {}, {}
+        self.catalogue_venue = None
         cache = self.directory / "scanner-discovery.json"
         if cache.is_file():
             if cache.stat().st_size > MAX_DISCOVERY_BYTES:
@@ -461,6 +463,8 @@ class ScannerRuntime:
             config_path=self.directory/"scanner-config.json")
         self.console.fee_schedules = self.fees
         self.closing = threading.Event()
+        self.wake = threading.Event()
+        self.next_request_at = None
         self.thread = None
         if automatic:
             self.thread = threading.Thread(target=self._run, daemon=True, name="public-scanner-feeds")
@@ -585,6 +589,16 @@ class ScannerRuntime:
                     self._invalidate_asset_bindings(key)
                     self.asset_bindings, self.asset_binding_digest = registry, registry.digest
                 assets_by_id = {a["identity"]: a for a in self.source.assets}
+                venue = int(setting["venue"])
+                with self.lock:
+                    # Reserve a slot before waiting so sampling cannot take it.
+                    self.catalogue_venue = venue
+                    busy = [future for identity, (_, future, _) in self.pending.items()
+                            if identity[0] == venue and not future.done()]
+                    busy.extend(future for source, future in self.quote_pending.items()
+                                if source[0] == venue and not future.done())
+                if len(busy) == VENUE_CONCURRENCY:
+                    wait(busy, return_when=FIRST_COMPLETED)
                 for product in adapter.products:
                     if self.closing.is_set():
                         return
@@ -713,6 +727,10 @@ class ScannerRuntime:
                     self._catalogue_changed(affected, restore=False)
                     self.discovery_status[key] = dict(state="failed", error=str(error)[:2048], evidence=evidence,
                                                      rejected=rejected, complete=False)
+            finally:
+                with self.lock:
+                    self.catalogue_venue = None
+                self.wake.set()
 
     def _invalidate_asset_bindings(self, current_key, error=None):
         with self.poll_lock, self.console.lock, self.source.lock, self.lock:
@@ -919,6 +937,9 @@ class ScannerRuntime:
         with self.poll_lock:
             self._collect_samples()
             futures = self._schedule_samples()
+        if not blocking:
+            for future in futures:
+                future.add_done_callback(self._request_completed)
         if blocking and futures:
             wait(futures)
             with self.poll_lock:
@@ -929,6 +950,22 @@ class ScannerRuntime:
         with self.poll_lock:
             self._collect_samples()
             self._publish()
+
+    def _request_completed(self, _future):
+        self.wake.set()
+
+    def _request_ready(self, endpoints):
+        """Record the next wake deadline if these sources are still rate limited."""
+        request_delay = getattr(self.transport, "request_delay", None)
+        if request_delay is None:
+            return True
+        delay = request_delay(endpoints)
+        if not delay:
+            return True
+        deadline = time.monotonic() + delay
+        if self.next_request_at is None or deadline < self.next_request_at:
+            self.next_request_at = deadline
+        return False
 
     def _quote_source(self, row):
         return row["venue"], self.adapters[row["venue"]].routes[row["environment"]][0], row["product"]
@@ -1163,6 +1200,7 @@ class ScannerRuntime:
 
     def _schedule_samples(self, *, warmed=None):
         with self.console.lock, self.source.lock, self.lock:
+            self.next_request_at = None
             console = self.console
             selected = console._selected(include_unavailable=True) if console.desired == "running" else set()
             now = self.clock()
@@ -1180,11 +1218,10 @@ class ScannerRuntime:
                 if worker is not None:
                     self._close_worker(worker)
                     self.workers[identity] = None
-            inflight = {}
+            inflight = {} if self.catalogue_venue is None else {self.catalogue_venue: 1}
             for venue, *_ in (*self.pending, *self.quote_pending):
                 inflight[venue] = inflight.get(venue, 0) + 1
             futures = []
-            request_delay = getattr(self.transport, "request_delay", None)
             paired_book_admission = getattr(self.transport, "paired_book_admission", None)
             wide = len(self.paired_markets) > ACTIVE_BOOKS
             if warmed is None and wide and getattr(self.transport, "supports_batch_quotes",
@@ -1193,8 +1230,8 @@ class ScannerRuntime:
                                       if self.adapters[i[0]].batch_quotes}):
                     if (sum(inflight.values()) < ACTIVE_BOOKS
                             and inflight.get(source[0], 0) == 0
-                            and (request_delay is None or not request_delay((source[1],)))
-                            and now - self.quotes.get(source, (-2_000_000_000, {}))[0] >= 2_000_000_000):
+                            and now - self.quotes.get(source, (-2_000_000_000, {}))[0] >= 2_000_000_000
+                            and self._request_ready((source[1],))):
                         future = self.executor.submit(self.transport.quote_batch, source)
                         self.quote_pending[source] = future
                         inflight[source[0]] = inflight.get(source[0], 0) + 1
@@ -1227,12 +1264,13 @@ class ScannerRuntime:
                     protected.update(pair)
                     continue
                 endpoints = tuple(self._quote_source(self.bindings[i])[1] for i in pair)
-                if request_delay is not None and request_delay(endpoints):
-                    continue
                 warming = [i for i in pair if self.workers[i] is None
                            or self._needs_rotation(self.workers[i])
                            or now >= self.workers[i][2]["next_metadata_ns"]]
                 if warming and warmed is not None:
+                    continue
+                if self.thread is not None and any(i in self.failures and
+                        now - self.touched[i] < SCAN_MAINTENANCE_SECONDS * 1_000_000_000 for i in warming):
                     continue
                 wanted = warming or pair
                 if sum(inflight.values()) + len(wanted) > ACTIVE_BOOKS or any(
@@ -1244,7 +1282,7 @@ class ScannerRuntime:
                 idle = active - self.pending.keys() - protected - set(pair)
                 # Leave room for both legs while either leg is warming.
                 needed = max(0, len(active.union(pair)) - ACTIVE_BOOKS)
-                if needed > len(idle):
+                if needed > len(idle) or not self._request_ready(endpoints):
                     continue
                 for victim in sorted(idle, key=lambda i: (self.touched.get(i, 0), i))[:needed]:
                     self._close_worker(self.workers[victim])
@@ -1403,19 +1441,31 @@ class ScannerRuntime:
                     missing_evaluation=list(self.evaluation.state["missing"]))
 
     def _run(self):
-        while not self.closing.wait(.5) and not self.console.shutdown.is_set():
+        while not self.closing.is_set() and not self.console.shutdown.is_set():
+            # Consume notifications before collecting; completions during this pass
+            # remain pending for the next pass.
+            self.wake.clear()
             try:
                 self.step(blocking=False)
             except Exception as error:
+                self.next_request_at = None
                 with self.console.lock:
                     self.console.stop()
                     self.console.errors.append(str(error)[:2048])
                     self.console.errors[:] = self.console.errors[-64:]
                     self.console.phase = "Faulted"
+            # Keep the maintenance cadence for expiry, catalogue refresh and
+            # changes to inputs that have no request completion to wake us.
+            timeout = SCAN_MAINTENANCE_SECONDS
+            if self.next_request_at is not None:
+                timeout = min(timeout, max(0, self.next_request_at - time.monotonic()))
+            if not self.closing.is_set():
+                self.wake.wait(timeout)
 
     def close(self):
-        self.console.close()
         self.closing.set()
+        self.wake.set()
+        self.console.close()
         for thread in self.discovery_threads:
             thread.join(timeout=30)
         if self.thread:

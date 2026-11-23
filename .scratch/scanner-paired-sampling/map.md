@@ -27,7 +27,6 @@ Status: open
 
 ## Frontier
 
-- [02 由请求完成和限频窗口推动扫描](issues/02-wake-on-completion-and-budget.md)
 - [03 复用共享盘口并验证公平轮转](issues/03-reuse-shared-books-and-rotate-fairly.md)
 
 ## Decisions so far
@@ -36,6 +35,7 @@ Status: open
 - 前后对照以[元数据复用已落地的版本](../scanner-metadata-reuse/map.md)为基线，沿用[离线容量报告](../../docs/research/2026-11-22-scanner-capacity.md)的负载与覆盖口径。缺少的新指标用同一测量方法补测。
 
 - 01 已验收。双腿完成原生校验后从实际公共来源限频预算取得同一批盘口额度，慢预热与退避期间继续服务其他就绪路线。前后对照时刻和定向验收见 [01](issues/01-coordinate-ready-legs.md#离线验收)。
+- 02 已验收。正式自动循环在请求完成或额度开放时推进扫描，目录与盘口共用 Venue 并发额度，维护周期继续处理过期和刷新。调度时刻和慢响应、429 下的观测见 [02](issues/02-wake-on-completion-and-budget.md#离线验收)。
 
 ## Not yet specified
 
