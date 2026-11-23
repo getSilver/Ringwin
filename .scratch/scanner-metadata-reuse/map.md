@@ -26,7 +26,7 @@ Status: open
 
 ## Frontier
 
-- [02 让轮转 worker 安全复用同源全市场元数据](issues/02-reuse-market-metadata.md)
+- [03 验证三档负载下的收益和机会有效性](issues/03-verify-capacity-and-freshness.md)
 
 ## Decisions so far
 
@@ -34,9 +34,11 @@ Status: open
 
 [01 的离线基线](issues/01-warmup-baseline.md#首轮实测)已封存。03 沿用同一容量脚本、原生 worker 启动方式和采样口径，按实际 HTTP 请求对照目录发现、worker 预热和刷新，并分别比较初开与重开时长。
 
+[02 的定向验收](issues/02-reuse-market-metadata.md#实现与验证)通过。Hyperliquid 标准永续元数据自实际响应返回起复用 5 秒，每个原生 worker 仍重验自己的 Instrument 和规则版本。OKX 单品种响应按品种隔离。
+
 ## Not yet specified
 
-复用窗口的具体时长以及三档负载的实际收益。02 记录所选时长及依据，03 记录测量结果。
+三档负载的实际收益待 03 测量。
 
 ## Out of scope
 

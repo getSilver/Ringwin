@@ -2,6 +2,7 @@
 
 Synthetic protocol fixtures replace only the external public transport.
 """
+from concurrent.futures import Future, ThreadPoolExecutor
 import errno
 import http.client
 import json
@@ -257,6 +258,19 @@ class DynamicCatalogueTests(unittest.TestCase):
             clock=lambda:self.now[0], utc_clock=lambda:self.now[1], automatic=False)
         self.addCleanup(self.runtime.close)
         self.setting = dict(identity="a"*32, venue="1", type="okx", name="我的 OKX", environment="demo")
+
+    def test_single_instrument_metadata_requests_are_isolated(self):
+        transport = RefreshTransport(self.now)
+        self.runtime.transport = transport
+        transport.mode = "added"
+        self.runtime.discover(self.setting)
+        for identity, row in self.runtime.bindings.items():
+            if row["product"] == "spot":
+                self.runtime.source.acquire(row["symbol"], {identity})
+        self.runtime.step()
+        queried = [url.split("&instId=")[1] for url in transport.base.urls if "&instId=" in url]
+        self.assertCountEqual(queried, ["ETH-USDT", "SOL-USDT"])
+        self.assertEqual(self.runtime.status()["failures"], {})
 
     def test_removed_setting_discards_inflight_catalogue_before_cache_commit(self):
         from opportunity_scanner.exchange_settings import ExchangeSettings
@@ -541,6 +555,127 @@ class HyperliquidCatalogueTests(unittest.TestCase):
             clock=lambda:self.now[0], utc_clock=lambda:self.now[1], automatic=False)
         self.addCleanup(self.runtime.close)
         self.setting = dict(identity="b"*32, venue="21", type="hyperliquid", name="永续", environment="production")
+
+    def test_rotated_workers_share_raw_metadata_until_original_expiry(self):
+        self.transport.metadata_document["universe"].append(
+            dict(self.transport.metadata_document["universe"][0], name="SOL"))
+        request = self.transport.request
+        refresh_entered, release_refresh, worker_waiting = (threading.Event() for _ in range(3))
+        hold_refresh = False
+
+        class ObservedFuture(Future):
+            def result(self, timeout=None):
+                if not self.done():
+                    worker_waiting.set()
+                return super().result(timeout)
+
+        def market(url, body=None, **kwargs):
+            if body == {"type": "l2Book", "coin": "SOL"}:
+                raw = request(url, dict(body, coin="ETH"), **kwargs)
+                return raw.replace('"ETH"', '"SOL"')
+            if hold_refresh and body == {"type": "meta"}:
+                refresh_entered.set()
+                if not release_refresh.wait(10):
+                    raise OSError("test refresh release missing")
+            return request(url, body, **kwargs)
+
+        self.transport.request = market
+        self.runtime.discover(self.setting)
+        identities = {row["symbol"]: identity for identity, row in self.runtime.bindings.items()}
+        owner = "rotating-public-consumer"
+
+        def sample(*symbols):
+            self.runtime.source.release(owner)
+            self.runtime.source.acquire(owner, {identities[symbol] for symbol in symbols})
+            self.runtime.step()
+            status = self.runtime.status()
+            self.assertEqual(status["failures"], {})
+            self.assertEqual(sum(row["continuous"] for row in status["observations"]), len(symbols))
+            return sum(body == {"type": "meta"} for _, body in self.transport.requests)
+
+        self.assertEqual(sample("ETH"), 2)  # Discovery and first worker.
+        self.now[0] += 4_000_000_000
+        self.now[1] += 4_000_000_000
+        self.assertEqual(sample("SOL"), 2)
+        self.now[0] += 1_000_000_000
+        self.now[1] += 1_000_000_000
+        hold_refresh = True
+        with patch("opportunity_scanner.scanner_runtime.Future", ObservedFuture), ThreadPoolExecutor(1) as executor:
+            sampled = executor.submit(sample, "ETH", "SOL")
+            try:
+                self.assertTrue(refresh_entered.wait(5))
+                self.assertTrue(worker_waiting.wait(5))
+            finally:
+                release_refresh.set()
+            self.assertEqual(sampled.result(timeout=15), 3)
+
+    def test_full_market_metadata_is_isolated_by_public_endpoint(self):
+        testnet = dict(self.setting, identity="c"*32, environment="testnet")
+        self.runtime.discover(self.setting)
+        self.runtime.discover(testnet)
+        for identity, row in self.runtime.bindings.items():
+            self.runtime.source.acquire(row["environment"], {identity})
+            self.runtime.step()
+        metadata_hosts = [url for url, body in self.transport.requests if body == {"type": "meta"}]
+        for endpoint, _ in self.transport.adapters[21].routes.values():
+            self.assertEqual(metadata_hosts.count(endpoint + "/info"), 2)
+        self.assertEqual(self.runtime.status()["failures"], {})
+        self.assertEqual(sum(row["continuous"] for row in self.runtime.status()["observations"]), 2)
+
+    def test_catalogue_change_fences_inflight_metadata_and_revalidates_rules(self):
+        self.runtime.discover(self.setting)
+        identity, = self.runtime.bindings
+        self.runtime.source.acquire("public-consumer", {identity})
+        metadata = self.transport.metadata
+        entered, release = threading.Event(), threading.Event()
+
+        def delayed(row):
+            raw = metadata(row)
+            entered.set()
+            if not release.wait(10):
+                raise OSError("test metadata release missing")
+            return raw
+
+        self.transport.metadata = delayed
+        sampling = threading.Thread(target=self.runtime.step)
+        sampling.start()
+        try:
+            self.assertTrue(entered.wait(5))
+            self.transport.metadata_document["universe"][0]["maxLeverage"] = 24
+            self.runtime.discover(self.setting)
+            self.assertFalse(self.runtime.status()["observations"])
+        finally:
+            self.transport.metadata = metadata
+            release.set()
+            sampling.join(timeout=15)
+        self.assertFalse(sampling.is_alive())
+        self.runtime.step()
+        self.assertEqual(sum(body == {"type": "meta"} for _, body in self.transport.requests), 4)
+        self.assertEqual(sum(body == {"type": "l2Book", "coin": "ETH"}
+                             for _, body in self.transport.requests), 1)
+        status = self.runtime.status()
+        self.assertEqual(status["failures"], {})
+        self.assertTrue(status["observations"][0]["continuous"])
+
+    def test_failed_catalogue_discards_metadata_within_reuse_window(self):
+        self.runtime.discover(self.setting)
+        identity, = self.runtime.bindings
+        self.runtime.source.acquire("public-consumer", {identity})
+        self.runtime.step()
+        self.assertTrue(self.runtime.status()["observations"][0]["continuous"])
+
+        with patch.object(self.transport, "catalogue", side_effect=OSError("catalogue unavailable")):
+            self.runtime.discover(self.setting)
+        self.assertFalse(self.runtime.status()["observations"])
+        self.assertIn("catalogue unavailable", self.runtime.status()["discovery"]["21:production"]["error"])
+
+        # The same rules recover, but a valid prior cache entry must not be reused.
+        self.now[0] += 100_000_000
+        self.now[1] += 100_000_000
+        self.runtime.discover(self.setting)
+        self.runtime.step()
+        self.assertEqual(sum(body == {"type": "meta"} for _, body in self.transport.requests), 4)
+        self.assertTrue(self.runtime.status()["observations"][0]["continuous"])
 
     def test_environment_switch_preserves_filters_for_temporarily_missing_assets_after_restart(self):
         from opportunity_scanner.exchange_settings import ExchangeSettings
@@ -1845,8 +1980,65 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(view["phase"],"Degraded")
         self.assertTrue(all(c["reason"]=="data_gap" for c in view["snapshot"]["candidates"]))
         self.assertTrue(next(x for x in view["market"]["observations"] if x["venue"]=="1")["continuous"])
+        metadata_count = self.transport.requests.count(("https://api.hyperliquid.xyz/info", {"type": "meta"}))
         self.transport.fail.clear(); self.tick()
         self.assertEqual(self.call("start")["phase"],"Running")
+        self.assertEqual(self.transport.requests.count(
+            ("https://api.hyperliquid.xyz/info", {"type": "meta"})), metadata_count + 1)
+
+    def test_metadata_refresh_failure_and_429_recover_through_public_backoff(self):
+        import io
+        from urllib.error import HTTPError
+
+        self.start()
+        self.assertEqual(self.call("start")["phase"], "Running")
+        fixture = self.transport
+        paced = PublicTransport()
+        http_errors = [503, 429]
+        sent = []
+        transport_now = [1.0]
+
+        def native_book_requests():
+            return sum(body is not None and body.get("type") == "l2Book" for _, body in fixture.requests)
+
+        def advance_transport(seconds):
+            transport_now[0] += seconds
+
+        class Opener:
+            def open(self, request, timeout):
+                sent.append(request.full_url)
+                if http_errors:
+                    raise HTTPError(request.full_url, http_errors.pop(0), "fixture metadata failure",
+                                    {"Retry-After": "1"}, None)
+                return io.BytesIO(fixture.request(request.full_url, json.loads(request.data)).encode())
+
+        books = native_book_requests()
+        original_metadata = fixture.metadata
+        fixture.metadata = lambda row: paced.metadata(row) if row["venue"] == 21 else original_metadata(row)
+        # Expire the worker's own 30-second metadata deadline without expiring
+        # its catalogue. The catalogue refresh remains a separate request.
+        self.now[0] += 30_000_000_000
+        self.now[1] += 30_000_000_000
+        with patch("urllib.request.build_opener", return_value=Opener()), \
+                patch("opportunity_scanner.scanner_runtime.time", SimpleNamespace(
+                    monotonic=lambda: transport_now[0], sleep=advance_transport)):
+            for expected_requests, expected_error in ((1, "503"), (1, "backing off"),
+                                                       (2, "429"), (2, "backing off")):
+                if expected_error == "429":
+                    advance_transport(1)
+                self.tick()
+                view = self.call("start")
+                self.assertEqual(view["phase"], "Degraded")
+                self.assertTrue(all(c["reason"] == "data_gap" for c in view["snapshot"]["candidates"]))
+                self.assertTrue(next(o for o in view["market"]["observations"] if o["venue"] == "1")["continuous"])
+                self.assertIn(expected_error, str(view["market"]["failures"]))
+                self.assertEqual(len(sent), expected_requests)
+                self.assertEqual(native_book_requests(), books)
+            advance_transport(1)
+            self.tick()
+        self.assertEqual(len(sent), 3)
+        self.assertGreater(native_book_requests(), books)
+        self.assertEqual(self.call("start")["phase"], "Running")
 
     def test_rules_mismatch_does_not_publish_healthy_book(self):
         self.transport.bad_rules=True

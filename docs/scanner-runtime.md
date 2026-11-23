@@ -56,7 +56,11 @@ OKX 动态目录的 `specification` 返回产品、资产、状态、tick、lot�
 
 `ControlPlaneApp → ScannerRuntime → PublicTransport → ringwin-scanner-market → MarketFeedAdapter → market.Projection → depth_snapshot → scanner.scan → ScannerConsole/History → Web`。
 
-正常 transport 使用有超时和容量限制的公共 HTTPS REST。OKX 调用 `/api/v5/public/instruments` 和 `/api/v5/market/books?sz=5`；Hyperliquid 调用 `/info` 的 `meta` 和 `l2Book`。依据 [OKX 官方接口](https://www.okx.com/docs-v5)及 [Hyperliquid 官方接口](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api)。元数据在来源启动及每 30 秒刷新，每轮轮询发布完整替换快照。
+正常 transport 使用有超时和容量限制的公共 HTTPS REST。OKX 调用 `/api/v5/public/instruments` 和 `/api/v5/market/books?sz=5`；Hyperliquid 调用 `/info` 的 `meta` 和 `l2Book`。依据 [OKX 官方接口](https://www.okx.com/docs-v5)及 [Hyperliquid 官方接口](https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api)。每轮轮询发布完整替换快照。
+
+Hyperliquid 标准永续 worker 按 Venue、实际公共端点、实际环境和产品范围共享 `meta` 原文。复用窗口从完整响应返回时起算 5 秒，覆盖相邻轮转批次内多个 1.2 秒元数据限频间隔，约为 30 秒规则重验周期的六分之一。缓存命中保留原始获取时刻，每个 worker 仍以该时刻为基准在 30 秒后重验，并用原生适配器核对 Instrument 和 InstrumentRules 后才使用盘口。OKX 单品种元数据的请求按产品及品种隔离。
+
+同一响应范围的并发刷新共用一个在途请求。目录成员或规则变化、目录失效和需重新预热的连接故障淘汰对应缓存。在淘汰前启动且尚未返回的响应不能写入新条目。请求失败走公共 transport 的现有退避和行情降级路径，恢复须通过元数据重验并采得新盘口。
 
 公共 transport 不发送 `User-Agent`，通过请求私有的 urllib opener 禁用默认 `Python-urllib` 标识；不修改全局 opener、系统代理或 TLS 验证。该默认标识在本机网络对 OKX 触发 HTTP 403／Cloudflare 1010；省略字段后在线时间、永续目录和盘口返回业务码 0。HTTP 线上请求回归同时覆盖 GET 和 JSON POST。网络超时、目录解码与规则拒绝仍独立报告，接口可达不表示整个目录已被接纳。
 

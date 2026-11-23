@@ -17,6 +17,7 @@ import subprocess
 import sys
 import threading
 import time
+from typing import NamedTuple, Optional
 import urllib.request
 from urllib.parse import urlsplit
 
@@ -41,9 +42,19 @@ VENUE_CONCURRENCY = 2
 DISPLAY_PAIRS = 42  # Six candidate variants per pair, below the snapshot limit.
 CATALOGUE_REFRESH_NS = 30_000_000_000
 CATALOGUE_TTL_NS = 90_000_000_000
+METADATA_REUSE_NS = 5_000_000_000
+METADATA_REFRESH_NS = 30_000_000_000
 # Stable historical identities, never an admission list or a worker configuration.
 OKX_LEGACY_IDENTITIES = {"BTC-USDT": 0x4f4b5800000001, "BTC-USDT-SWAP": 0x4f4b5800000002,
                          "BTC-USDC": 0x4f4b5800000003}
+
+
+class MetadataScope(NamedTuple):
+    source: tuple[int, str, str]
+    product: str
+    symbol: Optional[str]
+
+
 class NativeScannerAdapter:
     """Public requests and native worker binding for one registered Venue."""
 
@@ -467,6 +478,7 @@ class ScannerRuntime:
                 self.discovery_status.pop(key, None)
                 self.next_discovery.pop(key, None)
                 self.discovery_success.pop(key, None)
+                self._invalidate_metadata_source(int(old["venue"]), old["environment"])
             for setting in after:
                 changed = not any((s["identity"], s["venue"], s["environment"]) == (setting["identity"], setting["venue"], setting["environment"]) for s in before)
                 pending = setting["venue"]+":"+setting["environment"] in self.console.config.get("pending_catalogues", [])
@@ -555,6 +567,8 @@ class ScannerRuntime:
                     sources[key] = state
                     missing = source_identities - incoming
                     changed = missing | (incoming - source_identities) | {i for i in affected if i not in updated or self.bindings[i] != updated[i]}
+                    changed_products = {rows_by_id[i]["product"] for rows_by_id in (self.bindings, updated)
+                                        for i in changed if i in rows_by_id}
                     changed.update(i for i in incoming if i not in self.workers and any(
                         i in identities for identities in self.source.owners.values()))
                     # A switched scope admits its first complete directory, then resumes
@@ -611,6 +625,8 @@ class ScannerRuntime:
                     self.source.unavailable.difference_update(source_identities)
                     self.discovery_success[key] = self.clock()
                     self.discovery_status[key] = state
+                    if changed_products:
+                        self._invalidate_metadata_source(int(setting["venue"]), setting["environment"], changed_products)
                     self._catalogue_changed(changed)
             except (OSError, ValueError, KeyError, TypeError) as error:
                 with self.poll_lock, self.console.lock, self.source.lock, self.lock:
@@ -619,6 +635,7 @@ class ScannerRuntime:
                     affected = {i for i,r in self.bindings.items() if (r["venue"], r["environment"]) ==
                                 (int(setting["venue"]), setting["environment"])}
                     self.source.unavailable.update(affected)
+                    self._invalidate_metadata_source(int(setting["venue"]), setting["environment"])
                     self._catalogue_changed(affected, restore=False)
                     self.discovery_status[key] = dict(state="failed", error=str(error)[:2048], evidence=evidence,
                                                      rejected=rejected, complete=False)
@@ -627,6 +644,7 @@ class ScannerRuntime:
         with self.poll_lock, self.console.lock, self.source.lock, self.lock:
             affected = set(self.bindings)
             self.source.unavailable.update(affected)
+            self.metadata_requests.clear()
             self._catalogue_changed(affected, restore=False)
             self.discovery_success.clear()
             for key in self.discovery_status:
@@ -673,6 +691,7 @@ class ScannerRuntime:
                                     (int(setting["venue"]), setting["environment"])}
                         if not affected <= self.source.unavailable:
                             self.source.unavailable.update(affected)
+                            self._invalidate_metadata_source(int(setting["venue"]), setting["environment"])
                             self._catalogue_changed(affected)
                             self.discovery_status[key].update(state="failed", error="catalogue TTL expired", complete=False)
             if self.clock() >= self.next_discovery.get(key, 0):
@@ -852,14 +871,63 @@ class ScannerRuntime:
         key = (*self._quote_source(row), row["symbol"])
         return self._shared_request(self.book_requests, key, lambda: self.transport.book(row))
 
-    def _metadata(self, row):
-        source = self._quote_source(row)
-        adapter = self.adapters[row["venue"]]
+    def _metadata_source(self, venue, environment):
+        endpoint, actual = self.adapters[venue].routes[environment]
+        return venue, endpoint, actual
+
+    def _invalidate_metadata_source(self, venue, environment, products=None):
+        # Called under the runtime lock when catalogue authority changes.
+        source = self._metadata_source(venue, environment)
+        for key in tuple(self.metadata_requests):
+            if key.source == source and (products is None or key.product in products):
+                del self.metadata_requests[key]
+
+    def _invalidate_metadata(self, key, request):
+        with self.lock:
+            if self.metadata_requests.get(key) is request:
+                self.metadata_requests.pop(key, None)
+
+    def _metadata_key(self, row):
+        venue = row["venue"]
+        adapter = self.adapters[venue]
         symbol = None if adapter.shared_metadata else row["symbol"]
-        return self._shared_request(self.metadata_requests, (*source, symbol), lambda: self.transport.metadata(row))
+        return MetadataScope(self._metadata_source(venue, row["environment"]), row["product"], symbol)
+
+    def _metadata(self, row, key):
+        with self.lock:
+            request = self.metadata_requests.get(key)
+            owner = request is None or (key.symbol is None and request.done()
+                and self.clock() - request.result()[1] >= METADATA_REUSE_NS)
+            if owner:
+                request = self.metadata_requests[key] = Future()
+        if owner:
+            try:
+                payload = self.transport.metadata(row)
+                fetched_at = self.clock()
+                with self.lock:
+                    if self.metadata_requests.get(key) is not request:
+                        raise ValueError("public metadata invalidated during refresh")
+                    request.set_result((payload, fetched_at))
+            except Exception as error:
+                self._invalidate_metadata(key, request)
+                request.set_exception(error)
+        payload, fetched_at = request.result()
+        return payload, fetched_at, request
+
+    def _validate_worker_metadata(self, worker, row, key):
+        payload, fetched_at, request = self._metadata(row, key)
+        result = self._input(worker, "metadata", payload)
+        if result["failure"]:
+            self._invalidate_metadata(key, request)
+            raise ValueError(result["failure"])
+        worker[2]["next_metadata_ns"] = fetched_at + METADATA_REFRESH_NS
+        return request
 
     def _sample(self, identity, row, worker):
         try:
+            metadata_key = self._metadata_key(row)
+            with self.lock:
+                metadata_request = self.metadata_requests.get(metadata_key)
             if worker is not None:
                 state = worker[2]
                 reserve = min(MAX_FRAME + 8192, state["budget"] // 4)
@@ -868,21 +936,21 @@ class ScannerRuntime:
                     self._close_worker(retired)
             if worker is None:
                 worker = self._open(identity, row=row)
-                result = self._input(worker, "metadata", self._metadata(row))
-                if result["failure"]:
-                    raise ValueError(result["failure"])
-                worker[2]["next_metadata_ns"] = self.clock()+30_000_000_000
+                metadata_request = self._validate_worker_metadata(worker, row, metadata_key)
                 worker[2]["epoch"] += 1
                 result = self._input(worker, "subscribe", json.dumps({"event":"polling_started"}))
                 if result["failure"]:
                     raise ValueError(result["failure"])
             if self.clock() >= worker[2]["next_metadata_ns"]:
-                result = self._input(worker, "metadata", self._metadata(row))
-                worker[2]["next_metadata_ns"] = self.clock()+30_000_000_000
-                if result["failure"]:
-                    raise ValueError(result["failure"])
-            result = self._input(worker, "book", self._book(row))
+                metadata_request = self._validate_worker_metadata(worker, row, metadata_key)
+            try:
+                payload = self._book(row)
+            except OSError:
+                self._invalidate_metadata(metadata_key, metadata_request)
+                raise
+            result = self._input(worker, "book", payload)
             if result["failure"]:
+                self._invalidate_metadata(metadata_key, metadata_request)
                 raise ValueError(result["failure"])
             worker[2]["sampled"] = True
             self.segments.report_capture(row["venue"], row["environment"], row["instrument"])
@@ -1002,10 +1070,12 @@ class ScannerRuntime:
             now = self.clock()
             self._refresh_coverage_scope(selected, now)
             external = {identity for owner, identities in self.source.owners.items() if owner != console.session for identity in identities}
-            for cache in (self.book_requests, self.metadata_requests):
-                for key, request in tuple(cache.items()):
-                    if request.done():
-                        del cache[key]
+            for key, request in tuple(self.book_requests.items()):
+                if request.done():
+                    del self.book_requests[key]
+            for key, request in tuple(self.metadata_requests.items()):
+                if key.symbol is not None and request.done():
+                    del self.metadata_requests[key]
             wanted_markets = self.paired_markets | self.diagnostic_markets | external
             for identity in self.workers.keys() - wanted_markets - self.pending.keys():
                 worker = self.workers[identity]
