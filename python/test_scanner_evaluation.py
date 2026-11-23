@@ -54,7 +54,7 @@ def inputs(mode="taker_taker", maker=None):
     return observations, document
 
 
-def native_inputs(observations, at, clock_id):
+def native_inputs(observations, at, clock_id, *, horizon_ns=2_000_000_000):
     """Synthetic research evidence bound to actual native-decoded rules and books."""
     legs = []
     books = tuple(s.decode_depth_snapshot(o.book) for o in observations)
@@ -85,7 +85,7 @@ def native_inputs(observations, at, clock_id):
     training_end = 2_200_000_000
     forecast = b.AR1(1, training_end, 0., .8, .01, 1e-12, 1e-15, 0.)
     plan_policy = policy(model_hash=forecast.content_hash, scope=s.candidate_id(pair,1,"taker_taker",None), at_ns=at,
-        prediction_end_ns=at+2_000_000_000, risk_deadline_ns=at+2_000_000_000, reference_exit_ns=at+2_000_000_000,
+        prediction_end_ns=at+horizon_ns, risk_deadline_ns=at+horizon_ns, reference_exit_ns=at+2_000_000_000,
         base_asset=legs[0].rules.exposure_asset, quote_asset=legs[0].rules.quote_asset,
         original_base=quantity, reference_notional_atoms=int(legs[0].entry_notional),
         min_profit_atoms=1, absolute_minimum_atoms=1, max_book_age_ns=5*b.SECOND,

@@ -1,6 +1,6 @@
 # 机会扫描器的全市场元数据复用
 
-Status: open
+Status: closed
 
 ## Destination
 
@@ -26,7 +26,7 @@ Status: open
 
 ## Frontier
 
-- [03 验证三档负载下的收益和机会有效性](issues/03-verify-capacity-and-freshness.md)
+三张工单均已完成。
 
 ## Decisions so far
 
@@ -36,9 +36,11 @@ Status: open
 
 [02 的定向验收](issues/02-reuse-market-metadata.md#实现与验证)通过。Hyperliquid 标准永续元数据自实际响应返回起复用 5 秒，每个原生 worker 仍重验自己的 Instrument 和规则版本。OKX 单品种响应按品种隔离。
 
+[03 的离线同口径复测](issues/03-verify-capacity-and-freshness.md#离线容量对照)中，16、64、256 盘口的 Hyperliquid worker 预热请求从 7、44、104 次降至 1、5、21 次。正式扫描和批准入口通过规则变更、5 秒时效、1 秒双腿时差和行情健康度的定向验收。
+
 ## Not yet specified
 
-三档负载的实际收益待 03 测量。
+无。
 
 ## Out of scope
 

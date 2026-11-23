@@ -1338,41 +1338,9 @@ class IntegrationTests(unittest.TestCase):
         self._assert_formal_evaluation("PURR")
 
     def _assert_formal_evaluation(self, coin):
-        from opportunity_scanner.scanner_evaluation import publish_inputs
         from strategies.cross_venue import arbitrage_evaluation as evaluation
-        from test_scanner_evaluation import native_inputs
-        self.transport.coin = coin
-        original = self.transport.request
-        def response(url, body=None, **kwargs):
-            payload = original(url, body, **kwargs)
-            if body is None:
-                return payload.replace("USDT", "USDC").replace("3000.01", "3125.00").replace("3000.00", "3124.99")
-            if body.get("type") == "l2Book":
-                value = json.loads(payload)
-                value["levels"][0][0]["px"] = "3300"
-                value["levels"][1][0]["px"] = "3300.1"
-                return json.dumps(value)
-            return payload
-        self.transport.request = response
-        self.start()
-        self.now[1] += 3_000_000_000-self.now[0]
-        self.now[0] = 3_000_000_000
-        self.runtime.step()
-        observations = tuple(sorted(self.runtime.observations.values(),key=lambda o:o.identity))
-        self.assertEqual(len(observations),2)
-        document = native_inputs(observations,self.now[0],self.runtime.evaluation.clock_id)
-        publish_inputs(self.runtime.evaluation.path,document)
-        rows = [dict(venue=str(o.venue), account=str(o.account), product=o.kind,
-                     fee_asset=str(o.rules.quote_asset), maker_percent="0", taker_percent="0") for o in observations]
-        self.assertEqual(self.http("/api/manual-fees")[0], 401)
-        status, saved = self.http("/api/manual-fees", dict(expected_version="0", rows=rows), self.headers)
-        self.assertEqual(status, 200, saved)
-        self.assertEqual(self.http("/api/manual-fees", headers=self.headers), (200, saved))
-        self.runtime.step()
-        view = self.call("start")
-        row = next(r for r in view["snapshot"]["candidates"] if r["mode"] == "taker_taker")
-        self.assertEqual(row["status"],"evaluated",(row,self.runtime.evaluation.state))
-        self.assertTrue(row["recommended"])
+        from opportunity_scanner.scanner_evaluation import publish_inputs
+        _, row, observations, document, rows = self.start_evaluated_route(coin)
         self.assertEqual(row["executable_quantity_base"], [str(16 * 10**17), "1"])
         self.assertEqual(row["fixed_notional"]["net_edge_bp"], ["119992", "125"])
         self.assertEqual(row["plan_atoms"], str(479_968 * 10**15))
@@ -1468,6 +1436,119 @@ class IntegrationTests(unittest.TestCase):
         self.assertIn(stale["reason"], {"data_gap", "book_missing", "stale_data"})
         self.assertFalse(stale["recommended"])
         self.assertIsNone(stale["executable_quantity_base"])
+
+    def start_evaluated_route(self, coin, **evidence_options):
+        from opportunity_scanner.scanner_evaluation import publish_inputs
+        from test_scanner_evaluation import native_inputs
+
+        self.transport.coin = coin
+        original = self.transport.request
+
+        def response(url, body=None, **kwargs):
+            payload = original(url, body, **kwargs)
+            if body is None:
+                return payload.replace("USDT", "USDC").replace("3000.01", "3125.00").replace("3000.00", "3124.99")
+            if body.get("type") == "l2Book":
+                value = json.loads(payload)
+                value["levels"][0][0]["px"] = "3300"
+                value["levels"][1][0]["px"] = "3300.1"
+                return json.dumps(value)
+            return payload
+
+        self.transport.request = response
+        self.start()
+        self.now[1] += 3_000_000_000 - self.now[0]
+        self.now[0] = 3_000_000_000
+        self.runtime.step()
+        observations = tuple(sorted(self.runtime.observations.values(), key=lambda o: o.identity))
+        self.assertEqual(len(observations), 2)
+        document = native_inputs(observations, self.now[0], self.runtime.evaluation.clock_id, **evidence_options)
+        publish_inputs(self.runtime.evaluation.path, document)
+        rows = [dict(venue=str(o.venue), account=str(o.account), product=o.kind,
+                     fee_asset=str(o.rules.quote_asset), maker_percent="0", taker_percent="0") for o in observations]
+        self.assertEqual(self.http("/api/manual-fees")[0], 401)
+        status, saved = self.http("/api/manual-fees", dict(expected_version="0", rows=rows), self.headers)
+        self.assertEqual(status, 200, saved)
+        self.assertEqual(self.http("/api/manual-fees", headers=self.headers), (200, saved))
+        self.runtime.step()
+        view = self.call("start")
+        row = next(r for r in view["snapshot"]["candidates"] if r["mode"] == "taker_taker")
+        self.assertEqual(row["status"], "evaluated", (row, self.runtime.evaluation.state))
+        self.assertTrue(row["recommended"])
+        return view, row, observations, document, rows
+
+    def assert_approval_rejects_withdrawn_route(self, initial, candidate, reason):
+        selection = dict(identity="100", candidate_id=candidate["id"], strategy_identity="9",
+            portfolio_identity="10", expected_config_version=initial["config_version"],
+            expected_core_version="0", enabled=True,
+            evaluation=dict(session=initial["session"], **{key: candidate[key] for key in
+                ("scenario_digest", "data_cutoff_ns", "valid_until_ns")}))
+        status, body = self.http("/api/scanner", dict(operation="approve", payload=selection), self.headers)
+        self.assertEqual((status, body.get("error")), (400, f"current evaluated candidate required: {reason}"))
+        status, body = self.http("/api/scanner", headers=self.headers)
+        self.assertEqual(status, 200, body)
+        view = body["result"]
+        route = [row for row in view["snapshot"]["candidates"] if row["pair"] == candidate["pair"]]
+        self.assertFalse(any(row["status"] == "evaluated" or row["recommended"] for row in route), route)
+        self.assertEqual(view["market"]["coverage"]["fresh"], 0)
+        return view
+
+    def test_expired_book_withdraws_route_and_rejects_approval_without_read_first(self):
+        view, candidate, *_ = self.start_evaluated_route("HYPE", horizon_ns=6_000_000_000)
+        self.assertEqual(int(candidate["valid_until_ns"]) - int(candidate["data_cutoff_ns"]), 5_000_000_000)
+        self.now[0] += 5_001_000_000
+        expired = self.assert_approval_rejects_withdrawn_route(view, candidate, "expired")
+        self.assertEqual(expired["market"]["coverage"]["expired"], 1)
+
+    def test_unhealthy_book_withdraws_route_and_rejects_approval(self):
+        view, candidate, *_ = self.start_evaluated_route("HYPE")
+        self.transport.fail.add(21)
+        self.tick()
+        self.assert_approval_rejects_withdrawn_route(view, candidate, "data_gap")
+
+    def test_changed_rules_withdraw_route_and_reject_approval(self):
+        view, candidate, *_ = self.start_evaluated_route("HYPE")
+        self.transport.hl.metadata_document["universe"][0]["maxLeverage"] = 24
+        setting = next(row for row in self.app.exchange_settings_store.view()["exchanges"]
+                       if row["venue"] == "21")
+        self.runtime.discover(setting)
+        changed = self.assert_approval_rejects_withdrawn_route(view, candidate, "candidate_unavailable")
+        self.assertEqual(changed["market"]["discovery"]["21:production"]["state"], "ready")
+        previous, = [row for row in view["catalogue"] if row["venue"] == "21"]
+        current, = [row for row in changed["catalogue"] if row["venue"] == "21"]
+        self.assertEqual(current["instrument"], previous["instrument"])
+        self.assertNotEqual(current["rules_version"], previous["rules_version"])
+
+    def test_skewed_books_withdraw_route_and_rejects_approval(self):
+        view, candidate, *_ = self.start_evaluated_route("HYPE")
+        book = self.transport.book
+        release = threading.Event()
+
+        def delay_hyperliquid(row):
+            if row["venue"] == 21 and not release.wait(10):
+                raise TimeoutError("fixture release missing")
+            return book(row)
+
+        self.transport.book = delay_hyperliquid
+        self.now[0] += 1_100_000_000
+        self.now[1] += 1_100_000_000
+        try:
+            deadline = time.monotonic() + 8
+            while True:
+                self.runtime.step(blocking=False)
+                status, body = self.http("/api/scanner", headers=self.headers)
+                self.assertEqual(status, 200, body)
+                rows = body["result"]["snapshot"]["candidates"]
+                if any(row["id"] == candidate["id"] and row["reason"] == "data_skew" for row in rows):
+                    break
+                self.assertLess(time.monotonic(), deadline, rows)
+                time.sleep(.02)
+            skewed = self.assert_approval_rejects_withdrawn_route(view, candidate, "data_skew")
+            left, right = skewed["market"]["observations"]
+            self.assertTrue(left["continuous"] and right["continuous"])
+            self.assertGreater(abs(int(left["visible_at_ns"]) - int(right["visible_at_ns"])), 1_000_000_000)
+        finally:
+            release.set()
 
     def test_settings_rename_delete_and_retained_history_through_http(self):
         self.start()
