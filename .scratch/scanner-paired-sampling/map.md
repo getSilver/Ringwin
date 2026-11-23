@@ -27,7 +27,7 @@ Status: open
 
 ## Frontier
 
-- [03 复用共享盘口并验证公平轮转](issues/03-reuse-shared-books-and-rotate-fairly.md)
+- [04 复测三档容量与机会有效性](issues/04-verify-capacity-and-eligibility.md)
 
 ## Decisions so far
 
@@ -36,10 +36,11 @@ Status: open
 
 - 01 已验收。双腿完成原生校验后从实际公共来源限频预算取得同一批盘口额度，慢预热与退避期间继续服务其他就绪路线。前后对照时刻和定向验收见 [01](issues/01-coordinate-ready-legs.md#离线验收)。
 - 02 已验收。正式自动循环在请求完成或额度开放时推进扫描，目录与盘口共用 Venue 并发额度，维护周期继续处理过期和刷新。调度时刻和慢响应、429 下的观测见 [02](issues/02-wake-on-completion-and-budget.md#离线验收)。
+- 03 已验收。两条共享路线首次同时新鲜前的实际盘口请求从 10 次降至 7 次。原文回放确认复用保留采样时刻和 RawIngress 引用，持续高边际报价下的低优先级路线首次及 429 恢复后的可服务等待分别为 469 ms 和 1000 ms，均在 14 秒夹具上界内。见 [03](issues/03-reuse-shared-books-and-rotate-fairly.md#离线验收)。
 
 ## Not yet specified
 
-- 按现有并发、请求间隔和夹具负载确定可服务路线的验收等待上界，随 03 的运行证据记录。
+- 04 按容量档记录合并实现的实际就绪等待、完整覆盖和批准复核证据。
 
 ## Out of scope
 

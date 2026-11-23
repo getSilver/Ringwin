@@ -220,6 +220,10 @@ class BookRequestDeferred(Exception):
     """A competing public request took the paired book window."""
 
 
+class PublicBookError(Exception):
+    """The actual public source failed to deliver a usable book."""
+
+
 class PublicTransport:
     def __init__(self, adapters=DEFAULT_SCANNER_ADAPTERS):
         self.adapters = {adapter.venue: adapter for adapter in adapters}
@@ -246,6 +250,11 @@ class PublicTransport:
         """Seconds until all sources can make a request, using the transport clock."""
         with self._request_lock:
             return max(0, self._request_deadline(self._sources(urls)) - time.monotonic())
+
+    def backing_off(self, urls):
+        with self._request_lock:
+            now = time.monotonic()
+            return any(now < self._retry_deadline(endpoint, budget) for endpoint, budget in self._sources(urls))
 
     def _sources(self, urls):
         endpoints = (urlsplit(url).netloc for url in urls)
@@ -448,7 +457,7 @@ class ScannerRuntime:
         self.workers, self.observations, self.evidence, self.failures = {}, {}, {}, {}
         self.pending, self.generations, self.touched = {}, {}, {}
         self.quotes, self.quote_pending = {}, {}
-        self.book_requests, self.metadata_requests = {}, {}
+        self.metadata_requests = {}
         self.coverage_key = None
         self.coverage_routes, self.attempted = {}, {}
         self.skew_retried = set()
@@ -970,23 +979,9 @@ class ScannerRuntime:
     def _quote_source(self, row):
         return row["venue"], self.adapters[row["venue"]].routes[row["environment"]][0], row["product"]
 
-    def _shared_request(self, cache, key, fetch):
-        with self.lock:
-            request = cache.get(key)
-            owner = request is None
-            if owner:
-                request = cache[key] = Future()
-        if owner:
-            try:
-                request.set_result(fetch())
-            except Exception as error:
-                request.set_exception(error)
-        return request.result()
-
-    def _book(self, row, admit):
-        key = (*self._quote_source(row), row["symbol"])
-        fetch = (lambda: self.transport.paired_book(row, admit)) if admit else (lambda: self.transport.book(row))
-        return self._shared_request(self.book_requests, key, fetch)
+    def _book_source(self, identity):
+        row = self.bindings[identity]
+        return (*self._metadata_source(row["venue"], row["environment"]), identity[2])
 
     def _metadata_source(self, venue, environment):
         endpoint, actual = self.adapters[venue].routes[environment]
@@ -1062,7 +1057,7 @@ class ScannerRuntime:
                     raise ValueError(result["failure"])
             return worker, None, None
         except Exception as error:
-            return worker, None, (str(error) or type(error).__name__)[:2048]
+            return worker, None, error
 
     def _sample(self, identity, row, worker, admit):
         try:
@@ -1070,21 +1065,22 @@ class ScannerRuntime:
             with self.lock:
                 metadata_request = self.metadata_requests.get(metadata_key)
             try:
-                payload = self._book(row, admit)
+                payload = self.transport.paired_book(row, admit) if admit else self.transport.book(row)
             except BookRequestDeferred:
                 return worker, None, None
-            except OSError:
-                self._invalidate_metadata(metadata_key, metadata_request)
-                raise
+            except (OSError, ValueError) as error:
+                if isinstance(error, OSError):
+                    self._invalidate_metadata(metadata_key, metadata_request)
+                raise PublicBookError(str(error)) from error
             result = self._input(worker, "book", payload)
             if result["failure"]:
                 self._invalidate_metadata(metadata_key, metadata_request)
-                raise ValueError(result["failure"])
+                raise PublicBookError(result["failure"])
             worker[2]["sampled"] = True
             self.segments.report_capture(row["venue"], row["environment"], row["instrument"])
             return worker, result, None
         except Exception as error:
-            return worker, None, (str(error) or type(error).__name__)[:2048]
+            return worker, None, error
 
     def _collect_samples(self):
         warmed = set()
@@ -1107,11 +1103,21 @@ class ScannerRuntime:
                     if worker:
                         self._close_worker(worker)
                     continue
+                if isinstance(error, PublicBookError) or (result is not None and not result["healthy"]):
+                    source = self._book_source(identity)
+                    for alias, observation in self.observations.items():
+                        if alias != identity and observation.continuous and self._book_source(alias) == source:
+                            self.observations[alias] = replace(observation, continuous=False)
                 if error is not None:
                     old = self.observations.get(identity)
                     if old:
                         self.observations[identity] = replace(old, continuous=False)
-                    self.failures[identity] = error
+                    self.failures[identity] = (str(error) or type(error).__name__)[:2048]
+                    if stage == "warm":
+                        self.dispatch += 1
+                        for pair in self.coverage_routes:
+                            if identity in pair:
+                                self.attempted[pair] = self.dispatch
                     if worker:
                         self._close_worker(worker)
                     self.workers[identity] = None
@@ -1198,6 +1204,32 @@ class ScannerRuntime:
         self.round_duration_ns = None
         self.completed_rounds = 0
 
+    def _book_healthy(self, identity, now):
+        observation = self.observations[identity]
+        return (observation.continuous and identity not in self.failures and identity not in self.source.unavailable
+                and observation.rules.valid_from_ns <= now < observation.rules.valid_until_ns)
+
+    def _reusable_book(self, pair, now, times, shared):
+        cutoff = self.coverage_routes[pair]
+        candidates = []
+        for identity in pair:
+            if identity in self.failures:
+                continue
+            rules = self.source.registered[identity].rules
+            if not rules.valid_from_ns <= now < rules.valid_until_ns:
+                continue
+            for owner in shared.get(self._book_source(identity), ()):
+                at = times[owner]
+                # The companion still needs a request, so both age and skew
+                # must have time left. Coverage checks the completed pair.
+                if (0 <= now-at < self.console.max_age_ns and now-at < self.console.max_skew_ns
+                        and (cutoff is None or at > cutoff) and (identity not in times or at >= times[identity])
+                        and self.observations[owner].rules.version == rules.version):
+                    candidates.append((at, owner == identity, identity, owner))
+        if candidates:
+            _, _, identity, owner = max(candidates)
+            return identity, owner
+
     def _schedule_samples(self, *, warmed=None):
         with self.console.lock, self.source.lock, self.lock:
             self.next_request_at = None
@@ -1206,9 +1238,6 @@ class ScannerRuntime:
             now = self.clock()
             self._refresh_coverage_scope(selected, now)
             external = {identity for owner, identities in self.source.owners.items() if owner != console.session for identity in identities}
-            for key, request in tuple(self.book_requests.items()):
-                if request.done():
-                    del self.book_requests[key]
             for key, request in tuple(self.metadata_requests.items()):
                 if key.symbol is not None and request.done():
                     del self.metadata_requests[key]
@@ -1223,6 +1252,7 @@ class ScannerRuntime:
                 inflight[venue] = inflight.get(venue, 0) + 1
             futures = []
             paired_book_admission = getattr(self.transport, "paired_book_admission", None)
+            backing_off = getattr(self.transport, "backing_off", None)
             wide = len(self.paired_markets) > ACTIVE_BOOKS
             if warmed is None and wide and getattr(self.transport, "supports_batch_quotes",
                     getattr(self.transport, "input_kind", "") != "synthetic_protocol_fixture"):
@@ -1237,6 +1267,20 @@ class ScannerRuntime:
                         inflight[source[0]] = inflight.get(source[0], 0) + 1
                         futures.append(future)
             edges = {pair: self._quote_edge(pair, now) for pair in self.coverage_routes} if wide else {}
+            times = {i: decode_depth_snapshot(o.book)["visible_at_ns"] for i, o in self.observations.items()
+                     if self._book_healthy(i, now)}
+            route_uses = {}
+            for pair in self.coverage_routes:
+                for identity in pair:
+                    source = self._book_source(identity)
+                    route_uses[source] = route_uses.get(source, 0) + 1
+            shared = {}
+            for identity in times:
+                source = self._book_source(identity)
+                if route_uses.get(source, 0) > 1:
+                    shared.setdefault(source, []).append(identity)
+            sampling = {self._book_source(i) for i, (_, _, stage) in self.pending.items()
+                        if stage == "book" and i in self.bindings}
             # A single paired retry can repair skew introduced by a slow book response.
             # Subsequent attempts resume their normal position in the rotation.
             retries = {pair for pair in self.round_remaining - self.skew_retried
@@ -1249,8 +1293,7 @@ class ScannerRuntime:
             routes = [pair for pair, sampled in self.coverage_routes.items()
                       if pair in self.round_remaining or sampled is None or now-sampled >= console.max_age_ns//2
                       or edges.get(pair) is None or edges[pair] > 0]
-            routes.sort(key=lambda pair: (pair not in retries, self.attempted.get(pair, -1),
-                                          -(edges.get(pair) or 0), pair))
+            routes.sort(key=lambda pair: (self.attempted.get(pair, -1), -(edges.get(pair) or 0), pair))
             active = set(self.pending) | {i for i, worker in self.workers.items() if worker is not None}
             protected = set()
             singles = sorted((self.diagnostic_markets | external) - self.paired_markets,
@@ -1263,8 +1306,10 @@ class ScannerRuntime:
                 if any(i in self.pending for i in pair):
                     protected.update(pair)
                     continue
-                endpoints = tuple(self._quote_source(self.bindings[i])[1] for i in pair)
-                warming = [i for i in pair if self.workers[i] is None
+                reused = (self._reusable_book(pair, now, times, shared)
+                          if len(pair) == 2 and pair not in retries else None)
+                sampled_legs = tuple(i for i in pair if reused is None or i != reused[0])
+                warming = [i for i in sampled_legs if self.workers[i] is None
                            or self._needs_rotation(self.workers[i])
                            or now >= self.workers[i][2]["next_metadata_ns"]]
                 if warming and warmed is not None:
@@ -1272,17 +1317,28 @@ class ScannerRuntime:
                 if self.thread is not None and any(i in self.failures and
                         now - self.touched[i] < SCAN_MAINTENANCE_SECONDS * 1_000_000_000 for i in warming):
                     continue
-                wanted = warming or pair
+                wanted = warming or sampled_legs
+                sources = {self._book_source(i) for i in pair}
+                if not warming and sources & sampling:
+                    continue
+                endpoints = tuple(self._quote_source(self.bindings[i])[1] for i in sampled_legs)
                 if sum(inflight.values()) + len(wanted) > ACTIVE_BOOKS or any(
                         inflight.get(i[0], 0) >= VENUE_CONCURRENCY for i in wanted):
+                    if not warming:
+                        protected.update(sampled_legs)
                     continue
                 if any(self._quote_source(self.bindings[i]) in self.quote_pending
                        and self._quote_source(self.bindings[i]) not in self.quotes for i in pair):
                     continue
-                idle = active - self.pending.keys() - protected - set(pair)
-                # Leave room for both legs while either leg is warming.
-                needed = max(0, len(active.union(pair)) - ACTIVE_BOOKS)
-                if needed > len(idle) or not self._request_ready(endpoints):
+                idle = active - self.pending.keys() - protected - set(sampled_legs)
+                # Leave room for the legs that need workers while either leg is warming.
+                needed = max(0, len(active.union(sampled_legs)) - ACTIVE_BOOKS)
+                if needed > len(idle):
+                    continue
+                if not self._request_ready(endpoints):
+                    # Keep a ready route's workers through ordinary request pacing.
+                    if not warming and backing_off and not backing_off(endpoints):
+                        protected.update(sampled_legs)
                     continue
                 for victim in sorted(idle, key=lambda i: (self.touched.get(i, 0), i))[:needed]:
                     self._close_worker(self.workers[victim])
@@ -1290,12 +1346,22 @@ class ScannerRuntime:
                     active.remove(victim)
                 protected.update(pair)
                 admit = (paired_book_admission(endpoints)
-                         if not warming and len(pair) == 2 and paired_book_admission else None)
-                if len(pair) == 2 and (not warming or any(i in self.failures for i in warming)):
-                    self.dispatch += 1
-                    self.attempted[pair] = self.dispatch
-                    if not warming and pair in retries:
-                        self.skew_retried.add(pair)
+                         if not warming and len(wanted) == 2 and paired_book_admission else None)
+                if not warming:
+                    sampling.update(self._book_source(i) for i in wanted)
+                    if reused is not None:
+                        identity, owner = reused
+                        if owner != identity:
+                            self.observations[identity] = replace(self._observation(identity),
+                                book=self.observations[owner].book, continuous=True)
+                            self.evidence[identity] = dict(self.evidence[owner],
+                                asset_basis=self._asset_basis(self.bindings[identity]))
+                    if len(pair) == 2:
+                        # Rewarming a recovered leg does not move its route to the back.
+                        self.dispatch += 1
+                        self.attempted[pair] = self.dispatch
+                        if pair in retries:
+                            self.skew_retried.add(pair)
                 for identity in wanted:
                     active.add(identity)
                     self.touched[identity] = now
@@ -1317,7 +1383,9 @@ class ScannerRuntime:
             a, z = (times.get(i) for i in pair)
             books = (a, z) if a is not None and z is not None and all(
                 self.observations[i].continuous for i in pair) else None
-            if books is not None and abs(a-z) <= self.console.max_skew_ns:
+            aligned = (books is not None and all(self._book_healthy(i, now) for i in pair)
+                       and abs(a-z) <= self.console.max_skew_ns and 0 <= now-min(a, z) < self.console.max_age_ns)
+            if aligned:
                 cutoff = min(a, z)
                 if sampled is None or cutoff > sampled:
                     sampled = cutoff
@@ -1328,10 +1396,7 @@ class ScannerRuntime:
             if any(i in self.failures or i in self.source.unavailable or
                    (i in self.observations and not self.observations[i].continuous) for i in pair):
                 state = "unevaluable"
-            elif sampled is not None and a is not None and z is not None and min(a, z) == sampled and (
-                    0 <= now-sampled < self.console.max_age_ns and abs(a-z) <= self.console.max_skew_ns
-                    and all(self.observations[i].continuous and
-                            self.observations[i].rules.valid_from_ns <= now < self.observations[i].rules.valid_until_ns for i in pair)):
+            elif aligned and min(a, z) == sampled:
                 state = "fresh"
             elif sampled is not None:
                 state = "expired"
